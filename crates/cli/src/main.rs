@@ -295,6 +295,11 @@ enum PolicyCmd {
         /// (repeatable). Personal data is never published in plaintext.
         #[arg(long = "seal-field")]
         seal_fields: Vec<String>,
+        /// Cap entries per author in a namespace: NS:N (repeatable). N=1
+        /// means one-per-author - one ballot per voter in an election
+        /// namespace; duplicates are denied at admission.
+        #[arg(long = "max-per-author")]
+        max_per_author: Vec<String>,
         /// Accept no new entries at all (pure view/witness mirror)
         #[arg(long)]
         readonly: bool,
@@ -686,6 +691,9 @@ fn print_policy(policy: &WritePolicy) {
                 rule.require_sealed.join(", ")
             ));
         }
+        if let Some(cap) = rule.max_entries_per_author {
+            line.push_str(&format!("   [max {cap} entries per author]"));
+        }
         println!("{line}");
     }
     if !policy.readonly {
@@ -764,7 +772,28 @@ fn parse_rule(spec: &str) -> Result<datu_store::NamespaceRule, String> {
             bind_field,
         }],
         require_sealed: vec![],
+        max_entries_per_author: None,
     })
+}
+
+/// Parse `NS:N` into (namespace, max entries per author) for per-author caps.
+fn parse_max_per_author(spec: &str) -> Result<(String, u32), String> {
+    let (ns, n) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("bad --max-per-author '{spec}': expected NS:N"))?;
+    if ns.trim().is_empty() {
+        return Err(format!("bad --max-per-author '{spec}': namespace must be non-empty"));
+    }
+    let cap: u32 = n
+        .trim()
+        .parse()
+        .map_err(|_| format!("bad --max-per-author '{spec}': N must be a number"))?;
+    if cap == 0 {
+        return Err(format!(
+            "bad --max-per-author '{spec}': N must be at least 1 (0 would reject everyone)"
+        ));
+    }
+    Ok((ns.trim().to_string(), cap))
 }
 
 /// Parse `NS:FIELD` into (namespace, field) for required encryption.
@@ -1902,6 +1931,7 @@ fn cmd_policy_init(
     require_roles: Vec<String>,
     rule_specs: Vec<String>,
     seal_field_specs: Vec<String>,
+    max_per_author_specs: Vec<String>,
     readonly: bool,
 ) -> Result<(), String> {
     for key in attestors.iter().chain(writers.iter()) {
@@ -1923,6 +1953,19 @@ fn cmd_policy_init(
                 ns,
                 require: vec![],
                 require_sealed: vec![field],
+                max_entries_per_author: None,
+            }),
+        }
+    }
+    for spec in &max_per_author_specs {
+        let (ns, cap) = parse_max_per_author(spec)?;
+        match rules.iter_mut().find(|existing| existing.ns == ns) {
+            Some(existing) => existing.max_entries_per_author = Some(cap),
+            None => rules.push(datu_store::NamespaceRule {
+                ns,
+                require: vec![],
+                require_sealed: vec![],
+                max_entries_per_author: Some(cap),
             }),
         }
     }
@@ -2280,6 +2323,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 require_roles,
                 rules,
                 seal_fields,
+                max_per_author,
                 readonly,
             } => cmd_policy_init(
                 &cli.data_dir,
@@ -2290,6 +2334,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 require_roles.clone(),
                 rules.clone(),
                 seal_fields.clone(),
+                max_per_author.clone(),
                 *readonly,
             ),
             PolicyCmd::Show => cmd_policy_show(&cli.data_dir),

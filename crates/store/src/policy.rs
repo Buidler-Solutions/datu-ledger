@@ -94,6 +94,13 @@ pub struct NamespaceRule {
     /// leak); a present field that is not sealed is denied.
     #[serde(default)]
     pub require_sealed: Vec<String>,
+    /// If set, an author may have at most this many entries in this exact
+    /// namespace (a glob rule caps every namespace it matches separately -
+    /// the count is per namespace, not across the pattern). `1` =
+    /// one-per-author: one ballot per voter, one claim per parcel. Duplicates
+    /// are denied at admission, not just caught by recounts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_entries_per_author: Option<u32>,
 }
 
 pub const POLICY_VERSION: u8 = 1;
@@ -159,6 +166,8 @@ impl Store {
     ///    published in plaintext: each listed field that is present must be
     ///    a `datu-sealed-*` object (the holder's name is ciphertext for the
     ///    registry office and the holder - nobody else).
+    /// 4. if `rules[].max_entries_per_author` is set, an author over the cap
+    ///    in that namespace is denied - one ballot per voter, at admission.
     pub fn gate(&self, entry: &Entry) -> StoreResult<()> {
         let policy = match &self.policy {
             Some(p) => p,
@@ -201,7 +210,12 @@ impl Store {
             .iter()
             .flat_map(|rule| rule.require_sealed.iter())
             .collect();
-        if required.is_empty() && sealed_fields.is_empty() {
+        // The strictest per-author cap among matching rules wins.
+        let cap = matching
+            .iter()
+            .filter_map(|rule| rule.max_entries_per_author)
+            .min();
+        if required.is_empty() && sealed_fields.is_empty() && cap.is_none() {
             return Ok(());
         }
         let document = match SignedDocument::from_payload(&entry.body.payload) {
@@ -289,6 +303,17 @@ impl Store {
                         , entry.body.namespace)));
                     }
                 }
+            }
+        }
+        if let Some(cap) = cap {
+            let already =
+                self.count_by_author_in_namespace(&entry.body.namespace, &entry.body.author)?;
+            if already >= u64::from(cap) {
+                return Err(StoreError::Denied(format!(
+                    "namespace '{}' admits at most {cap} entries per author: {} already has {already} - one ballot per voter, duplicates are denied at admission instead of being left to recounts",
+                    entry.body.namespace,
+                    &entry.body.author[..16.min(entry.body.author.len())]
+                )));
             }
         }
         Ok(())

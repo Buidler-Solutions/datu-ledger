@@ -506,6 +506,21 @@ impl Store {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
+    /// How many entries this author already has in this exact namespace -
+    /// the basis for `max_entries_per_author` policy caps (one ballot per
+    /// voter in an election namespace).
+    pub fn count_by_author_in_namespace(
+        &self,
+        namespace: &str,
+        author: &str,
+    ) -> StoreResult<u64> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM entries WHERE namespace = ?1 AND author = ?2")?;
+        let count: u64 = stmt.query_row(params![namespace, author], |row| row.get(0))?;
+        Ok(count)
+    }
+
     pub fn entry_ids(&self) -> StoreResult<Vec<[u8; 32]>> {
         let mut stmt = self.conn.prepare("SELECT id FROM entries")?;
         let rows = stmt.query_map([], |row| {

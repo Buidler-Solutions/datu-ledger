@@ -44,12 +44,15 @@ impl Keys {
     }
 
     fn attest(&self, subject: &str) -> Entry {
+        self.attest_at(subject, 0, None)
+    }
+
+    fn attest_at(&self, subject: &str, seq: u64, prev: Option<[u8; 32]>) -> Entry {
         let doc = AttestationDoc {
             subject: subject.to_string(),
             label: Some("Acme Ltd".into()),
             claims: serde_json::json!({"role": "bidder"}),
         };
-        let seq = 0;
         let body = EntryBody {
             version: datu_core::ENTRY_VERSION,
             author: String::new(),
@@ -57,7 +60,7 @@ impl Keys {
             pq_alg: String::new(),
             namespace: "identity.attest".to_string(),
             seq,
-            prev: None,
+            prev,
             refs: vec![],
             timestamp_ms: 1,
             payload: doc.payload_bytes().unwrap(),
@@ -350,6 +353,7 @@ fn policy_json_roundtrip_and_validation() {
                 bind_field: Some("holder_key".into()),
             }],
             require_sealed: vec!["holder_name".into()],
+            max_entries_per_author: Some(1),
         }],
     };
     let json = policy.to_json().unwrap();
@@ -366,6 +370,14 @@ fn policy_json_roundtrip_and_validation() {
     )
     .unwrap();
     assert!(old_rule.rules[0].require_sealed.is_empty());
+    assert_eq!(old_rule.rules[0].max_entries_per_author, None);
+    // Hand-written one-per-author rule parses.
+    let capped = WritePolicy::from_json(
+        r#"{"version": 1, "gated": ["gov.*"], "rules": [{"ns": "gov.election.ballots", "max_entries_per_author": 1}]}"#,
+    )
+    .unwrap();
+    assert_eq!(capped.rules[0].max_entries_per_author, Some(1));
+    assert!(capped.rules[0].require.is_empty());
 }
 
 fn rule(ns: &str, role: &str, key: Option<&str>, bind_field: Option<&str>) -> NamespaceRule {
@@ -377,6 +389,7 @@ fn rule(ns: &str, role: &str, key: Option<&str>, bind_field: Option<&str>) -> Na
             bind_field: bind_field.map(str::to_string),
         }],
         require_sealed: vec![],
+        max_entries_per_author: None,
     }
 }
 
@@ -569,4 +582,165 @@ fn personal_fields_must_be_encrypted() {
             &serde_json::to_vec(&bare).unwrap()
         ))
         .unwrap());
+}
+
+#[test]
+fn one_ballot_per_voter_is_enforced_at_admission() {
+    let registry = Keys::new();
+    let voter = Keys::new();
+    let other_voter = Keys::new();
+    let mut policy = gated_policy(vec![registry.hex()], &["gov.*"]);
+    policy.rules = vec![NamespaceRule {
+        ns: "gov.election.ballots".into(),
+        require: vec![RoleRule {
+            role: "voter".into(),
+            key: None,
+            bind_field: Some("voter_key".into()),
+        }],
+        require_sealed: vec![],
+        max_entries_per_author: Some(1),
+    }];
+    let store = gated_store(policy);
+
+    // The registry vouches for both voters (attested-by-root admission);
+    // its own seq chain must advance between attestations.
+    let first_attestation = registry.attest(&voter.hex());
+    assert!(store.insert_entry(&first_attestation).unwrap());
+    let first_attestation_id = first_attestation.id().unwrap();
+    assert!(store
+        .insert_entry(&registry.attest_at(&other_voter.hex(), 1, Some(first_attestation_id)))
+        .unwrap());
+
+    // First ballot (party-signed by the voter, self-bound via voter_key): admitted.
+    let mut doc = SignedDocument::new(
+        "election.ballot",
+        serde_json::json!({"election": "ref-1", "voter_key": voter.hex(), "choice": "yes"}),
+    );
+    doc.sign("voter", &voter.ed, None).unwrap();
+    let ballot = voter.entry(
+        "gov.election.ballots",
+        0,
+        &serde_json::to_vec(&doc).unwrap(),
+    );
+    assert!(store.insert_entry(&ballot).unwrap());
+
+    // Same voter, properly chained second ballot (seq 1, prev = ballot 1):
+    // denied by the cap - one ballot per voter, at admission.
+    let ballot_id = ballot.id().unwrap();
+    let mut second_doc = SignedDocument::new(
+        "election.ballot",
+        serde_json::json!({"election": "ref-1", "voter_key": voter.hex(), "choice": "no"}),
+    );
+    second_doc.sign("voter", &voter.ed, None).unwrap();
+    let second = voter.entry_with_prev(
+        "gov.election.ballots",
+        1,
+        Some(ballot_id),
+        &serde_json::to_vec(&second_doc).unwrap(),
+    );
+    match store.insert_entry(&second) {
+        Err(StoreError::Denied(m)) => {
+            assert!(m.contains("at most 1 entries per author"), "message: {m}");
+            assert!(m.contains("already has 1"), "message: {m}");
+        }
+        other => panic!("expected Denied, got {other:?}"),
+    }
+
+    // A different voter's ballot is unaffected.
+    let mut other_doc = SignedDocument::new(
+        "election.ballot",
+        serde_json::json!({"election": "ref-1", "voter_key": other_voter.hex(), "choice": "yes"}),
+    );
+    other_doc.sign("voter", &other_voter.ed, None).unwrap();
+    assert!(store
+        .insert_entry(&other_voter.entry(
+            "gov.election.ballots",
+            0,
+            &serde_json::to_vec(&other_doc).unwrap(),
+        ))
+        .unwrap());
+
+    // The same voter may still write elsewhere - the cap is per namespace
+    // (the voter's global seq chain continues past the ballot).
+    assert!(store
+        .insert_entry(&voter.entry_with_prev(
+            "gov.records",
+            1,
+            Some(ballot_id),
+            b"unrelated record"
+        ))
+        .unwrap());
+}
+
+#[test]
+fn per_author_cap_counts_each_namespace_separately() {
+    let writer = Keys::new();
+    let mut policy = gated_policy(vec![], &["gov.*"]);
+    policy.writers = vec![writer.hex()];
+    policy.attestors = vec![Keys::new().hex()];
+    policy.rules = vec![NamespaceRule {
+        ns: "gov.titles.*".into(),
+        require: vec![],
+        require_sealed: vec![],
+        max_entries_per_author: Some(1),
+    }];
+    let store = gated_store(policy);
+
+    assert!(store.insert_entry(&writer.entry("gov.titles.a", 0, b"one")).unwrap());
+    // Second entry in the SAME namespace hits the cap…
+    let first_id = store.latest(&writer.hex()).unwrap().unwrap().id().unwrap();
+    let second = writer.entry_with_prev("gov.titles.a", 1, Some(first_id), b"two");
+    assert!(matches!(
+        store.insert_entry(&second),
+        Err(StoreError::Denied(_))
+    ));
+    // …but a different namespace matched by the same glob rule is a fresh
+    // count - the cap applies per namespace, not across the pattern. (The
+    // author's seq chain is global, so this entry chains to the last one.)
+    assert!(store
+        .insert_entry(&writer.entry_with_prev("gov.titles.b", 1, Some(first_id), b"one"))
+        .unwrap());
+}
+
+#[test]
+fn per_author_cap_survives_merges_and_deltas() {
+    // An open observer collected two same-author entries in a capped
+    // namespace (it accepts everything). The enforcing node must skip the
+    // duplicate when syncing, not crash and not store it.
+    let observer = Store::open_in_memory().unwrap();
+    let writer = Keys::new();
+    let first = writer.entry("gov.election.ballots", 0, b"ballot 1");
+    let first_id = first.id().unwrap();
+    let second = writer.entry_with_prev("gov.election.ballots", 1, Some(first_id), b"ballot 2");
+    assert!(observer.insert_entry(&first).unwrap());
+    assert!(observer.insert_entry(&second).unwrap());
+
+    let mut policy = gated_policy(vec![], &["gov.*"]);
+    policy.writers = vec![writer.hex()];
+    policy.attestors = vec![Keys::new().hex()];
+    policy.rules = vec![NamespaceRule {
+        ns: "gov.election.ballots".into(),
+        require: vec![],
+        require_sealed: vec![],
+        max_entries_per_author: Some(1),
+    }];
+    let gated = gated_store(policy);
+
+    let bundle = observer.export_bundle("").unwrap();
+    let summary = gated.import_bundle(&bundle, "").unwrap();
+    assert_eq!(summary.entries_new, 1);
+    assert_eq!(summary.entries_denied, 1);
+
+    // And over the delta/sync path too.
+    let empty = Store::open_in_memory().unwrap();
+    let request = empty.export_haves_request(0.001, "").unwrap();
+    let (response, _) = observer.answer_delta(&request, "").unwrap();
+    let summary = gated.merge_delta(&response, "").unwrap();
+    assert_eq!(summary.entries_denied, 1);
+    assert_eq!(
+        gated
+            .count_by_author_in_namespace("gov.election.ballots", &writer.hex())
+            .unwrap(),
+        1
+    );
 }
