@@ -13,7 +13,10 @@
 //!   GET  /v1/feed/{author}     author's feed + head (for dApps building a
 //!                              sign request: seq/prev of the next entry)
 //!   GET  /v1/checkpoints       every signer's latest witness root
-//!   POST /v1/entries           submit a signed entry (JSON, base64 payload)
+//!   GET  /v1/conflicts         recorded feed disputes (preserved evidence)
+//!   GET  /v1/conflict/{id}     full incoming entry of one dispute
+//!   POST /v1/entries           submit a signed entry (JSON, base64 payload;
+//!                              rate-limited per peer IP, 429 + Retry-After)
 //!   POST /v1/sync/haves        set-reconciliation: send a Bloom filter of
 //!                              the ids you have, receive what you lack
 
@@ -26,13 +29,68 @@ use datu_store::{Store, StoreError, WritePolicy};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub use datu_wallet::wire::{entry_from_submission, entry_full_json};
 
 /// Hard cap on an HTTP request body (a single entry JSON is ≤ ~350 KB).
 pub const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
-pub fn serve(data_dir: &Path, addr: &str, policy: Option<WritePolicy>) -> Result<(), String> {
+/// Default per-peer submission budget for `POST /v1/entries`.
+pub const DEFAULT_SUBMIT_PER_MIN: usize = 60;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Per-peer sliding-window limiter on the one unauthenticated write route -
+/// spam resistance without accounts or tokens. `per_min == 0` disables it.
+pub struct SubmitLimiter {
+    per_min: usize,
+    hits: Mutex<std::collections::HashMap<String, Vec<u64>>>,
+}
+
+impl SubmitLimiter {
+    pub fn new(per_min: usize) -> Self {
+        SubmitLimiter {
+            per_min,
+            hits: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// `None` = allowed (and counted); `Some(retry_after_secs)` = this peer
+    /// is over the window. Fails open: this is spam shaping, not a security
+    /// boundary - every submission still verifies cryptographically.
+    pub fn check(&self, peer: &str, now_ms: u64) -> Option<u64> {
+        if self.per_min == 0 {
+            return None;
+        }
+        const WINDOW_MS: u64 = 60_000;
+        let mut hits = self.hits.lock().ok()?;
+        let window = hits.entry(peer.to_string()).or_default();
+        window.retain(|t| now_ms.saturating_sub(*t) < WINDOW_MS);
+        if window.len() >= self.per_min {
+            let oldest = window.first().copied().unwrap_or(now_ms);
+            let retry = WINDOW_MS - now_ms.saturating_sub(oldest);
+            return Some((retry / 1000).max(1));
+        }
+        window.push(now_ms);
+        if hits.len() > 10_000 {
+            hits.retain(|_, w| !w.is_empty());
+        }
+        None
+    }
+}
+
+pub fn serve(
+    data_dir: &Path,
+    addr: &str,
+    policy: Option<WritePolicy>,
+    submit_per_min: usize,
+) -> Result<(), String> {
     // Fail fast if there is no node to serve.
     let store = Store::open_with_policy(&data_dir.join("node.db"), policy.clone())
         .map_err(|e| e.to_string())?;
@@ -67,9 +125,13 @@ pub fn serve(data_dir: &Path, addr: &str, policy: Option<WritePolicy>) -> Result
     }
     println!("  explorer:  http://{addr}/");
     println!("  submit:    POST http://{addr}/v1/entries   (signed entry JSON)");
+    if submit_per_min > 0 {
+        println!("  limits:    {submit_per_min} submissions/min per peer IP (--submit-per-min, 0 = off)");
+    }
     println!("  feed head: GET  http://{addr}/v1/feed/{{author}}");
     println!("ctrl-c to stop");
     let dir = data_dir.to_path_buf();
+    let limiter = (submit_per_min > 0).then(|| Arc::new(SubmitLimiter::new(submit_per_min)));
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(s) => s,
@@ -78,8 +140,9 @@ pub fn serve(data_dir: &Path, addr: &str, policy: Option<WritePolicy>) -> Result
         let dir = dir.clone();
         let policy = policy.clone();
         let network = network.clone();
+        let limiter = limiter.clone();
         std::thread::spawn(move || {
-            let _ = handle(stream, &dir, policy, network);
+            let _ = handle(stream, &dir, policy, network, limiter);
         });
     }
     Ok(())
@@ -90,9 +153,10 @@ fn handle(
     data_dir: &PathBuf,
     policy: Option<WritePolicy>,
     network: Option<NetworkPolicy>,
+    limiter: Option<Arc<SubmitLimiter>>,
 ) -> Result<(), String> {
     let mut stream = stream;
-    if let Err(e) = handle_inner(&mut stream, data_dir, policy, network) {
+    if let Err(e) = handle_inner(&mut stream, data_dir, policy, network, limiter) {
         let _ = respond_json(&mut stream, "400 Bad Request", &serde_json::json!({ "error": e }));
     }
     Ok(())
@@ -103,6 +167,7 @@ fn handle_inner(
     data_dir: &PathBuf,
     policy: Option<WritePolicy>,
     network: Option<NetworkPolicy>,
+    limiter: Option<Arc<SubmitLimiter>>,
 ) -> Result<(), String> {
     let request = match read_request(stream) {
         Some(r) => r,
@@ -151,6 +216,7 @@ fn handle_inner(
                 "feeds": report.feeds,
                 "checkpoints": report.checkpoints,
                 "pending_links": report.pending_links,
+                "conflicts": report.conflicts,
                 "policy": policy,
                 "network": network,
             });
@@ -234,7 +300,68 @@ fn handle_inner(
                 .collect::<Result<_, String>>()?;
             respond_json(stream, "200 OK", &serde_json::json!({ "witnesses": items }))
         }
+        ("GET", "/v1/conflicts") => {
+            let count = store.conflicts_count().map_err(|e| e.to_string())?;
+            let items: Vec<serde_json::Value> = store
+                .list_conflicts(200)
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "id": hex::encode(c.id),
+                        "author": c.author,
+                        "namespace": c.namespace,
+                        "seq": c.seq,
+                        "stored_id": hex::encode(c.stored_id),
+                        "timestamp_ms": c.timestamp_ms,
+                    })
+                })
+                .collect();
+            respond_json(stream, "200 OK", &serde_json::json!({
+                "conflicts": items, "count": count,
+            }))
+        }
+        ("GET", c) if c.starts_with("/v1/conflict/") => {
+            let id_hex = &c["/v1/conflict/".len()..];
+            match hex::decode(id_hex)
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            {
+                Some(id) => match store.conflict_entry(&id).map_err(|e| e.to_string())? {
+                    Some(entry) => {
+                        let mut json = entry_full_json(&entry)?;
+                        if let Some(obj) = json.as_object_mut() {
+                            obj.insert(
+                                "conflicts_with".into(),
+                                serde_json::json!("this entry lost (author, seq) to a stored entry - both are signed by the same author; at least one history is fabricated"),
+                            );
+                        }
+                        respond_json(stream, "200 OK", &json)
+                    }
+                    None => respond_json(stream, "404 Not Found", &serde_json::json!({"error":"no recorded conflict with that id"})),
+                },
+                None => respond_json(stream, "400 Bad Request", &serde_json::json!({"error":"bad conflict id"})),
+            }
+        }
         ("POST", "/v1/entries") => {
+            if let Some(limiter) = &limiter {
+                let peer = stream
+                    .peer_addr()
+                    .map(|a| a.ip().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
+                if let Some(retry_after) = limiter.check(&peer, now_ms()) {
+                    return respond_json_retry(
+                        stream,
+                        "429 Too Many Requests",
+                        retry_after,
+                        &serde_json::json!({
+                            "ok": false,
+                            "error": "submission rate limit exceeded for this peer",
+                            "retry_after_s": retry_after,
+                        }),
+                    );
+                }
+            }
             let submission: serde_json::Value =
                 serde_json::from_slice(&body).map_err(|e| format!("bad JSON: {e}"))?;
             let entry = entry_from_submission(&submission)?;
@@ -252,6 +379,23 @@ fn handle_inner(
                     stream,
                     "403 Forbidden",
                     &serde_json::json!({ "ok": false, "denied": m }),
+                ),
+                Err(StoreError::Conflict { author, seq, existing, incoming }) => respond_json(
+                    stream,
+                    "409 Conflict",
+                    &serde_json::json!({
+                        "ok": false,
+                        "rejected": format!(
+                            "feed conflict for {author} seq {seq}: stored {} vs incoming {} - rewrite/fork attempt",
+                            hex::encode(existing), hex::encode(incoming)
+                        ),
+                        "conflict": {
+                            "author": author, "seq": seq,
+                            "stored_id": hex::encode(existing),
+                            "incoming_id": hex::encode(incoming),
+                            "evidence_recorded": true,
+                        },
+                    }),
                 ),
                 Err(e) => respond_json(stream, "409 Conflict", &serde_json::json!({
                     "ok": false, "rejected": e.to_string(),
@@ -456,6 +600,23 @@ fn respond_json(stream: &mut TcpStream, status: &str, value: &serde_json::Value)
     respond(stream, status, "application/json; charset=utf-8", &body)
 }
 
+fn respond_json_retry(
+    stream: &mut TcpStream,
+    status: &str,
+    retry_after_s: u64,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let body = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nRetry-After: {retry_after_s}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(body.as_bytes()))
+        .map_err(|e| e.to_string())
+}
+
 const EXPLORER_HTML: &str = r##"<!doctype html>
 <html><head><meta charset="utf-8"><title>DATU Ledger Explorer</title>
 <style>
@@ -468,10 +629,12 @@ const EXPLORER_HTML: &str = r##"<!doctype html>
  input{background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:.4rem;border-radius:6px;width:340px}
  button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:.4rem 1rem;border-radius:6px;cursor:pointer}
  .tag{background:#1f6feb33;color:#79c0ff;border-radius:4px;padding:0 .35rem;font-size:.7rem}
+ #disputes{display:none;background:#f8514922;border:1px solid #f8514966;color:#ffa198;border-radius:6px;padding:.6rem 1rem;margin-top:1rem;font-size:.8rem}
 </style></head><body>
 <h1>DATU Ledger Explorer <span class="tag">self-verifying mirror</span></h1>
 <div><input id="q" placeholder="entry id (64 hex) or author (64 hex)"><button onclick="search()">load</button>
-<button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button></div>
+<button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button> <button onclick="loadConflicts()">disputes</button></div>
+<div id="disputes"></div>
 <table id="rows"><tr><th>id</th><th>author</th><th>namespace</th><th>seq</th><th>payload</th></tr></table>
 <div id="detail"></div>
 <script>
@@ -485,7 +648,7 @@ async function loadEntries(){
  (d.entries||[]).forEach(e=>{const tr=document.createElement('tr');
   tr.innerHTML=`<td><a href="#" onclick="show('${e.id}');return false">${short(e.id)}</a></td><td>${short(e.author)}</td><td>${esc(e.namespace)}</td><td>${e.seq}</td><td>${esc(e.payload_preview.slice(0,80))}</td>`;
   rows.appendChild(tr)})}
-async function show(id){const e=await j('/v1/entry/'+id);
+async function show(id){let e=await j('/v1/entry/'+id);if(e.error)e=await j('/v1/conflict/'+id);
  const d=document.getElementById('detail');d.style.display='block';
  const p=atob(e.payload_base64||'');d.textContent=JSON.stringify(e,null,2)+'\n\npayload:\n'+p}
 async function search(){const q=document.getElementById('q').value.trim();
@@ -504,6 +667,148 @@ async function loadWitnesses(){const d=await j('/v1/checkpoints');
  (d.witnesses||[]).forEach(w=>{const tr=document.createElement('tr');
   tr.innerHTML=`<td>${short(w.signer)}</td><td>${w.height}</td><td>${w.entries_count}</td><td>${esc(w.entry_ids_root)}</td>`;
   rows.appendChild(tr)})}
+async function checkDisputes(){const d=await j('/v1/conflicts');
+ const el=document.getElementById('disputes');
+ if(!d.count){el.style.display='none';return}
+ el.style.display='block';
+ el.textContent='⚠ '+d.count+' disputed feed record(s) - conflicting signed history preserved as evidence (disputes view lists them)'}
+async function loadConflicts(){const d=await j('/v1/conflicts');
+ const el=document.getElementById('disputes');
+ if(!d.count){el.style.display='none';el.textContent='';return}
+ el.style.display='block';
+ el.textContent='⚠ '+d.count+' disputed feed record(s) - conflicting signed history preserved as evidence';
+ const rows=document.getElementById('rows');
+ rows.innerHTML='<tr><th>disputed author</th><th>seq</th><th>stored id</th><th>conflicting id</th><th>namespace</th></tr>';
+ (d.conflicts||[]).forEach(c=>{const tr=document.createElement('tr');
+  tr.innerHTML=`<td>${short(c.author)}</td><td>${c.seq}</td><td><a href="#" onclick="show('${c.stored_id}');return false">${short(c.stored_id)}</a></td><td><a href="#" onclick="show('${c.id}');return false">${short(c.id)}</a></td><td>${esc(c.namespace)}</td>`;
+  rows.appendChild(tr)})}
 loadEntries();
+checkDisputes();
 </script></body></html>
 "##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datu_core::{Entry, EntryBody};
+    use datu_wallet::wire::entry_full_json;
+
+    fn signed(seq: u64, prev: Option<[u8; 32]>, payload: &[u8]) -> Entry {
+        let ed = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let pq = datu_core::pq::keypair().unwrap().1;
+        let body = EntryBody {
+            version: datu_core::ENTRY_VERSION,
+            author: String::new(),
+            author_pq: String::new(),
+            pq_alg: String::new(),
+            namespace: "gov.records".into(),
+            seq,
+            prev,
+            refs: vec![],
+            timestamp_ms: 1,
+            payload: payload.to_vec(),
+        };
+        Entry::sign(body, &ed, &pq).unwrap()
+    }
+
+    fn http(port: u16, method: &str, path: &str, body: &str) -> (String, String) {
+        use std::io::Read;
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(
+                format!(
+                    "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        let mut parts = raw.splitn(2, "\r\n");
+        let status = parts.next().unwrap_or("").to_string();
+        let rest = parts.next().unwrap_or("").to_string();
+        let body = rest.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+        (status, body)
+    }
+
+    #[test]
+    fn submit_limiter_sliding_window() {
+        let limiter = SubmitLimiter::new(2);
+        assert_eq!(limiter.check("a", 1_000), None);
+        assert_eq!(limiter.check("a", 2_000), None);
+        assert!(limiter.check("a", 3_000).is_some(), "third hit in window denied");
+        assert_eq!(limiter.check("b", 3_000), None, "budget is per peer");
+        assert_eq!(limiter.check("a", 61_500), None, "window has slid");
+        let off = SubmitLimiter::new(0);
+        for _ in 0..10 {
+            assert_eq!(off.check("a", 1), None, "0 = unlimited");
+        }
+    }
+
+    #[test]
+    fn http_conflict_evidence_and_rate_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let data = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            let _ = serve(&data, &format!("127.0.0.1:{port}"), None, 5);
+        });
+        let mut ready = false;
+        for _ in 0..200 {
+            if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
+                drop(s);
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(ready, "serve did not come up");
+
+        let original = signed(0, None, b"original");
+        let rewrite = signed(0, None, b"rewritten");
+        let submit = serde_json::to_string(&entry_full_json(&original).unwrap()).unwrap();
+        let (status, _) = http(port, "POST", "/v1/entries", &submit);
+        assert!(status.contains("201"), "first insert: {status}");
+        let (status, _) = http(port, "POST", "/v1/entries", &submit);
+        assert!(status.contains("200"), "idempotent duplicate: {status}");
+
+        let conflicting = serde_json::to_string(&entry_full_json(&rewrite).unwrap()).unwrap();
+        let (status, body) = http(port, "POST", "/v1/entries", &conflicting);
+        assert!(status.contains("409"), "conflict rejected: {status}");
+        assert!(body.contains("evidence_recorded"), "409 body names the evidence");
+
+        let (status, body) = http(port, "GET", "/v1/conflicts", "");
+        assert!(status.contains("200"));
+        let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(listing["count"].as_u64(), Some(1));
+        let conflict_id = listing["conflicts"][0]["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            listing["conflicts"][0]["stored_id"].as_str().map(str::to_string),
+            Some(hex::encode(original.id().unwrap()))
+        );
+
+        let (status, body) = http(port, "GET", &format!("/v1/conflict/{conflict_id}"), "");
+        assert!(status.contains("200"), "status: {status}");
+        assert!(
+            body.contains(&rewrite.body.author),
+            "recorded evidence names the author"
+        );
+
+        let (status, body) = http(port, "GET", "/v1/status", "");
+        assert!(status.contains("200"));
+        assert!(body.contains("\"conflicts\": 1"));
+
+        for i in 0..4 {
+            let (status, body) = http(port, "POST", "/v1/entries", &submit);
+            if i < 2 {
+                assert!(status.contains("200"), "within budget: {status}");
+            } else {
+                assert!(status.contains("429"), "over budget must 429: {status}");
+                assert!(body.contains("retry_after_s"));
+            }
+        }
+    }
+}

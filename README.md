@@ -198,7 +198,13 @@ ledger explorer at `/` (entries, search, witnesses - read-only mirror-node view)
 - `POST /v1/entries` - submission contract: the node accepts only fully-signed
   entries (Ed25519 + ML-DSA-65 both verified server-side); `201` inserted,
   `200` duplicate (idempotent), `403` denied by this node's writer policy,
-  `409` rejected as fork evidence
+  `409` rejected as fork evidence (the losing side is preserved and listed at
+  `/v1/conflicts`), `429` over the per-peer submission budget
+  (`--submit-per-min`, default 60/min, 0 = off; `Retry-After` header)
+- `GET /v1/conflicts` - recorded feed disputes: both signed sides of every
+  `(author, seq)` collision this node has seen (evidence, never resolution);
+  `GET /v1/conflict/{id}` serves the full losing entry; the explorer shows a
+  disputes banner + view
 - `POST /v1/sync/haves` - bloom-filter reconciliation over HTTP
   (`{m, k, bits_b64, cursor, limit}` → `{entries[], cursor, more, checkpoints[]}`;
   the same exchange also runs over raw TCP and over files - see transports)
@@ -521,7 +527,8 @@ and third parties can read only the commitments.
 
 **Prevented:** undetected modification or deletion of any record; forged
 authorship; feed rewrites (same author+seq with different content is rejected
-as fork evidence); contradictory checkpoints from the same signer.
+as fork evidence - and the losing side is preserved, listed at
+`/v1/conflicts`); contradictory checkpoints from the same signer.
 
 **Detected, not prevented:** a node deleting its own data (detectable by anyone
 who replicated it or holds its checkpoints - that's what replication and

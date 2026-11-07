@@ -303,6 +303,25 @@ pub struct VerifyReport {
     /// their merkle roots diverge from every code-abiding witness, which is
     /// fork evidence.
     pub lineage: bool,
+    /// Feed conflicts recorded as evidence: an admitted author signed two
+    /// different entries at the same (author, seq). Both sides are preserved
+    /// - the stored one in `entries`, the incoming one in `conflicts` - so
+    /// the dispute is visible, not silently resolved.
+    pub conflicts: u64,
+}
+
+/// One preserved side of a feed dispute: the incoming entry (id, its bytes
+/// retrievable via [`Store::conflict_entry`]) that lost the race for
+/// `(author, seq)` to `stored_id`. Both entries are fully signed by the same
+/// author - at least one history is fabricated, and the pair is the evidence.
+#[derive(Debug, Clone)]
+pub struct ConflictRecord {
+    pub id: [u8; 32],
+    pub author: String,
+    pub namespace: String,
+    pub seq: u64,
+    pub stored_id: [u8; 32],
+    pub timestamp_ms: u64,
 }
 
 const ENTRY_COLS: &str = "id, author, namespace, seq, ts, body, signature, pq_signature";
@@ -340,6 +359,22 @@ CREATE TRIGGER IF NOT EXISTS checkpoints_immutable_update BEFORE UPDATE ON check
 BEGIN SELECT RAISE(ABORT, 'checkpoints are append-only (immutable)'); END;
 CREATE TRIGGER IF NOT EXISTS checkpoints_immutable_delete BEFORE DELETE ON checkpoints
 BEGIN SELECT RAISE(ABORT, 'checkpoints are append-only (immutable)'); END;
+CREATE TABLE IF NOT EXISTS conflicts (
+  ord INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BLOB NOT NULL UNIQUE,
+  author TEXT NOT NULL,
+  namespace TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  stored_id BLOB NOT NULL,
+  ts INTEGER NOT NULL,
+  body BLOB NOT NULL,
+  signature BLOB NOT NULL,
+  pq_signature BLOB NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS conflicts_immutable_update BEFORE UPDATE ON conflicts
+BEGIN SELECT RAISE(ABORT, 'conflicts are append-only (immutable)'); END;
+CREATE TRIGGER IF NOT EXISTS conflicts_immutable_delete BEFORE DELETE ON conflicts
+BEGIN SELECT RAISE(ABORT, 'conflicts are append-only (immutable)'); END;
 ";
 
 fn sql_invalid(col: usize) -> rusqlite::Error {
@@ -606,10 +641,12 @@ impl Store {
             self.gate(entry)?;
         }
         if let Some(existing) = self.entry_by_author_seq(&entry.body.author, entry.body.seq)? {
+            let existing_id = existing.id().map_err(StoreError::Core)?;
+            let _ = self.record_conflict(entry, &id, &existing_id);
             return Err(StoreError::Conflict {
                 author: entry.body.author.clone(),
                 seq: entry.body.seq,
-                existing: existing.id().map_err(StoreError::Core)?,
+                existing: existing_id,
                 incoming: id,
             });
         }
@@ -643,6 +680,83 @@ impl Store {
             ],
         )?;
         Ok(true)
+    }
+
+    /// Preserve the losing side of a feed conflict as standalone evidence:
+    /// the incoming entry already passed full verification (both hybrid
+    /// signatures), so the stored bytes re-verify with zero other context.
+    /// Best-effort by design - a recording failure must never mask the
+    /// `Conflict` error that fork handling depends on. Replays of the same
+    /// conflicting entry are deduplicated by id.
+    fn record_conflict(&self, entry: &Entry, id: &[u8; 32], stored_id: &[u8; 32]) -> StoreResult<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO conflicts (id, author, namespace, seq, stored_id, ts, body, signature, pq_signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                id.as_slice(),
+                entry.body.author,
+                entry.body.namespace,
+                entry.body.seq as i64,
+                stored_id.as_slice(),
+                entry.body.timestamp_ms as i64,
+                Entry::body_bytes(&entry.body).map_err(StoreError::Core)?,
+                entry.signature.as_slice(),
+                entry.pq_signature.as_slice(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Recorded feed conflicts, newest first - the dispute surface for
+    /// explorers and audits. Detection is not resolution: these feeds are
+    /// disputed until a governance record says otherwise.
+    pub fn list_conflicts(&self, limit: usize) -> StoreResult<Vec<ConflictRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, author, namespace, seq, stored_id, ts FROM conflicts ORDER BY ord DESC LIMIT ?1",
+        )?;
+        let mut rows = stmt.query(params![limit as i64])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: Vec<u8> = row.get(0)?;
+            let stored_id: Vec<u8> = row.get(4)?;
+            out.push(ConflictRecord {
+                id: id.as_slice().try_into().map_err(|_| sql_invalid(0))?,
+                author: row.get(1)?,
+                namespace: row.get(2)?,
+                seq: row.get::<_, i64>(3)? as u64,
+                stored_id: stored_id.as_slice().try_into().map_err(|_| sql_invalid(4))?,
+                timestamp_ms: row.get::<_, i64>(5)? as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn conflicts_count(&self) -> StoreResult<u64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM conflicts", [], |r| r.get::<_, i64>(0))?
+            as u64)
+    }
+
+    /// The full recorded incoming entry of a conflict - self-verifying
+    /// evidence, fetchable by id for `prove-fork`-style workflows.
+    pub fn conflict_entry(&self, id: &[u8; 32]) -> StoreResult<Option<Entry>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT body, signature, pq_signature FROM conflicts WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id.as_slice()])?;
+        match rows.next()? {
+            Some(row) => {
+                let body: Vec<u8> = row.get(0)?;
+                let signature: Vec<u8> = row.get(1)?;
+                let pq_signature: Vec<u8> = row.get(2)?;
+                let body = EntryBody::try_from_slice(&body).map_err(|_| sql_invalid(0))?;
+                let signature: [u8; 64] =
+                    signature.as_slice().try_into().map_err(|_| sql_invalid(1))?;
+                Ok(Some(Entry { body, signature, pq_signature }))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Entries whose causal refs include `id` - used for N-of-M cosign
@@ -1039,6 +1153,7 @@ impl Store {
             feeds: authors.len() as u64,
             checkpoints,
             pending_links,
+            conflicts: self.conflicts_count()?,
             lineage: match datu_core::genesis::genesis_entry() {
                 Ok(genesis) => match genesis.id() {
                     Ok(id) => self.has_entry(&id).unwrap_or(false),

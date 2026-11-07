@@ -420,3 +420,125 @@ fn genesis_is_seeded_below_the_policy_in_every_store() {
     let report = b.verify_all().unwrap();
     assert!(report.lineage);
 }
+
+#[test]
+fn conflict_evidence_is_recorded_and_listed() {
+    let store = Store::open_in_memory().unwrap();
+    let k = keys();
+    let original = Entry::sign(body(0, None, b"original"), &k.ed, &k.pq).unwrap();
+    let rewrite = Entry::sign(body(0, None, b"rewritten"), &k.ed, &k.pq).unwrap();
+    store.insert_entry(&original).unwrap();
+
+    assert!(matches!(
+        store.insert_entry(&rewrite),
+        Err(StoreError::Conflict { .. })
+    ));
+
+    let listed = store.list_conflicts(10).unwrap();
+    assert_eq!(listed.len(), 1, "the losing side is preserved");
+    assert_eq!(listed[0].id, rewrite.id().unwrap());
+    assert_eq!(listed[0].stored_id, original.id().unwrap());
+    assert_eq!(listed[0].seq, 0);
+    assert_eq!(listed[0].author, rewrite.body.author);
+    assert_eq!(store.conflicts_count().unwrap(), 1);
+    assert_eq!(store.verify_all().unwrap().conflicts, 1);
+
+    // Replaying the same conflicting entry does not duplicate evidence.
+    assert!(matches!(
+        store.insert_entry(&rewrite),
+        Err(StoreError::Conflict { .. })
+    ));
+    assert_eq!(store.conflicts_count().unwrap(), 1);
+
+    // The recorded side re-verifies standalone: both hybrid signatures over
+    // the exact bytes, zero other context needed.
+    let evidence = store.conflict_entry(&rewrite.id().unwrap()).unwrap().unwrap();
+    assert_eq!(evidence, rewrite);
+    evidence.verify().unwrap();
+    assert!(store.conflict_entry(&original.id().unwrap()).unwrap().is_none());
+}
+
+#[test]
+fn trigger_removal_and_row_splicing_is_detected_by_verify() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.db");
+    let store = Store::open(&path).unwrap();
+    let k = keys();
+    let e = Entry::sign(body(0, None, b"honest"), &k.ed, &k.pq).unwrap();
+    store.insert_entry(&e).unwrap();
+
+    // The file owner can drop triggers and splice rows - the physical layer
+    // is theirs. Here: swap in a fully valid entry signed by an attacker key
+    // while keeping the stored id column.
+    let evil = keys();
+    let spliced = Entry::sign(body(0, None, b"evil"), &evil.ed, &evil.pq).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER entries_immutable_update;
+         DROP TRIGGER entries_immutable_delete;",
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE entries SET body = ?1, signature = ?2, pq_signature = ?3 WHERE namespace = 'gov.records'",
+        rusqlite::params![
+            Entry::body_bytes(&spliced.body).unwrap(),
+            spliced.signature.as_slice(),
+            spliced.pq_signature.as_slice(),
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    // Content addressing catches it: the stored id no longer matches the
+    // recomputed id of the bytes in the row. Nothing accepted the splice.
+    assert!(matches!(
+        store.verify_all(),
+        Err(StoreError::Chain(_))
+    ));
+}
+
+#[test]
+fn rollback_is_provable_against_retained_witness_checkpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.db");
+    let k = keys();
+    let before = {
+        let store = Store::open(&path).unwrap();
+        for e in feed(&k, 3) {
+            store.insert_entry(&e).unwrap();
+        }
+        let ids = store.entry_ids().unwrap();
+        store.append_checkpoint(&cp(&k, 0, None, &ids)).unwrap();
+        store.all_checkpoints().unwrap()
+    };
+
+    // Simulate an owner rollback: strip triggers, delete history and the
+    // checkpoints that covered it. Locally self-consistent afterwards -
+    // detection lives with whoever kept the earlier witness stream.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER entries_immutable_delete;
+         DROP TRIGGER checkpoints_immutable_delete;",
+    )
+    .unwrap();
+    conn.execute("DELETE FROM entries WHERE namespace = 'gov.records'", [])
+        .unwrap();
+    conn.execute("DELETE FROM checkpoints", []).unwrap();
+    drop(conn);
+
+    // The rolled-back node re-runs and checkpoints its smaller history.
+    let store = Store::open(&path).unwrap();
+    let replacement = Entry::sign(body(0, None, b"rewritten history"), &k.ed, &k.pq).unwrap();
+    store.insert_entry(&replacement).unwrap();
+    let ids = store.entry_ids().unwrap();
+    store.append_checkpoint(&cp(&k, 0, None, &ids)).unwrap();
+    let after = store.all_checkpoints().unwrap();
+
+    let evidence = datu_core::fork::analyze(&before, &after).unwrap();
+    assert!(
+        evidence
+            .iter()
+            .any(|f| f.kind == datu_core::fork::KIND_SAME_HEIGHT_FORK),
+        "the retained witness stream proves the rollback"
+    );
+}

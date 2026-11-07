@@ -158,7 +158,7 @@ pub fn run(
         let bind = http_addr.clone();
         let policy = policy.clone();
         std::thread::spawn(move || {
-            let _ = crate::serve::serve(&dir, &bind, policy);
+            let _ = crate::serve::serve(&dir, &bind, policy, crate::serve::DEFAULT_SUBMIT_PER_MIN);
         });
     }
 

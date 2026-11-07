@@ -89,6 +89,9 @@ enum Commands {
         /// Accept no new entries at all (pure view/witness mirror)
         #[arg(long)]
         read_only: bool,
+        /// Max POST /v1/entries per peer IP per minute (0 = unlimited)
+        #[arg(long = "submit-per-min", default_value_t = 60)]
+        submit_per_min: u32,
     },
     /// Keychain wallet: identities, signing, field-level encryption
     Wallet {
@@ -2222,10 +2225,15 @@ fn run(cli: Cli) -> Result<(), String> {
             against,
             out,
         } => cmd_prove_fork(&cli.data_dir, a.clone(), b.clone(), against.clone(), out.clone()),
-        Commands::Serve { addr, read_only } => serve::serve(
+        Commands::Serve {
+            addr,
+            read_only,
+            submit_per_min,
+        } => serve::serve(
             &cli.data_dir,
             addr,
             effective_policy(&cli.data_dir, *read_only)?,
+            *submit_per_min as usize,
         ),
         Commands::Wallet { cmd } => match cmd {
             WalletCmd::Create {
