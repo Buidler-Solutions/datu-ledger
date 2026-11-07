@@ -1,8 +1,10 @@
-# DATU - Tokenless, Quantum-Resistant Accountability Ledger
+# DATU - Decentralized Accountable Trust Union
 
-A distributed system for **accountability and transparency** where:
+**DATU** - **D**ecentralized **A**ccountable **T**rust **U**nion - is a tokenless,
+quantum-resistant accountability ledger: a distributed system for
+**accountability and transparency** where:
 
-- **A DATU-type ledger, not a blockchain** - entries link by causal references
+- **A DAG-type ledger, not a blockchain** - entries link by causal references
   forming a directed acyclic graph; no blocks, no global consensus, no miners
 - **Anyone can run a node** - a single static binary, runs on a laptop, Raspberry Pi, or VPS
 - **No token, no mining, no staking** - nothing to buy, nothing to speculate on
