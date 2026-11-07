@@ -666,6 +666,12 @@ pub(crate) fn effective_policy(
                     datu_store::manifest::manifest_namespace(&net.network_id)
                 ));
             }
+            // Bootstrap: this node may ingest the chain and nothing else, so
+            // it can pull governance from a peer (or a USB bundle) without
+            // admitting a single data entry. Everything else waits.
+            return Ok(Some(WritePolicy::bootstrap(
+                &datu_store::manifest::manifest_namespace(&net.network_id),
+            )));
         }
     }
     if read_only {
@@ -749,6 +755,12 @@ fn print_policy(policy: &WritePolicy) {
         "  explicit writers: {}",
         if policy.writers.is_empty() { "(none)".to_string() } else { policy.writers.join(", ") }
     );
+    if !policy.allow.is_empty() {
+        println!(
+            "  admitted anyway:  {} (governance bootstrap - everything else waits for a verified chain)",
+            policy.allow.join(", ")
+        );
+    }
     if policy.min_cosigners > 0 {
         println!("  min cosigners:    {}", policy.min_cosigners);
     }
@@ -2095,6 +2107,7 @@ fn cmd_policy_init(
         min_cosigners,
         required_roles: require_roles,
         rules,
+        allow: vec![],
     };
     let path = policy_path(data_dir);
     std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
@@ -2282,7 +2295,11 @@ fn cmd_manifest_publish(data_dir: &Path, file: PathBuf, accept_stale: bool) -> R
             current.sort();
             next.sort();
             if current != next && !accept_stale {
-                let st = datu_store::manifest::status_unpinned(&node.store, &doc.network_id)?;
+                let st = datu_store::manifest::status_unpinned(
+                    &node.store,
+                    &doc.network_id,
+                    Some(&node.identity),
+                )?;
                 if st.freshness != datu_store::Freshness::Current {
                     return Err(format!(
                         "refusing a root change on {} governance evidence: {}.
@@ -2442,7 +2459,12 @@ fn cmd_manifest_status(data_dir: &Path) -> Result<(), String> {
     let Some((network_id, root)) = manifest_pin(data_dir)? else {
         return no_pin_hint();
     };
-    let st = datu_store::manifest::status(&node.store, &network_id, std::slice::from_ref(&root))?;
+    let st = datu_store::manifest::status(
+        &node.store,
+        &network_id,
+        std::slice::from_ref(&root),
+        Some(&node.identity),
+    )?;
     print_manifest_status(&st, &network_id, &root);
     Ok(())
 }
@@ -2495,7 +2517,12 @@ fn cmd_manifest_conflicts(data_dir: &Path) -> Result<(), String> {
     let Some((network_id, root)) = manifest_pin(data_dir)? else {
         return no_pin_hint();
     };
-    let st = datu_store::manifest::status(&node.store, &network_id, std::slice::from_ref(&root))?;
+    let st = datu_store::manifest::status(
+        &node.store,
+        &network_id,
+        std::slice::from_ref(&root),
+        Some(&node.identity),
+    )?;
     if st.conflicts.is_empty() && st.missing_predecessors.is_empty() {
         println!("no competing manifest claims on this node ({})", st.freshness.as_str());
         return Ok(());
@@ -2532,6 +2559,7 @@ fn cmd_manifest_verify(data_dir: &Path, file: Option<PathBuf>) -> Result<(), Str
                 &node.store,
                 &network_id,
                 std::slice::from_ref(&root),
+                Some(&node.identity),
             )?;
             print_manifest_status(&st, &network_id, &root);
             if matches!(
@@ -3013,7 +3041,10 @@ fn run(cli: Cli) -> Result<(), String> {
             }
         }
         Commands::Sync { peers, page } => {
-            let node = load_node(&cli.data_dir)?;
+            // Sync is evidence acquisition: it must work while governance is
+            // unverified (that is how the chain arrives), so it runs the
+            // bootstrap policy - chain namespace in, everything else skipped.
+            let node = load_node_bootstrap(&cli.data_dir)?;
             let hello = network_hello(&cli.data_dir, &node.key)?;
             let mesh = our_network_id(&cli.data_dir)?;
             cmd_sync(&node, peers, *page, hello.as_ref(), &mesh)
@@ -3047,7 +3078,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     cmd_delta_answer(&load_node_reader(&cli.data_dir)?, &mesh, input, out)
                 }
                 DeltaCmd::Merge { input } => {
-                    cmd_delta_merge(&load_node(&cli.data_dir)?, &mesh, input)
+                    cmd_delta_merge(&load_node_bootstrap(&cli.data_dir)?, &mesh, input)
                 }
             }
         }
@@ -3063,7 +3094,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     cmd_bundle_export(&load_node_reader(&cli.data_dir)?, &mesh, out)
                 }
                 BundleCmd::Import { input } => {
-                    cmd_bundle_import(&load_node(&cli.data_dir)?, &mesh, input)
+                    cmd_bundle_import(&load_node_bootstrap(&cli.data_dir)?, &mesh, input)
                 }
             }
         }
@@ -3222,7 +3253,7 @@ mod tests {
         ))
         .expect("a verified chain must verify");
         let store = Store::open(&d.join("node.db")).unwrap();
-        let st = datu_store::manifest::status(&store, "gov-mesh", &[root.clone()]).unwrap();
+        let st = datu_store::manifest::status(&store, "gov-mesh", &[root.clone()], None).unwrap();
         assert_eq!(
             st.freshness,
             datu_store::Freshness::Stale,

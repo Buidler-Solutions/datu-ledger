@@ -61,6 +61,13 @@ pub struct WritePolicy {
     /// demand a `holder` while bids demand a `bidder`, in one policy.
     #[serde(default)]
     pub rules: Vec<NamespaceRule>,
+    /// Namespaces admitted **even when gated** (pattern match like `gated`).
+    /// One use: governance bootstrap. A node that pins a manifest root but has
+    /// not received the chain yet must still be able to fetch the chain and
+    /// nothing else, so it runs with `gated: ["*"], allow: [chain-ns]` until
+    /// the chain verifies and the real policy takes over.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
 }
 
 /// One party requirement inside a namespace rule.
@@ -132,7 +139,22 @@ impl WritePolicy {
     }
 
     fn namespace_gated(&self, namespace: &str) -> bool {
+        if self.allow.iter().any(|pattern| ns_matches(pattern, namespace)) {
+            return false;
+        }
         self.gated.iter().any(|pattern| ns_matches(pattern, namespace))
+    }
+
+    /// The policy a node runs while it holds a pin but no verifiable chain:
+    /// the governance namespace is the only thing it may ingest, so evidence
+    /// acquisition can bootstrap governance without admitting any data.
+    pub fn bootstrap(chain_namespace: &str) -> WritePolicy {
+        WritePolicy {
+            version: POLICY_VERSION,
+            gated: vec!["*".into()],
+            allow: vec![chain_namespace.to_string()],
+            ..Default::default()
+        }
     }
 }
 

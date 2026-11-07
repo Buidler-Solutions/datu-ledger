@@ -102,7 +102,12 @@ fn governance(data_dir: &Path) -> Result<Option<Governance>, String> {
         return Ok(None);
     };
     let store = Store::open(&data_dir.join("node.db")).map_err(|e| e.to_string())?;
-    let st = datu_store::manifest::status(&store, &net.network_id, std::slice::from_ref(&root))?;
+    let st = datu_store::manifest::status(
+        &store,
+        &net.network_id,
+        std::slice::from_ref(&root),
+        None,
+    )?;
     Ok(Some(Governance {
         freshness: st.freshness.as_str().to_string(),
         reason: st.reason,

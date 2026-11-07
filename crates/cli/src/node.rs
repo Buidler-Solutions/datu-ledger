@@ -13,7 +13,20 @@
 //! The same store also syncs with zero network at all: `datu delta` files
 //! and `datu bundle` travel by USB, email, or any channel that moves bytes.
 
-use crate::{effective_policy, load_node, network_hello, our_network_id, pull_peer, read_network, short, sign_checkpoint_into};
+use crate::{effective_policy, load_node_reader, network_hello, our_network_id, pull_peer, read_network, short, sign_checkpoint_into};
+
+/// The policy to apply *right now*: recomputed per connection and per sync
+/// cycle, so a node that bootstrapped on a pinned-but-chainless mesh promotes
+/// itself to the real manifest the moment the chain verifies - no restart.
+fn current_policy(data_dir: &std::path::Path, read_only: bool) -> Option<datu_store::WritePolicy> {
+    match effective_policy(data_dir, read_only, true) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("[governance] refusing writes: {e}");
+            Some(datu_store::WritePolicy::readonly())
+        }
+    }
+}
 use datu_p2p::{handle_connection, mesh_name};
 use datu_store::Store;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -129,8 +142,13 @@ pub fn run(
     http: Option<String>,
     read_only: bool,
 ) -> Result<(), String> {
-    let node = load_node(data_dir)?;
-    let policy = effective_policy(data_dir, read_only, false)?;
+    // A reader handle: the daemon must be able to *start* on a pinned mesh
+    // whose chain it has not received yet - that is how it gets one.
+    let node = load_node_reader(data_dir)?;
+    // Recomputed per cycle/connection below: a node that started while pinned
+    // without a chain runs a bootstrap policy (chain namespace only) and
+    // promotes itself the moment the chain verifies.
+    let policy = effective_policy(data_dir, read_only, true)?;
     let frozen = matches!(&policy, Some(p) if p.readonly);
     let network = read_network(data_dir)?;
     let our_id = our_network_id(data_dir)?;
@@ -175,14 +193,15 @@ pub fn run(
     // the network policy when one exists (hello handshake, mesh wall).
     {
         let db = db.clone();
-        let policy = policy.clone();
+        let dir = data_dir.to_path_buf();
         let network = network.clone();
         std::thread::spawn(move || {
             for conn in listener.incoming().flatten() {
                 let db = db.clone();
-                let policy = policy.clone();
+                let dir = dir.clone();
                 let network = network.clone();
                 std::thread::spawn(move || {
+                    let policy = current_policy(&dir, read_only);
                     if let Ok(store) = Store::open_with_policy(&db, policy) {
                         handle_connection(conn, &store, network.as_ref());
                     }
@@ -260,7 +279,7 @@ pub fn run(
             if frozen {
                 break;
             }
-            let store = Store::open_with_policy(&db, policy.clone())
+            let store = Store::open_with_policy(&db, current_policy(data_dir, read_only))
                 .map_err(|e| e.to_string())?;
             let hello = network_hello(data_dir, &node.key)?;
             match pull_peer(&store, peer, 500, hello.as_ref(), &our_id) {
@@ -279,7 +298,7 @@ pub fn run(
             }
         }
         if witness {
-            let store = Store::open_with_policy(&db, policy.clone())
+            let store = Store::open_with_policy(&db, current_policy(data_dir, read_only))
                 .map_err(|e| e.to_string())?;
             let count = store.entry_count().map_err(|e| e.to_string())?;
             let changed = last_seen_count.map(|c| c != count).unwrap_or(count > 0);

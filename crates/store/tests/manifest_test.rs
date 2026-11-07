@@ -301,21 +301,31 @@ fn freshness_requires_independent_evidence() {
 
     // A chain that verifies is still not "current": nothing but its own
     // author has ever confirmed the mesh was alive after it.
-    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
     assert_eq!(st.freshness, Freshness::Stale, "reason: {}", st.reason);
     assert!(st.corroborated_by.is_none());
 
     // The manifest author checkpointing about itself proves nothing.
     checkpoint(&store, &founder);
-    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
     assert_eq!(st.freshness, Freshness::Stale);
     assert!(st.reason.contains("independent"), "{}", st.reason);
 
-    // An independent signature over a view at/after it does.
+    // The node asking is not independent of itself either.
     checkpoint(&store, &witness);
-    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    let st = status(&store, "gov-mesh", &[founder.author.clone()], Some(&witness.author)).unwrap();
+    assert_eq!(st.freshness, Freshness::Stale, "a node cannot corroborate itself");
+    let third = keys();
+    checkpoint(&store, &third);
+    let st = status(
+        &store,
+        "gov-mesh",
+        &[founder.author.clone()],
+        Some(&witness.author),
+    )
+    .unwrap();
     assert_eq!(st.freshness, Freshness::Current, "reason: {}", st.reason);
-    assert_eq!(st.corroborated_by.as_deref(), Some(witness.author.as_str()));
+    assert_eq!(st.corroborated_by.as_deref(), Some(third.author.as_str()));
     assert_eq!(st.manifest_id.as_deref(), Some(
         hex::encode(
             store
@@ -364,7 +374,7 @@ fn revoked_writer_under_stale_policy_is_reported_not_hidden() {
     // …but this node cannot claim its authorization is current: nothing
     // independent has confirmed the revocation was seen by anyone else, so a
     // *further* revocation may exist that this node never received.
-    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
     assert_eq!(st.freshness, Freshness::Stale, "reason: {}", st.reason);
     assert_eq!(st.manifest_id.as_deref(), Some(hex::encode(e2.id().unwrap()).as_str()));
     assert!(st.roots.contains(&successor.author), "the stale policy is still the newest known one");
@@ -393,7 +403,7 @@ fn rollback_leaves_evidence_and_is_stale() {
     let compiled = compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().unwrap();
     assert_eq!(compiled.manifest_id, hex::encode(e1.id().unwrap()));
     // …and the node says out loud that it is behind.
-    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
     assert_eq!(st.freshness, Freshness::Stale, "reason: {}", st.reason);
     assert_eq!(st.missing_predecessors, vec![missing]);
 }
@@ -409,7 +419,7 @@ fn conflicting_policy_versions_are_never_applied() {
 
     // Not authority: this build cannot evaluate it, so nothing verifies…
     assert!(compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().is_none());
-    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
     assert_eq!(st.freshness, Freshness::Unverified);
     assert!(st.reason.contains("99"), "{}", st.reason);
 }
@@ -427,7 +437,7 @@ fn invalid_genesis_claims_stay_unverified() {
 
     assert!(compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().is_none());
     assert!(head(&store, "gov-mesh").unwrap().is_some(), "the impostor can see its own chain");
-    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
     assert_eq!(st.freshness, Freshness::Unverified);
     assert!(st.manifest_id.is_none());
 }
@@ -452,7 +462,7 @@ fn status_reports_a_conflict_with_both_sides() {
         ids.push(hex::encode(publish_manifest(&store, k, &m, 0, None).id().unwrap()));
     }
 
-    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
     assert_eq!(st.freshness, Freshness::Conflicted);
     assert_eq!(st.conflicts.len(), 2, "{:?}", st.conflicts);
     let claimed: Vec<String> = st.conflicts.iter().map(|(id, _)| id.clone()).collect();

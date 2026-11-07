@@ -347,20 +347,26 @@ pub fn status(
     store: &Store,
     network_id: &str,
     pinned_roots: &[String],
+    self_key: Option<&str>,
 ) -> Result<ManifestStatus, String> {
-    status_impl(store, network_id, Some(pinned_roots))
+    status_impl(store, network_id, Some(pinned_roots), self_key)
 }
 
 /// Freshness of the chain this node holds, without checking it against a pin:
 /// "is my view current?" for a node that has already accepted its chain.
-pub fn status_unpinned(store: &Store, network_id: &str) -> Result<ManifestStatus, String> {
-    status_impl(store, network_id, None)
+pub fn status_unpinned(
+    store: &Store,
+    network_id: &str,
+    self_key: Option<&str>,
+) -> Result<ManifestStatus, String> {
+    status_impl(store, network_id, None, self_key)
 }
 
 fn status_impl(
     store: &Store,
     network_id: &str,
     pinned: Option<&[String]>,
+    self_key: Option<&str>,
 ) -> Result<ManifestStatus, String> {
     let docs = load_docs(store, network_id)?;
     let mut st = ManifestStatus {
@@ -447,11 +453,17 @@ fn status_impl(
         (Some(a), Some(t)) => (a.clone(), t),
         _ => (String::new(), 0),
     };
+    // Independent means: not the manifest's author, and not this node - a
+    // node cannot corroborate itself, exactly as an author cannot.
     let witness = store
         .all_checkpoints()
         .map_err(|e| format!("cannot read checkpoints: {e}"))?
         .into_iter()
-        .find(|c| c.body.signer != author && c.body.timestamp_ms >= published);
+        .find(|c| {
+            c.body.signer != author
+                && !self_key.is_some_and(|me| me == c.body.signer)
+                && c.body.timestamp_ms >= published
+        });
     match witness {
         Some(c) => {
             st.corroborated_by = Some(c.body.signer.clone());

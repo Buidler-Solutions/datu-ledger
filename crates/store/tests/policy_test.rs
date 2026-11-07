@@ -98,6 +98,7 @@ fn gated_policy(attestors: Vec<String>, gated: &[&str]) -> WritePolicy {
         min_cosigners: 0,
         required_roles: vec![],
         rules: vec![],
+        allow: vec![],
     }
 }
 
@@ -355,6 +356,7 @@ fn policy_json_roundtrip_and_validation() {
             require_sealed: vec!["holder_name".into()],
             max_entries_per_author: Some(1),
         }],
+        allow: vec![],
     };
     let json = policy.to_json().unwrap();
     assert_eq!(WritePolicy::from_json(&json).unwrap(), policy);
@@ -743,4 +745,45 @@ fn per_author_cap_survives_merges_and_deltas() {
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn bootstrap_policy_admits_only_the_governance_namespace() {
+    // A node that pins a manifest root but has not received the chain yet must
+    // be able to fetch the chain - and nothing else. This is the whole
+    // bootstrap contract: evidence in, data waits.
+    let chain_ns = "gov.mesh.drill.policy";
+    let store = Store::open_in_memory_with_policy(Some(WritePolicy::bootstrap(chain_ns))).unwrap();
+    let author = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pq = datu_core::pq::keypair().unwrap().1;
+    let sign = |ns: &str, seq: u64| {
+        let body = datu_core::EntryBody {
+            version: datu_core::ENTRY_VERSION,
+            author: String::new(),
+            author_pq: String::new(),
+            pq_alg: String::new(),
+            namespace: ns.into(),
+            seq,
+            prev: None,
+            refs: vec![],
+            timestamp_ms: 1,
+            payload: b"{}".to_vec(),
+        };
+        datu_core::Entry::sign(body, &author, &pq).unwrap()
+    };
+
+    assert!(
+        store.insert_entry(&sign(chain_ns, 0)).is_ok(),
+        "the chain itself must be admissible while unverified"
+    );
+    for ns in ["gov.records", "general", "identity.attest"] {
+        assert!(
+            store.insert_entry(&sign(ns, 0)).is_err(),
+            "namespace {ns} must wait for a verified chain"
+        );
+    }
+    let json = WritePolicy::bootstrap(chain_ns).to_json().unwrap();
+    let parsed = WritePolicy::from_json(&json).unwrap();
+    assert_eq!(parsed.allow, vec![chain_ns.to_string()]);
+    assert_eq!(parsed.gated, vec!["*".to_string()]);
 }

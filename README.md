@@ -416,6 +416,15 @@ always admitted as attestors, so governance can always publish the next
 manifest; `readonly` is forced off (read-only is an operational flag of a node,
 not a governance act).
 
+**Joining a governed mesh takes two steps, in either order.** A pinned node
+that has not received the chain yet starts in a *bootstrap* policy: it may
+ingest the chain namespace (`gov.mesh.<id>.policy`) and nothing else, so it can
+pull governance from a peer or a USB bundle without admitting a single data
+entry - then promotes itself to the real manifest the moment the chain
+verifies, without a restart. `datu sync`, `datu node`, `datu bundle import`
+and `datu delta merge` all run this way; submissions and `datu publish` stay
+fail-closed until governance verifies.
+
 **Enforced wherever entries land.** The compiled manifest is the store's
 admission policy, so every local write path obeys it - `datu publish`, p2p
 `sync`, `datu delta merge`, `datu bundle import`, `datu serve` and `datu node`
@@ -443,7 +452,7 @@ datu manifest conflicts              # competing claims, both sides named
 
 | State | Means | Established by |
 |---|---|---|
-| `current` | this view is corroborated | a verified chain **and** a checkpoint signed by a key *other than* the head manifest's author, dated at or after it |
+| `current` | this view is corroborated | a verified chain **and** a checkpoint signed by a key that is neither the head manifest's author nor this node, dated at or after it |
 | `stale` | freshness cannot be established, or this node is provably behind | no such checkpoint; a held manifest naming a predecessor this node lacks; or a manifest with a policy version this build cannot read |
 | `unverified` | nothing verifies here | no genesis from the pinned root, or an unreadable namespace |
 | `conflicted` | two *authorized* claims to the same succession | reported, never resolved |
