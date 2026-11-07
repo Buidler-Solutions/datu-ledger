@@ -8,24 +8,52 @@ const PAGE = 'datu-dapp';
 const WALLET = 'datu-wallet';
 
 const pending = new Map();
+const stateListeners = new Set();
 
 window.addEventListener('message', (ev) => {
   const d = ev.data;
-  if (!d || d.source !== WALLET || !d.id) return;
+  if (!d || d.source !== WALLET) return;
+
+  if (d.kind === 'state' && d.state) {
+    for (const fn of stateListeners) {
+      try {
+        fn(d.state);
+      } catch {}
+    }
+    return;
+  }
+
+  if (!d.id) return;
   const p = pending.get(d.id);
   if (!p) return;
   pending.delete(d.id);
   clearTimeout(p.timer);
-  if (d.ok) p.resolve({ status: (d.result && d.result.status) || 200, body: (d.result && d.result.body) ?? d.result });
-  else p.reject(new Error(d.error || 'wallet rejected the request'));
+  if (d.ok) {
+    p.resolve({
+      status: (d.result && d.result.status) || 200,
+      body: (d.result && d.result.body) ?? d.result,
+    });
+  } else {
+    p.reject(new Error(d.error || 'wallet rejected the request'));
+  }
 });
+
+// The extension broadcasts {connected, wallets[], unlocked[]} at page load and
+// whenever pairing or unlock state changes - the dApp stays in sync with it.
+export function onWalletState(cb) {
+  stateListeners.add(cb);
+  return () => stateListeners.delete(cb);
+}
+
+function randomId() {
+  return window.crypto && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
 
 function send(action, payload, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const id =
-      window.crypto && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const id = randomId();
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(
@@ -41,10 +69,7 @@ function send(action, payload, timeoutMs) {
 
 export function walletPing() {
   return new Promise((resolve) => {
-    const id =
-      window.crypto && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const id = randomId();
     const timer = setTimeout(() => {
       pending.delete(id);
       resolve(false);
@@ -54,8 +79,9 @@ export function walletPing() {
   });
 }
 
-// One wallet signature: the extension will ask the human to confirm and will
-// unlock the named identity with the passphrase typed there.
+// One wallet signature. Pass `auto: true` in body for session re-login
+// challenges - the extension answers those silently when the passphrase is
+// already cached in the panel, and prompts otherwise.
 export function walletSign({ bridgeUrl, path, body, summary }) {
   return send('sign', { bridgeUrl, path, body, summary }, 300000);
 }

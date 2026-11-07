@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { listIdentities, nodeGet, nodePost, getToken, setToken } from './api.js';
-import { walletPing, walletSign } from './wallet.js';
+import { onWalletState, walletPing, walletSign } from './wallet.js';
 
 const NS = 'gov.titles.application';
 const KIND = 'land.title.application';
@@ -34,6 +34,17 @@ function randomHex(bytes = 16) {
   crypto.getRandomValues(a);
   return Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
 }
+
+const sessionKey = (page) => `datu.session.${page}`;
+const loadSession = (page) => {
+  try {
+    return JSON.parse(localStorage.getItem(sessionKey(page)) || 'null');
+  } catch {
+    return null;
+  }
+};
+const saveSession = (page, s) => localStorage.setItem(sessionKey(page), JSON.stringify(s));
+const clearSession = (page) => localStorage.removeItem(sessionKey(page));
 
 function downloadJson(name, data) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -167,6 +178,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
 
   const [sessions, setSessions] = useState({});
+  const [wallet, setWallet] = useState({ detected: false, wallets: [], unlocked: [] });
+  const autoTried = React.useRef({});
 
   const [claimForm, setClaimForm] = useState({ parcel: 'TIT-0101-25', district: 'Westfield' });
   const [claim, setClaim] = useState(null);
@@ -209,8 +222,28 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    let alive = true;
+    walletPing().then((ok) => {
+      if (alive) setWallet((w) => ({ ...w, detected: ok }));
+    });
+    const off = onWalletState((state) => {
+      if (!alive) return;
+      setWallet({
+        detected: true,
+        wallets: state.wallets || [],
+        unlocked: state.unlocked || [],
+      });
+    });
+    return () => {
+      alive = false;
+      off();
+    };
+  }, []);
+
   function onLogin(p, session) {
     setSessions((s) => ({ ...s, [p]: session }));
+    saveSession(p, { name: session.name, ed: session.ed, at: session.at });
   }
   function onLogout(p) {
     setSessions((s) => {
@@ -218,8 +251,54 @@ export default function App() {
       delete next[p];
       return next;
     });
+    clearSession(p);
     say(`${p} logged out`);
   }
+
+  // Silent session restore: when the extension is active and this page has a
+  // stored session, ask the wallet to re-sign a fresh challenge. If the panel
+  // does not hold the passphrase yet, the request simply waits there for one
+  // confirm and then completes.
+  useEffect(() => {
+    if (!wallet.detected || sessions[page]) return;
+    const stored = loadSession(page);
+    if (!stored || !stored.name) return;
+    if (autoTried.current[page]) return;
+    autoTried.current[page] = true;
+    (async () => {
+      try {
+        const challenge = { page, node: nodeUrl, nonce: randomHex(16), ts: Date.now() };
+        const res = await walletSign({
+          bridgeUrl,
+          path: '/v1/wallet/party-sign',
+          summary: `Auto login - page "${page}" re-signs a challenge as ${stored.name}`,
+          body: {
+            name: stored.name,
+            role: 'login',
+            kind: 'datu.login',
+            document: challenge,
+            auto: true,
+          },
+        });
+        const party = ((res.body || {}).parties || []).find((p) => p.role === 'login');
+        if (!party) return;
+        setSessions((s) => ({
+          ...s,
+          [page]: {
+            name: stored.name,
+            ed: party.key,
+            sig: party.signature || '',
+            at: new Date().toLocaleTimeString(),
+            challenge,
+          },
+        }));
+        say(`${page} session restored through the wallet as ${stored.name}`, 'ok');
+      } catch {
+        // leave the manual login in place
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wallet.detected, page, sessions]);
 
   // ---- 0 · landowner registers the ownership claim ----
   async function registerOwnership() {
@@ -487,6 +566,11 @@ export default function App() {
             {nodeStatus.checkpoints} · identities on this bridge: {identities.length}
           </p>
         )}
+        <p className={wallet.detected ? 'ok small' : 'err small'}>
+          wallet extension:{' '}
+          {wallet.detected ? `active · ${wallet.wallets.length} wallet(s) paired` : 'not detected'}
+          {wallet.detected && ` · unlocked: ${wallet.unlocked.join(', ') || 'none (panel will ask once)'}`}
+        </p>
       </section>
 
       <WalletLogin

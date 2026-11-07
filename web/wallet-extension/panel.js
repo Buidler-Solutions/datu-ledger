@@ -122,6 +122,7 @@ async function pairWallet(url, token, label) {
   }
   if (identities.some((i) => i.name === keep)) select.value = keep;
   showSeal();
+  notifyState();
   $('pairHint').textContent = `paired · ${identities.length} identities · token kept for this browser session`;
   status(`wallet ready - ${identities.length} identities`, 'ok');
   checkNode(true);
@@ -549,29 +550,83 @@ function armIdleTimer() {
 
 // ---------- dApp sign requests ----------
 // The background relays {kind:'datu-rpc'} jobs queued in session storage.
-// We render each one; the user confirms with the passphrase (remembered in
-// panel memory for this session), and the result goes back to the tab.
+// Requests marked `auto` (session re-login challenges) are answered silently
+// when this panel already holds the passphrase for that identity; everything
+// else waits for an explicit confirm here.
 const REQUESTS_KEY = 'datuRpcQueue';
 const passCache = {}; // identity name -> passphrase, panel memory only
 let requestsFingerprint = '';
+
+function notifyState() {
+  try {
+    chrome.runtime.sendMessage({ kind: 'datu-state-changed', unlocked: Object.keys(passCache) });
+  } catch {}
+}
+
+function bridgeCall(url, path, body, token) {
+  return call(`${url}${path}`, {
+    method: 'POST',
+    body,
+    auth: true,
+    token,
+  });
+}
+
+async function processRequest(req, passphrase) {
+  const payload = req.payload || {};
+  const body = { ...(payload.body || {}) };
+  const url = (payload.bridgeUrl || '').replace(/\/+$/, '');
+  const token = tokens[url];
+  try {
+    if (!token) throw new Error('this wallet is not paired - paste its bridge token in Settings');
+    if (passphrase) {
+      body.passphrase = passphrase;
+      passCache[body.name] = passphrase;
+      notifyState();
+    }
+    const res = await bridgeCall(url, payload.path || '', body, token);
+    chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: true, result: { status: 200, body: res } });
+    return true;
+  } catch (e) {
+    chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: false, error: e.message });
+    throw e;
+  }
+}
 
 async function pollRequests() {
   try {
     const o = await chrome.storage.session.get(REQUESTS_KEY);
     const queue = o[REQUESTS_KEY] || [];
+
+    // Silent path: auto re-login challenges when the passphrase is cached.
+    const remaining = [];
+    for (const req of queue) {
+      const body = (req.payload || {}).body || {};
+      if (body.auto === true && passCache[body.name]) {
+        try {
+          await processRequest(req, passCache[body.name]);
+          continue;
+        } catch (e) {
+          status(`auto sign failed for ${body.name}: ${e.message}`, 'err');
+          continue;
+        }
+      }
+      remaining.push(req);
+    }
+
     const card = $('requestsCard');
-    if (!queue.length) {
+    if (!remaining.length) {
       card.style.display = 'none';
       requestsFingerprint = '';
       return;
     }
     card.style.display = 'block';
-    const fingerprint = queue.map((r) => r.id).join(',');
+    const fingerprint = remaining.map((r) => r.id).join(',');
     if (fingerprint === requestsFingerprint) return;
     requestsFingerprint = fingerprint;
     const holder = $('requests');
     holder.innerHTML = '';
-    for (const req of queue) holder.appendChild(renderRequest(req));
+    for (const req of remaining) holder.appendChild(renderRequest(req));
   } catch {}
 }
 
@@ -580,7 +635,6 @@ function renderRequest(req) {
   const path = payload.path || '';
   const body = payload.body || {};
   const url = (payload.bridgeUrl || '').replace(/\/+$/, '');
-  const token = tokens[url];
 
   const box = document.createElement('div');
   box.style.borderTop = '1px solid #30363d';
@@ -612,22 +666,9 @@ function renderRequest(req) {
   confirm.addEventListener('click', async () => {
     confirm.disabled = true;
     try {
-      if (!token) throw new Error('this wallet is not paired - paste its bridge token in Settings');
-      const payloadBody = { ...body };
-      if (pass.value) {
-        payloadBody.passphrase = pass.value;
-        passCache[body.name] = pass.value;
-      }
-      const res = await call(`${url}${path}`, {
-        method: 'POST',
-        body: payloadBody,
-        auth: true,
-        token,
-      });
-      chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: true, result: { status: 200, body: res } });
+      await processRequest(req, pass.value || passCache[body.name]);
       status('sign request completed', 'ok');
     } catch (e) {
-      chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: false, error: e.message });
       status(e.message, 'err');
       confirm.disabled = false;
     }

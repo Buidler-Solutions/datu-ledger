@@ -17,6 +17,7 @@ if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
 // them, the user confirms with the passphrase, and the result travels back to
 // the originating tab. Keys and passphrases never leave the extension/bridge.
 const QUEUE_KEY = 'datuRpcQueue';
+const STATE_KEY = 'datuWalletState';
 
 const readQueue = async () => {
   const o = await chrome.storage.session.get(QUEUE_KEY);
@@ -30,7 +31,49 @@ const setBadge = async (n) => {
   } catch {}
 };
 
+// What dApps are allowed to know: which wallets exist, which are paired, and
+// which identities are unlocked in the panel right now (names only).
+async function currentState() {
+  const s = await chrome.storage.session.get(['wallets', 'tokens', STATE_KEY]);
+  const wallets = s.wallets || [];
+  const tokens = s.tokens || {};
+  const unlocked = (s[STATE_KEY] || {}).unlocked || [];
+  return {
+    connected: true,
+    version: chrome.runtime.getManifest().version,
+    wallets: wallets.map((w) => ({ label: w.label, url: w.url, paired: !!tokens[w.url] })),
+    unlocked,
+  };
+}
+
+function broadcast(state) {
+  chrome.tabs.query({}, (tabs) => {
+    for (const t of tabs) {
+      if (t.id == null) continue;
+      try {
+        chrome.tabs.sendMessage(t.id, { kind: 'datu-state', state }).catch?.(() => {});
+      } catch {}
+    }
+  });
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.kind === 'datu-hello') {
+    currentState().then((state) => sendResponse({ ok: true, result: state }));
+    return true;
+  }
+
+  if (msg && msg.kind === 'datu-state-changed') {
+    (async () => {
+      const unlocked = Array.isArray(msg.unlocked) ? msg.unlocked : [];
+      await chrome.storage.session.set({ [STATE_KEY]: { unlocked, at: Date.now() } });
+      const state = await currentState();
+      broadcast(state);
+      sendResponse({ ok: true, result: state });
+    })();
+    return true;
+  }
+
   if (msg && msg.kind === 'datu-rpc') {
     if (msg.action === 'ping') {
       sendResponse({
