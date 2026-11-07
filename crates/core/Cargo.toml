@@ -1,0 +1,17 @@
+[package]
+name = "datu-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64.workspace = true
+blake3.workspace = true
+borsh.workspace = true
+ed25519-dalek.workspace = true
+fips204.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

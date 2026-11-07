@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>DATU Records Wallet</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <div class="logo"></div>
+        <div>
+          <b>DATU Records Wallet</b><br />
+          <span id="brandSub">records · consent · sealed data</span>
+        </div>
+      </div>
+      <div class="account">
+        <div class="avatar"></div>
+        <div style="flex:1">
+          <select id="identity"></select>
+          <div class="seal" id="seal"></div>
+        </div>
+        <span class="chip" id="mode"><span class="dot" id="modeDot"></span><span id="modeText">node</span></span>
+      </div>
+    </header>
+
+    <nav>
+      <button data-tab="records" class="active">My records</button>
+      <button data-tab="consent">Sign</button>
+      <button data-tab="data">My data</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+
+    <main>
+      <section data-panel="records" class="active">
+        <h2>Read from any node</h2>
+        <label>Node / observer URL<input id="node" value="http://127.0.0.1:7475" /></label>
+        <label>Namespace filter (blank = every namespace)<input id="nsFilter" placeholder="gov.titles.* · gov.licenses.* · procurement.*" /></label>
+        <div class="row">
+          <button class="primary" id="find">Find my records</button>
+          <button class="ghost" id="check">Check node</button>
+        </div>
+        <p class="muted small">
+          A record is “mine” when a party signature key is yours or the document names your key
+          (holder_key, bidder_key, licensee_key, …) - any namespace, any transaction kind.
+        </p>
+        <div id="records"></div>
+        <pre id="verdict" style="display:none"></pre>
+      </section>
+
+      <section data-panel="consent">
+        <h2>Holder consent</h2>
+        <label>Consent request from the registry<textarea id="doc" rows="5" placeholder="paste the document here"></textarea></label>
+        <div class="row">
+          <label>Role<input id="role" value="holder" placeholder="holder · licensee · bidder · officer" /></label>
+          <label>Kind<input id="kind" placeholder="e.g. land.title.application" list="kindHints" /></label>
+        </div>
+        <datalist id="kindHints">
+          <option value="land.title.application"></option>
+          <option value="driver_license.application"></option>
+          <option value="procurement.bid"></option>
+          <option value="permit.application"></option>
+        </datalist>
+        <label>Wallet passphrase (the one you chose when creating this identity)<input id="pass" type="password" /></label>
+        <button class="primary" id="sign">Review consent request</button>
+        <div class="confirm" id="confirmBox" style="display:none">
+          <div class="muted small">Review before signing</div>
+          <div id="confirmSummary" class="summary"></div>
+          <div class="row">
+            <button class="primary" id="confirmSign">Confirm &amp; sign</button>
+            <button class="ghost" id="cancelSign">Cancel</button>
+          </div>
+        </div>
+        <textarea id="result" rows="5" readonly placeholder="signed document - give it back to the registry dApp"></textarea>
+        <button class="ghost" id="copy" disabled>Copy signed consent</button>
+      </section>
+
+      <section data-panel="data">
+        <h2>What is sealed to me</h2>
+        <p class="muted">
+          From “My records”: press <b>Decrypt</b> on a record. Or paste any record below.
+        </p>
+        <pre id="decrypted" style="display:none"></pre>
+        <label>Paste entry JSON or document<textarea id="openDoc" rows="4"></textarea></label>
+        <button class="ghost" id="open">Decrypt what belongs to me</button>
+        <pre id="opened" style="display:none"></pre>
+        <p class="muted small">Decrypted views clear automatically after 2 minutes of inactivity.</p>
+      </section>
+
+      <section data-panel="settings">
+        <h2>Create identity (set your passphrase)</h2>
+        <p class="muted">
+          You choose the passphrase - it locks your keys with Argon2id. It is never stored or
+          sent anywhere, and it cannot be recovered: if you lose it, the keys and the sealed
+          data addressed to them are lost.
+        </p>
+        <label>Name<input id="newName" placeholder="e.g. alice" /></label>
+        <label>Passphrase (min 8 chars)<input id="newPass" type="password" /></label>
+        <label>Confirm passphrase<input id="newPass2" type="password" /></label>
+        <button class="primary" id="create">Create identity</button>
+        <p class="muted" id="createHint" style="display:none"></p>
+
+        <h2>Wallets on this device</h2>
+        <p class="muted small">
+          One wallet per person, several identities inside for context
+          (<b>alice-home</b>, <b>alice-business</b>). A wallet is one
+          <b>datu wallet serve</b> process: its own directory, passphrases and token.
+          The panel never holds keys - it asks the bridge to sign and decrypt.
+        </p>
+        <label>Active wallet<select id="walletSelect"></select></label>
+        <div class="row">
+          <button class="ghost" id="switchWallet">Switch</button>
+          <button class="ghost" id="removeWallet">Remove</button>
+        </div>
+        <label>Label<input id="walletLabel" placeholder="alice" /></label>
+        <label>Bridge URL<input id="walletUrl" value="http://127.0.0.1:7482" /></label>
+        <label>Pairing token (from <code>wallet/bridge.token</code>)<input id="token" type="password" placeholder="64 hex characters" /></label>
+        <div class="row">
+          <button class="primary" id="addWallet">Save wallet &amp; pair</button>
+          <button class="ghost" id="forget">Forget token</button>
+        </div>
+        <p class="muted small" id="pairHint"></p>
+
+        <h2>Backup &amp; move devices</h2>
+        <p class="muted small">
+          Exports the selected identity as a file encrypted with a separate backup
+          passphrase. Import it on another device - the restored identity unlocks with
+          that backup passphrase.
+        </p>
+        <label>Backup passphrase (min 8 chars)<input id="backupPass" type="password" /></label>
+        <button class="ghost" id="exportIdentity">Download encrypted backup</button>
+        <label>Backup file to import<input id="importFile" type="file" accept="application/json,.json" /></label>
+        <label>Passphrase for that file<input id="importPass" type="password" /></label>
+        <label>Import as (optional rename)<input id="importRename" placeholder="leave blank to keep name" /></label>
+        <button class="ghost" id="importIdentity">Import identity</button>
+
+        <h2>Your seal key</h2>
+        <pre id="sealFull"></pre>
+        <p class="muted">Share this so a registry can encrypt your data to you.</p>
+      </section>
+    </main>
+
+    <footer>
+      <span class="dot" id="bridgeDot"></span>
+      <span id="status">connecting…</span>
+    </footer>
+
+    <script src="panel.js"></script>
+  </body>
+</html>

@@ -1,0 +1,144 @@
+:root {
+        color-scheme: dark;
+        --bg: #0b0f14;
+        --surface: #12181f;
+        --surface-2: #1a222c;
+        --line: #243040;
+        --text: #e6edf3;
+        --muted: #8b98a9;
+        --accent: #4c8dff;
+        --accent-2: #35d07f;
+        --danger: #ff6b6b;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        background: radial-gradient(120% 60% at 100% 0%, #16202b 0%, var(--bg) 55%);
+        color: var(--text);
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+        font-size: 12px;
+        animation: slide-in .22s ease-out both;
+      }
+      @keyframes slide-in {
+        from { transform: translateX(28px); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
+      }
+
+      /* ---- header (MetaMask-style account chip) ---- */
+      header {
+        position: sticky; top: 0; z-index: 3;
+        padding: 12px 14px 10px;
+        background: linear-gradient(180deg, #10161d 0%, rgba(16,22,29,.92) 100%);
+        border-bottom: 1px solid var(--line);
+        backdrop-filter: blur(6px);
+      }
+      .brand { display: flex; align-items: center; gap: 8px; }
+      .logo {
+        width: 22px; height: 22px; border-radius: 7px;
+        background: linear-gradient(135deg, var(--accent), #7a5cff);
+        box-shadow: 0 0 0 1px #ffffff1a inset;
+      }
+      .brand b { font-size: 13px; letter-spacing: .2px; }
+      .brand span { color: var(--muted); font-size: 10px; }
+      .account {
+        margin-top: 9px; display: flex; align-items: center; gap: 8px;
+        background: var(--surface-2); border: 1px solid var(--line);
+        border-radius: 12px; padding: 8px 10px;
+      }
+      .avatar {
+        width: 26px; height: 26px; border-radius: 9px; flex: none;
+        background: conic-gradient(from 210deg, #4c8dff, #35d07f, #7a5cff, #4c8dff);
+      }
+      .account select {
+        flex: 1; background: transparent; border: 0; color: var(--text);
+        font: inherit; font-size: 12px; outline: none; cursor: pointer;
+      }
+      .account .seal { color: var(--muted); font-size: 9px; word-break: break-all; margin-top: 2px; }
+
+      /* ---- tabs ---- */
+      nav { display: flex; gap: 4px; padding: 8px 10px 0; }
+      nav button {
+        flex: 1; background: transparent; border: 0; color: var(--muted);
+        font: inherit; font-size: 11px; padding: 7px 4px 9px; cursor: pointer;
+        border-bottom: 2px solid transparent;
+      }
+      nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+
+      main { flex: 1; overflow-y: auto; padding: 12px 14px 18px; }
+      section[data-panel] { display: none; animation: tab-in .16s ease-out both; }
+      section[data-panel].active { display: block; }
+      @keyframes tab-in { from { transform: translateX(10px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+      h2 { font-size: 10px; letter-spacing: .8px; text-transform: uppercase; color: var(--muted); margin: 14px 0 6px; }
+      h2:first-child { margin-top: 0; }
+      p { margin: 4px 0; }
+      .muted { color: var(--muted); }
+      .ok { color: var(--accent-2); }
+      .err { color: var(--danger); }
+
+      label { display: block; color: var(--muted); margin-top: 8px; font-size: 11px; }
+      input, textarea, select {
+        width: 100%; margin-top: 4px; background: var(--surface);
+        border: 1px solid var(--line); border-radius: 9px;
+        color: var(--text); padding: 8px 9px; font: inherit; font-size: 11px;
+      }
+      textarea { resize: vertical; }
+      input:focus, textarea:focus { outline: none; border-color: #3a5f9e; box-shadow: 0 0 0 3px #4c8dff1f; }
+
+      button.primary, button.ghost {
+        width: 100%; margin-top: 8px; padding: 9px 10px; border-radius: 10px;
+        font: inherit; font-size: 11.5px; cursor: pointer;
+      }
+      button.primary {
+        background: linear-gradient(180deg, #2f6ee0, #2358bd);
+        border: 1px solid #3b7de9; color: #fff;
+      }
+      button.ghost { background: var(--surface-2); border: 1px solid var(--line); color: var(--text); }
+      button:hover:not(:disabled) { filter: brightness(1.08); }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+      .row { display: flex; gap: 8px; }
+      .row > * { flex: 1; }
+
+      .record {
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: 12px; padding: 10px; margin-top: 9px;
+        transition: border-color .15s;
+      }
+      .record:hover { border-color: #3a4f6b; }
+      .record .head { display: flex; justify-content: space-between; gap: 6px; align-items: baseline; }
+      .record .parcel { font-size: 12px; }
+      .record .meta { color: var(--muted); font-size: 10px; }
+      .record .actions { display: flex; gap: 6px; margin-top: 8px; }
+      .record .actions button { margin-top: 0; flex: 1; padding: 7px; }
+
+      .chip {
+        display: inline-flex; align-items: center; gap: 5px;
+        background: var(--surface-2); border: 1px solid var(--line);
+        border-radius: 999px; padding: 3px 9px; font-size: 10px; color: var(--muted);
+      }
+      .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+      .dot.green { background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2); }
+      .dot.blue { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+      .dot.red { background: var(--danger); }
+
+      pre {
+        white-space: pre-wrap; word-break: break-all; background: var(--surface);
+        border: 1px solid var(--line); border-radius: 10px;
+        padding: 9px; max-height: 170px; overflow: auto; font-size: 10.5px; margin-top: 8px;
+      }
+
+      footer {
+        border-top: 1px solid var(--line); padding: 8px 14px;
+        font-size: 10px; color: var(--muted); display: flex; gap: 6px; align-items: center;
+      }
+      #status { flex: 1; }
+.confirm {
+  margin-top: 10px; padding: 10px; border-radius: 10px;
+  border: 1px solid #3a5f9e; background: #14203344;
+}
+.summary { margin: 6px 0 2px; font-size: 11px; line-height: 1.5; }
+.summary b { color: var(--text); }
+.summary .k { color: var(--muted); }

@@ -1,0 +1,2438 @@
+mod node;
+mod serve;
+mod walletd;
+
+use base64::Engine;
+use borsh::BorshDeserialize;
+use clap::{Parser, Subcommand};
+use datu_core::attest::{self, AttestationDoc, CosignDoc};
+use datu_core::fork::{self, ForkEvidence};
+use datu_core::merkle::merkle_root;
+use datu_core::parties::SignedDocument;
+use datu_core::{BloomFilter, Checkpoint, CheckpointBody, Entry, EntryBody};
+use datu_store::{decode_witness_stream, Store, WritePolicy};
+use datu_p2p::{sign_hello, NetworkPolicy, NodeHello, NETWORK_POLICY_VERSION};
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
+use std::fmt::Display;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
+
+#[derive(Parser)]
+#[command(
+    name = "datu",
+    version,
+    about = "DATU - tokenless, offline-capable, DAG-type accountability ledger (not a blockchain): signed entries, append-only, run a node anywhere"
+)]
+struct Cli {
+    /// Node directory (database + identity key)
+    #[arg(long, global = true, default_value = ".datu")]
+    data_dir: PathBuf,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Create a node directory with a fresh identity key
+    Init,
+    /// Show this node's identity
+    Keys,
+    /// Publish a signed entry to your feed
+    Publish {
+        /// Namespace, e.g. gov.records, audit.claims
+        #[arg(long, default_value = "general")]
+        ns: String,
+        /// Payload as inline text (typically JSON)
+        #[arg(long, conflicts_with = "file")]
+        payload: Option<String>,
+        /// Payload read from a file
+        #[arg(long, conflicts_with = "payload")]
+        file: Option<PathBuf>,
+        /// Causal reference to another entry id (repeatable)
+        #[arg(long = "ref")]
+        refs: Vec<String>,
+    },
+    /// List recent entries
+    Log {
+        #[arg(long)]
+        ns: Option<String>,
+        #[arg(long)]
+        author: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show one entry in full
+    Get {
+        #[arg(long)]
+        id: String,
+    },
+    /// Verify every signature, feed chain, and checkpoint in the store
+    Verify,
+    /// Sign a checkpoint over everything this node has seen
+    Checkpoint,
+    /// Witness tooling: sign, list, and exchange checkpoint streams
+    Witness {
+        #[command(subcommand)]
+        cmd: WitnessCmd,
+    },
+    /// Run the node HTTP API + ledger explorer (mirror node)
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:7474")]
+        addr: String,
+        /// Accept no new entries at all (pure view/witness mirror)
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// Keychain wallet: identities, signing, field-level encryption
+    Wallet {
+        #[command(subcommand)]
+        cmd: WalletCmd,
+    },
+    /// Identity attestations: bind keys to names/roles, cosign for weight
+    Attest {
+        #[command(subcommand)]
+        cmd: AttestCmd,
+    },
+    /// Writer policy: gate validators' namespaces; observers stay free
+    Policy {
+        #[command(subcommand)]
+        cmd: PolicyCmd,
+    },
+    /// Network mode: who may join and sync (permissioned vs permissionless)
+    Network {
+        #[command(subcommand)]
+        cmd: NetworkCmd,
+    },
+    /// Show and verify this code's genesis record - the founder-signed
+    /// statement every ledger seeded from this code begins with
+    Genesis,
+    /// Party signatures: the people a record is about must sign it
+    Parties {
+        #[command(subcommand)]
+        cmd: PartiesCmd,
+    },
+    /// Pull missing entries from peer node(s) - bloom-filter reconciliation
+    Sync {
+        /// Peer: bare host:port (native p2p protocol) or http://host:port
+        #[arg(long = "peer", required = true)]
+        peers: Vec<String>,
+        /// Max entries per page request
+        #[arg(long, default_value_t = 500)]
+        page: usize,
+    },
+    /// Run the always-on node: native p2p sync listener + auto-sync loop
+    Node {
+        /// Listen address for the native p2p sync protocol (any node can dial this)
+        #[arg(long, default_value = "0.0.0.0:7476")]
+        addr: String,
+        /// Peers to pull from every cycle (repeatable: host:port or http://…)
+        #[arg(long = "peer")]
+        peers: Vec<String>,
+        /// Seconds between sync cycles (0 = serve only, no auto-sync)
+        #[arg(long, default_value_t = 300)]
+        every: u64,
+        /// Discover LAN peers via mDNS every cycle and pull from them too
+        #[arg(long)]
+        discover: bool,
+        /// Sign a witness checkpoint whenever new entries arrive
+        #[arg(long)]
+        witness: bool,
+        /// Also run the HTTP explorer/API on this address (for dApps/humans)
+        #[arg(long)]
+        http: Option<String>,
+        /// Accept no new entries: pure view/witness mirror (--read-only)
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// Find datu nodes on the local network (mDNS) and print sync addresses
+    Discover {
+        #[arg(long, default_value_t = 3)]
+        seconds: u64,
+    },
+    /// Offline reconciliation files: request/answer/merge over any channel
+    Delta {
+        #[command(subcommand)]
+        cmd: DeltaCmd,
+    },
+    /// Compare checkpoint streams / a bundle and prove contradictory histories
+    ProveFork {
+        /// First witness stream file
+        #[arg(long, requires = "b", conflicts_with_all = ["against"])]
+        a: Option<PathBuf>,
+        /// Second witness stream file
+        #[arg(long, requires = "a", conflicts_with_all = ["against"])]
+        b: Option<PathBuf>,
+        /// Full data bundle to check against this node's stored history
+        #[arg(long, conflicts_with_all = ["a", "b"])]
+        against: Option<PathBuf>,
+        /// Write the evidence package (JSON) to this file
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Show store summary
+    Status,
+    /// Export/import a sync bundle (USB, LAN copy, any file channel)
+    Bundle {
+        #[command(subcommand)]
+        cmd: BundleCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum BundleCmd {
+    /// Write this node's full content to a file
+    Export {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Verify-then-merge a bundle into this node
+    Import {
+        #[arg(long)]
+        input: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum WitnessCmd {
+    /// Sign a checkpoint over everything this node has seen
+    Sign,
+    /// Show every signer's latest checkpoint (root of what they witnessed)
+    List,
+    /// Write a checkpoint-only stream (small - publishable anywhere)
+    Export {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Verify-then-merge a checkpoint stream
+    Import {
+        #[arg(long)]
+        input: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeltaCmd {
+    /// Write a "what I have" request file (carry it to any peer by any channel)
+    Make {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Answer a request file with the entries the requester lacks
+    Answer {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Verify-then-merge a response file into this node
+    Merge {
+        #[arg(long)]
+        input: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum AttestCmd {
+    /// Publish an attestation binding claims to a subject key (you are the attestor)
+    Create {
+        /// Subject: Ed25519 public key (hex) - from `datu keys` or `wallet show`
+        #[arg(long)]
+        subject: String,
+        /// Free-form claims as JSON, e.g. '{"legal_name":"Acme Ltd","role":"bidder"}'
+        #[arg(long)]
+        claims: String,
+        /// Optional human-readable subject label, e.g. "Acme Ltd"
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Cosign an existing attestation (adds your node's weight to it)
+    Cosign {
+        /// Attestation entry id (hex)
+        #[arg(long)]
+        id: String,
+    },
+    /// Show attestations for a subject key, or one attestation with cosigners
+    Status {
+        #[arg(long, conflicts_with = "id")]
+        subject: Option<String>,
+        #[arg(long, conflicts_with = "subject")]
+        id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicyCmd {
+    /// Write this node's writer policy (gated namespaces, trust roots)
+    Init {
+        /// Trust root key: its attestations admit writers (repeatable)
+        #[arg(long = "attestor", value_delimiter = ',')]
+        attestors: Vec<String>,
+        /// Explicitly admitted writer key (repeatable)
+        #[arg(long = "writer", value_delimiter = ',')]
+        writers: Vec<String>,
+        /// Gated namespace pattern, e.g. 'gov.*' (repeatable; default gov.* + identity.attest)
+        #[arg(long = "ns", value_delimiter = ',')]
+        gated: Vec<String>,
+        /// Cosigners required on an attestation for admission (0 = attestor alone suffices)
+        #[arg(long, default_value_t = 0)]
+        min_cosigners: usize,
+        /// Party role gated documents must carry a verified signature for (repeatable, any key)
+        #[arg(long = "require-role", value_delimiter = ',')]
+        require_roles: Vec<String>,
+        /// Per-namespace party rule: NS:ROLE[@FIELD][=KEY] (repeatable).
+        /// `gov.titles.*:holder@holder_key` binds the holder role to the key
+        /// named in the document's holder_key field.
+        #[arg(long = "rule")]
+        rules: Vec<String>,
+        /// Field that must be ENCRYPTED in that namespace: NS:FIELD
+        /// (repeatable). Personal data is never published in plaintext.
+        #[arg(long = "seal-field")]
+        seal_fields: Vec<String>,
+        /// Accept no new entries at all (pure view/witness mirror)
+        #[arg(long)]
+        readonly: bool,
+    },
+    /// Show the current policy (or say you are a free observer)
+    Show,
+    /// Delete the policy - this node becomes a free, open observer
+    Clear,
+}
+
+#[derive(Subcommand)]
+enum NetworkCmd {
+    /// Write this node's network policy (the join gate; writes stay policy.json)
+    Init {
+        /// 'permissioned' (join = members + attestations) or 'permissionless'
+        #[arg(long)]
+        mode: String,
+        /// Mesh id: nodes only sync with peers carrying the same id
+        /// (empty = the open network)
+        #[arg(long, default_value = "")]
+        network_id: String,
+        /// Admitted member key, hex ed25519 (repeatable)
+        #[arg(long = "member", value_delimiter = ',')]
+        members: Vec<String>,
+        /// Attestation root key: any node it attests on-ledger is admitted (repeatable)
+        #[arg(long = "root", value_delimiter = ',')]
+        roots: Vec<String>,
+    },
+    /// Show the current network policy (or say you are the open network)
+    Show,
+    /// Delete the network policy - this node becomes the open network
+    Clear,
+}
+
+#[derive(Subcommand)]
+enum PartiesCmd {
+    /// Sign a document as a party (consent) using this node's identity
+    Sign {
+        /// Party role: registrar, holder, witness…
+        #[arg(long)]
+        role: String,
+        /// Transaction kind when the input is a bare document (e.g. land.title.application)
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Verify every party signature on a published entry
+    Show {
+        #[arg(long)]
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum WalletCmd {
+    /// Create a new identity (encrypted keychain entry)
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+    /// List identities
+    List,
+    /// Show an identity's public keys
+    Show {
+        #[arg(long)]
+        name: String,
+    },
+    /// Sign a dApp entry request → returns the signed entry (submit to any node)
+    Sign {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Encrypt selected fields of a JSON document to reader seal key(s)
+    Seal {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// Reader X25519 seal public key(s) (hex, comma-separated for multiple)
+        #[arg(long, value_delimiter = ',')]
+        to: Vec<String>,
+        /// Read seal key(s) from top-level document field(s): a hex string or
+        /// an array of hex strings (e.g. holder_seal)
+        #[arg(long = "to-field", value_delimiter = ',')]
+        to_fields: Vec<String>,
+        #[arg(long)]
+        input: PathBuf,
+        /// Comma-separated top-level field names to encrypt
+        #[arg(long)]
+        fields: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Decrypt sealed fields addressed to one of your identities
+    Open {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Export an identity as an encrypted backup (offline copy / move devices)
+    Export {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// Passphrase protecting the backup file (may differ; min 8 chars)
+        #[arg(long)]
+        backup_passphrase: Option<String>,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Import an identity backup into this wallet
+    Import {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        backup_passphrase: Option<String>,
+        /// Import under a different name if it already exists here
+        #[arg(long)]
+        rename: Option<String>,
+    },
+    /// Run the local wallet bridge: a browser wallet / dApp talks to this
+    /// process instead of holding keys in JS (paired with a token, loopback only)
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:7482")]
+        addr: String,
+        /// Extra browser origin allowed to call the bridge (repeatable);
+        /// extension pages and http://127.0.0.1:5173 are always allowed
+        #[arg(long = "allow-origin")]
+        allow_origins: Vec<String>,
+    },
+    /// Sign a document's party role from the wallet - citizen consent (e.g. as holder)
+    CosignDoc {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// Party role, e.g. holder
+        #[arg(long)]
+        role: String,
+        /// Transaction kind when the input is a bare document (e.g. land.title.application)
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+struct Node {
+    store: Store,
+    key: SigningKey,
+    pq_key: datu_core::pq::PqPrivateKey,
+    identity: String,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn s<T, E: Display>(r: Result<T, E>) -> Result<T, String> {
+    r.map_err(|e| e.to_string())
+}
+
+fn parse_id(hex_str: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(hex_str).map_err(|e| format!("bad entry id '{hex_str}': {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| format!("entry id must be 32 bytes: '{hex_str}'"))
+}
+
+fn short(h: &str) -> &str {
+    &h[..8.min(h.len())]
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct SignRequest {
+    pub(crate) namespace: String,
+    pub(crate) seq: u64,
+    #[serde(default)]
+    pub(crate) prev: Option<String>,
+    #[serde(default)]
+    pub(crate) refs: Vec<String>,
+    #[serde(default)]
+    pub(crate) timestamp_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) payload_base64: Option<String>,
+    #[serde(default)]
+    pub(crate) payload_json: Option<serde_json::Value>,
+}
+
+/// Build and hybrid-sign an entry from a dApp sign request. Shared by the
+/// `wallet sign` CLI command and the local wallet bridge (`wallet serve`).
+pub(crate) fn entry_from_sign_request(
+    identity: &datu_wallet::LoadedIdentity,
+    request: &SignRequest,
+) -> Result<Entry, String> {
+    if request.payload_base64.is_none() && request.payload_json.is_none() {
+        return Err("sign request needs payload_base64 or payload_json".into());
+    }
+    let payload = if let Some(b64) = &request.payload_base64 {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|_| "bad payload_base64".to_string())?
+    } else {
+        let value = request.payload_json.as_ref().expect("checked above");
+        serde_json::to_vec(value).map_err(|e| e.to_string())?
+    };
+    let prev = match &request.prev {
+        Some(p) => Some(parse_id(p)?),
+        None => None,
+    };
+    let mut refs = Vec::with_capacity(request.refs.len());
+    for r in &request.refs {
+        refs.push(parse_id(r)?);
+    }
+    let body = EntryBody {
+        version: datu_core::ENTRY_VERSION,
+        author: identity.public.ed_public.clone(),
+        author_pq: identity.public.pq_public.clone(),
+        pq_alg: "mldsa65".to_string(),
+        namespace: request.namespace.clone(),
+        seq: request.seq,
+        prev,
+        refs,
+        timestamp_ms: request.timestamp_ms.unwrap_or_else(now_ms),
+        payload,
+    };
+    identity.sign_entry(body)
+}
+
+fn get_passphrase(flag: Option<String>) -> Result<String, String> {
+    flag.or_else(|| std::env::var("DATU_WALLET_PASS").ok())
+        .ok_or_else(|| "pass --passphrase or set DATU_WALLET_PASS".to_string())
+}
+
+fn get_backup_passphrase(flag: Option<String>) -> Result<String, String> {
+    flag.or_else(|| std::env::var("DAG_BACKUP_PASS").ok())
+        .ok_or_else(|| "pass --backup-passphrase or set DAG_BACKUP_PASS".to_string())
+}
+
+fn cmd_wallet_export(
+    data_dir: &Path,
+    name: &str,
+    passphrase: &str,
+    backup_passphrase: &str,
+    out: &Path,
+) -> Result<(), String> {
+    let wallet = datu_wallet::Wallet::open(data_dir);
+    let backup = wallet.export_identity(name, passphrase, backup_passphrase)?;
+    let json = serde_json::to_string_pretty(&backup).map_err(|e| e.to_string())?;
+    std::fs::write(out, &json).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o600));
+    }
+    println!("backup written: {}", out.display());
+    println!(
+        "  identity '{}' · ed {}",
+        backup.name,
+        short(&backup.ed_public)
+    );
+    println!("  encrypted with the backup passphrase - keep the two apart");
+    Ok(())
+}
+
+fn cmd_wallet_import(
+    data_dir: &Path,
+    input: &Path,
+    backup_passphrase: &str,
+    rename: Option<String>,
+) -> Result<(), String> {
+    let wallet = datu_wallet::Wallet::open(data_dir);
+    let text = std::fs::read_to_string(input)
+        .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let backup: datu_wallet::IdentityBackup =
+        serde_json::from_str(&text).map_err(|e| format!("not a datu identity backup: {e}"))?;
+    let public = wallet.import_identity(&backup, backup_passphrase, rename.as_deref())?;
+    println!("identity imported: {}", public.name);
+    println!("  author (ed25519): {}", public.ed_public);
+    println!("  seal   (x25519):  {}", public.seal_public);
+    println!("  it unlocks with the backup passphrase you just used");
+    Ok(())
+}
+
+fn write_output(out: &Option<PathBuf>, text: &str) -> Result<(), String> {
+    match out {
+        Some(path) => {
+            std::fs::write(path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            println!("written: {}", path.display());
+        }
+        None => println!("{text}"),
+    }
+    Ok(())
+}
+
+pub(crate) fn policy_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("policy.json")
+}
+
+/// Load this node's writer policy, if any. `None` = free, open observer.
+pub(crate) fn read_policy(data_dir: &Path) -> Result<Option<WritePolicy>, String> {
+    let path = policy_path(data_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    WritePolicy::from_json(&text).map(Some)
+}
+
+/// The policy a long-running service enforces: `--read-only` freezes the
+/// node even when it has no policy file.
+pub(crate) fn effective_policy(
+    data_dir: &Path,
+    read_only: bool,
+) -> Result<Option<WritePolicy>, String> {
+    if read_only {
+        return Ok(Some(WritePolicy::readonly()));
+    }
+    read_policy(data_dir)
+}
+
+// ---- network modes (who may JOIN; policy.json decides who may WRITE) ----
+
+pub(crate) fn network_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("network.json")
+}
+
+/// Load this node's network policy, if any. `None` = permissionless, the
+/// open network: anyone may sync (today's behavior).
+pub(crate) fn read_network(data_dir: &Path) -> Result<Option<NetworkPolicy>, String> {
+    let path = network_path(data_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    NetworkPolicy::from_json(&text).map(Some)
+}
+
+/// This node's mesh id ("" = the open network).
+pub(crate) fn our_network_id(data_dir: &Path) -> Result<String, String> {
+    Ok(read_network(data_dir)?
+        .map(|net| net.network_id)
+        .unwrap_or_default())
+}
+
+/// This node's introduction for walled syncs: sent when we are permissioned
+/// or carry a mesh id; omitted on the open network so old peers keep working.
+pub(crate) fn network_hello(
+    data_dir: &Path,
+    key: &SigningKey,
+) -> Result<Option<NodeHello>, String> {
+    match read_network(data_dir)? {
+        Some(net) if net.is_permissioned() || !net.network_id.is_empty() => {
+            Ok(Some(sign_hello(key, &net.network_id)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Parse a JSON document into a party-signed one: an already-signed
+/// document is used as-is, a bare object is wrapped under `--kind`.
+fn load_or_wrap_document(input: &Path, kind: Option<&str>) -> Result<SignedDocument, String> {
+    let text = std::fs::read_to_string(input)
+        .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    if let Ok(document) = serde_json::from_str::<SignedDocument>(&text) {
+        return Ok(document);
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("input must be JSON: {e}"))?;
+    if !value.is_object() {
+        return Err("document must be a JSON object".into());
+    }
+    let kind = kind
+        .ok_or("pass --kind (e.g. land.title.application) or an already-signed document")?;
+    Ok(SignedDocument::new(kind, value))
+}
+
+fn print_policy(policy: &WritePolicy) {
+    if policy.readonly {
+        println!("  mode: read-only - no new entries accepted (view + witness only)");
+    } else {
+        println!("  mode: validator gate");
+        println!(
+            "  gated namespaces: {}",
+            if policy.gated.is_empty() { "(none)".to_string() } else { policy.gated.join(", ") }
+        );
+    }
+    println!(
+        "  trust roots:      {}",
+        if policy.attestors.is_empty() { "(none)".to_string() } else { policy.attestors.join(", ") }
+    );
+    println!(
+        "  explicit writers: {}",
+        if policy.writers.is_empty() { "(none)".to_string() } else { policy.writers.join(", ") }
+    );
+    if policy.min_cosigners > 0 {
+        println!("  min cosigners:    {}", policy.min_cosigners);
+    }
+    if !policy.required_roles.is_empty() {
+        println!("  required roles:   {} (party signature required, any key)", policy.required_roles.join(", "));
+    }
+    for rule in &policy.rules {
+        let parts: Vec<String> = rule
+            .require
+            .iter()
+            .map(|r| {
+                let mut part = r.role.clone();
+                if let Some(field) = &r.bind_field {
+                    part.push_str(&format!(" (key must equal doc field '{field}')"));
+                }
+                if let Some(key) = &r.key {
+                    part.push_str(&format!(" (key {})", short(key)));
+                }
+                part
+            })
+            .collect();
+        let mut line = format!("  rule {}: {}", rule.ns, parts.join(", "));
+        if !rule.require_sealed.is_empty() {
+            line.push_str(&format!(
+                "   [encrypted fields: {}]",
+                rule.require_sealed.join(", ")
+            ));
+        }
+        println!("{line}");
+    }
+    if !policy.readonly {
+        println!("  observers:        unencumbered - a node with no policy.json accepts everything");
+    }
+}
+
+fn print_network(net: &NetworkPolicy) {
+    if net.is_permissioned() {
+        println!("  mode: permissioned - join = member key or an attestation from a root");
+    } else if !net.network_id.is_empty() {
+        println!(
+            "  mode: permissionless on mesh '{}' - a free mirror of one walled mesh",
+            net.network_id
+        );
+    } else {
+        println!("  mode: permissionless - the open network, anyone may sync");
+    }
+    if !net.network_id.is_empty() {
+        println!(
+            "  mesh:              {} (peers presenting any other id are refused)",
+            net.network_id
+        );
+    }
+    println!(
+        "  members:           {}",
+        if net.members.is_empty() {
+            "(none)".to_string()
+        } else {
+            net.members
+                .iter()
+                .map(|k| short(k).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    println!(
+        "  attestation roots: {}",
+        if net.roots.is_empty() {
+            "(none)".to_string()
+        } else {
+            net.roots
+                .iter()
+                .map(|k| short(k).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    println!("  wall:              bundles, deltas and witness streams carry this mesh id; foreign ones are refused");
+}
+
+/// Parse `NS:ROLE[@FIELD][=KEY]` into a namespace party rule.
+fn parse_rule(spec: &str) -> Result<datu_store::NamespaceRule, String> {
+    let (ns, rest) = spec
+        .split_once(':')
+        .ok_or("rule must look like 'gov.titles.*:holder@holder_key'")?;
+    let (rest, key) = match rest.split_once('=') {
+        Some((r, k)) => (r, Some(k.to_string())),
+        None => (rest, None),
+    };
+    let (role, bind_field) = match rest.split_once('@') {
+        Some((r, f)) => (r, Some(f.to_string())),
+        None => (rest, None),
+    };
+    if ns.trim().is_empty() || role.trim().is_empty() {
+        return Err(format!("bad rule '{spec}': namespace and role must be non-empty"));
+    }
+    if let Some(key) = &key {
+        parse_id(key).map_err(|_| format!("rule key '{key}' is not a 32-byte Ed25519 key (hex)"))?;
+    }
+    Ok(datu_store::NamespaceRule {
+        ns: ns.trim().to_string(),
+        require: vec![datu_store::RoleRule {
+            role: role.trim().to_string(),
+            key,
+            bind_field,
+        }],
+        require_sealed: vec![],
+    })
+}
+
+/// Parse `NS:FIELD` into (namespace, field) for required encryption.
+fn parse_seal_field(spec: &str) -> Result<(String, String), String> {
+    match spec.split_once(':') {
+        Some((ns, field)) if !ns.trim().is_empty() && !field.trim().is_empty() => {
+            Ok((ns.trim().to_string(), field.trim().to_string()))
+        }
+        _ => Err(format!("bad --seal-field '{spec}': expected NS:FIELD")),
+    }
+}
+
+fn cmd_wallet_create(
+    data_dir: &Path,
+    name: &str,
+    passphrase: &str,
+) -> Result<(), String> {
+    let wallet = datu_wallet::Wallet::open(data_dir);
+    let public = wallet.create(name, passphrase)?;
+    println!("identity created: {}", public.name);
+    println!("  author  (ed25519):  {}", public.ed_public);
+    println!("  pq      (mldsa65):  {}…", &public.pq_public[..16.min(public.pq_public.len())]);
+    println!("  seal    (x25519):   {}", public.seal_public);
+    println!("keystore encrypted with your passphrase - keys never leave this wallet unencrypted");
+    Ok(())
+}
+
+fn cmd_wallet_list(data_dir: &Path) -> Result<(), String> {
+    let wallet = datu_wallet::Wallet::open(data_dir);
+    let identities = wallet.list()?;
+    if identities.is_empty() {
+        println!("no identities - run `datu wallet create --name NAME`");
+        return Ok(());
+    }
+    println!("{:<12}  {:<16}  {:<8}  {}", "name", "author(ed)", "created", "seal key (x25519)");
+    for id in identities {
+        println!(
+            "{:<12}  {:<16}  {:<8}  {}",
+            id.name,
+            short(&id.ed_public),
+            "",
+            id.seal_public
+        );
+    }
+    Ok(())
+}
+
+fn cmd_wallet_show(data_dir: &Path, name: &str) -> Result<(), String> {
+    let wallet = datu_wallet::Wallet::open(data_dir);
+    let identity = wallet
+        .list()?
+        .into_iter()
+        .find(|i| i.name == name)
+        .ok_or_else(|| format!("identity '{name}' not found"))?;
+    println!("name:            {}", identity.name);
+    println!("author (ed25519): {}", identity.ed_public);
+    println!("pq (mldsa65):     {}…", &identity.pq_public[..16.min(identity.pq_public.len())]);
+    println!("seal (x25519):    {}", identity.seal_public);
+    println!("publish this seal key so others can encrypt fields to you");
+    Ok(())
+}
+
+fn cmd_wallet_sign(
+    data_dir: &Path,
+    name: &str,
+    passphrase: &str,
+    request_path: &Path,
+    out: &Option<PathBuf>,
+) -> Result<(), String> {
+    let wallet = datu_wallet::Wallet::open(data_dir);
+    let identity = wallet.load(name, passphrase)?;
+    let text =
+        std::fs::read_to_string(request_path).map_err(|e| format!("cannot read {}: {e}", request_path.display()))?;
+    let request: SignRequest =
+        serde_json::from_str(&text).map_err(|e| format!("bad sign request: {e}"))?;
+    let entry = entry_from_sign_request(&identity, &request)?;
+    let id = s(entry.id())?;
+    let json = serde_json::to_string_pretty(&s(serve::entry_full_json(&entry))?)
+        .map_err(|e| e.to_string())?;
+    write_output(out, &json)?;
+    println!("signed as {} seq {} → entry {}", short(&identity.public.ed_public), entry.body.seq, hex::encode(id));
+    println!("submit: POST /v1/entries to any node");
+    Ok(())
+}
+
+fn cmd_wallet_seal(
+    data_dir: &Path,
+    name: &str,
+    passphrase: &str,
+    to: &[String],
+    to_fields: &[String],
+    input: &Path,
+    fields: &str,
+    out: &Option<PathBuf>,
+) -> Result<(), String> {
+    let wallet = datu_wallet::Wallet::open(data_dir);
+    let identity = wallet.load(name, passphrase)?;
+    let text =
+        std::fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let mut document: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("input must be a JSON object: {e}"))?;
+    // Readers = explicit --to keys plus seal keys published inside the
+    // document itself (e.g. holder_seal): the enclosure is written to the
+    // registry office AND to each party whose data it is.
+    let mut readers: Vec<String> = to.to_vec();
+    for field in to_fields {
+        match document.get(field) {
+            Some(serde_json::Value::String(key)) => readers.push(key.clone()),
+            Some(serde_json::Value::Array(items)) => {
+                for item in items {
+                    if let Some(key) = item.as_str() {
+                        readers.push(key.to_string());
+                    }
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "document has no seal key in field '{field}' (expected a hex string or array)"
+                ))
+            }
+        }
+    }
+    readers.sort();
+    readers.dedup();
+    if readers.is_empty() {
+        return Err("pass at least one reader seal key: --to KEY or --to-field FIELD".into());
+    }
+    let field_names: Vec<String> = fields
+        .split(',')
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect();
+    let sealed = identity.seal_fields(&mut document, &field_names, &readers)?;
+    let json = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
+    write_output(out, &json)?;
+    println!(
+        "{sealed} field(s) sealed to {} reader(s); everything else stays public",
+        readers.len()
+    );
+    Ok(())
+}
+
+fn cmd_wallet_open(
+    data_dir: &Path,
+    name: &str,
+    passphrase: &str,
+    input: &Path,
+    out: &Option<PathBuf>,
+) -> Result<(), String> {
+    let wallet = datu_wallet::Wallet::open(data_dir);
+    let identity = wallet.load(name, passphrase)?;
+    let text =
+        std::fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let mut document: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("input must be a JSON object: {e}"))?;
+    let mut opened = identity.open_fields(&mut document)?;
+    // Party-signed documents carry their payload under `doc`: open sealed
+    // fields there too, so holders can read what they signed.
+    let signed_document = document.get("doc").map(|d| d.is_object()).unwrap_or(false)
+        && document.get("parties").is_some();
+    if signed_document {
+        if let Some(inner) = document.get_mut("doc") {
+            let (inner_opened, inner_skipped) = identity.open_fields(inner)?;
+            opened.0 += inner_opened;
+            opened.1 += inner_skipped;
+        }
+    }
+    let (opened, skipped) = opened;
+    let json = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
+    write_output(out, &json)?;
+    println!("{opened} field(s) decrypted for {}, {skipped} sealed for other readers", identity.public.name);
+    Ok(())
+}
+
+fn payload_preview(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.chars().take(60).collect()
+}
+
+fn load_node(dir: &Path) -> Result<Node, String> {
+    let secret_path = dir.join("secret.key");
+    if !secret_path.exists() {
+        return Err(format!(
+            "no node at {} - run `datu init` first",
+            dir.display()
+        ));
+    }
+    let hex_secret = std::fs::read_to_string(&secret_path).map_err(|e| e.to_string())?;
+    let bytes =
+        hex::decode(hex_secret.trim()).map_err(|_| "corrupt secret.key".to_string())?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "corrupt secret.key".to_string())?;
+    let key = SigningKey::from_bytes(&arr);
+    let pq_secret_path = dir.join("secret.mldsa65");
+    if !pq_secret_path.exists() {
+        return Err(format!(
+            "node at {} is missing its post-quantum key - re-run `datu init`",
+            dir.display()
+        ));
+    }
+    let pq_hex =
+        std::fs::read_to_string(&pq_secret_path).map_err(|e| e.to_string())?;
+    let pq_key = s(datu_core::pq::sk_from_hex(pq_hex.trim()))?;
+    let identity = hex::encode(key.verifying_key().as_bytes());
+    let store = s(Store::open_with_policy(&dir.join("node.db"), read_policy(dir)?))?;
+    Ok(Node {
+        store,
+        key,
+        pq_key,
+        identity,
+    })
+}
+
+fn cmd_init(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let secret_path = dir.join("secret.key");
+    if secret_path.exists() {
+        return Err(format!("node already exists at {}", dir.display()));
+    }
+    let key = SigningKey::generate(&mut OsRng);
+    let pq_secret_path = dir.join("secret.mldsa65");
+    let (_pq_pk, pq_key) = s(datu_core::pq::keypair())?;
+    std::fs::write(&secret_path, hex::encode(key.to_bytes())).map_err(|e| e.to_string())?;
+    std::fs::write(
+        &pq_secret_path,
+        datu_core::pq::sk_to_hex(&pq_key),
+    )
+    .map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(&secret_path, mode.clone());
+        let _ = std::fs::set_permissions(&pq_secret_path, mode);
+    }
+    let identity = hex::encode(key.verifying_key().as_bytes());
+    let _store = s(Store::open(&dir.join("node.db")))?;
+    println!("node created: {}", dir.display());
+    println!("identity:     {identity}");
+    println!(
+        "genesis:      {} - every ledger from this code begins with it (`datu genesis`)",
+        short(datu_core::genesis::GENESIS_ID_HEX)
+    );
+    println!("signatures:   hybrid Ed25519 + ML-DSA-65 (quantum-resistant)");
+    println!("records are append-only and content-addressed; nothing can be edited or deleted.");
+    Ok(())
+}
+
+/// Show and verify the code-carried genesis record: the founder's signed
+/// statement, the lineage mark of this codebase and every fork that keeps
+/// it. Any tampering with the embedded constant fails verification here.
+fn cmd_genesis(data_dir: &Path) -> Result<(), String> {
+    let genesis = datu_core::genesis::genesis_entry().map_err(|e| e.to_string())?;
+    let id = s(genesis.id().map_err(|e| e.to_string()))?;
+    println!(
+        "genesis record: {} (signature verified: Ed25519 + ML-DSA-65)",
+        hex::encode(id)
+    );
+    println!("founder:        {}", datu_core::genesis::GENESIS_FOUNDER);
+    println!("author key:     {}", genesis.body.author);
+    println!("namespace:      {} (seq 0, the first entry of every ledger)", genesis.body.namespace);
+    let payload: serde_json::Value = s(serde_json::from_slice(&genesis.body.payload).map_err(|e| e.to_string()))?;
+    if let Some(statement) = payload["statement"].as_str() {
+        println!();
+        for line in statement.lines() {
+            println!("  | {line}");
+        }
+        println!();
+    }
+    let db = data_dir.join("node.db");
+    if db.exists() {
+        let store = s(Store::open(&db))?;
+        if store.has_entry(&id).map_err(|e| e.to_string())? {
+            println!("local ledger:   carries this genesis - lineage intact");
+        } else {
+            println!("local ledger:   MISSING this genesis - rebuilt from foreign code?");
+        }
+    } else {
+        println!("local ledger:   none here yet (`datu init` starts one from this record)");
+    }
+    Ok(())
+}
+
+fn cmd_publish(
+    node: &Node,
+    ns: String,
+    payload: Option<String>,
+    file: Option<PathBuf>,
+    refs: Vec<String>,
+) -> Result<(), String> {
+    let payload: Vec<u8> = if let Some(path) = file {
+        std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?
+    } else {
+        payload
+            .ok_or_else(|| "provide --payload TEXT or --file PATH".to_string())?
+            .into_bytes()
+    };
+    if payload.len() > MAX_PAYLOAD_BYTES {
+        return Err(format!(
+            "payload is {} bytes; limit is {MAX_PAYLOAD_BYTES}",
+            payload.len()
+        ));
+    }
+    let refs: Vec<[u8; 32]> = refs.iter().map(|r| parse_id(r)).collect::<Result<_, _>>()?;
+
+    let latest = s(node.store.latest(&node.identity))?;
+    let (seq, prev) = match &latest {
+        Some(e) => (e.body.seq + 1, Some(s(e.id())?)),
+        None => (0, None),
+    };
+    let body = EntryBody {
+        version: datu_core::ENTRY_VERSION,
+        author: node.identity.clone(),
+        author_pq: String::new(),
+        pq_alg: String::new(),
+        namespace: ns,
+        seq,
+        prev,
+        refs,
+        timestamp_ms: now_ms(),
+        payload,
+    };
+    let entry = s(Entry::sign(body, &node.key, &node.pq_key))?;
+    let id = s(entry.id())?;
+    if !s(node.store.insert_entry(&entry))? {
+        return Err("entry unexpectedly already present".into());
+    }
+    println!("published {} (seq {seq})", hex::encode(id));
+    Ok(())
+}
+
+fn cmd_log(
+    node: &Node,
+    ns: Option<String>,
+    author: Option<String>,
+    limit: usize,
+) -> Result<(), String> {
+    let entries = s(node.store.list(ns.as_deref(), author.as_deref(), limit))?;
+    if entries.is_empty() {
+        println!("no entries");
+        return Ok(());
+    }
+    for e in entries {
+        let id = hex::encode(s(e.id())?);
+        println!(
+            "{}  {}  ns={} seq={}  {}",
+            short(&id),
+            short(&e.body.author),
+            e.body.namespace,
+            e.body.seq,
+            payload_preview(&e.body.payload)
+        );
+    }
+    Ok(())
+}
+
+fn cmd_get(node: &Node, id_hex: String) -> Result<(), String> {
+    let id = parse_id(&id_hex)?;
+    let e = s(node.store.get_entry(&id))?
+        .ok_or_else(|| format!("entry {id_hex} not found"))?;
+    let json = serde_json::json!({
+        "id": hex::encode(s(e.id())?),
+        "author": e.body.author,
+        "author_pq": format!("{}…", &e.body.author_pq[..16.min(e.body.author_pq.len())]),
+        "pq_alg": e.body.pq_alg,
+        "namespace": e.body.namespace,
+        "seq": e.body.seq,
+        "prev": e.body.prev.map(hex::encode),
+        "refs": e.body.refs.iter().map(|r| hex::encode(r)).collect::<Vec<_>>(),
+        "timestamp_ms": e.body.timestamp_ms,
+        "payload": String::from_utf8_lossy(&e.body.payload),
+        "signature": hex::encode(e.signature),
+        "pq_signature": format!("{}…", hex::encode(&e.pq_signature)[..32].to_string()),
+    });
+    println!("{}", serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+fn cmd_verify(node: &Node) -> Result<(), String> {
+    let report = s(node.store.verify_all())?;
+    println!(
+        "OK: {} entries, {} feeds, {} checkpoints, {} pending links (unseen references, not errors)",
+        report.entries, report.feeds, report.checkpoints, report.pending_links
+    );
+    println!(
+        "lineage: {}",
+        if report.lineage {
+            "intact - the code's genesis record is the first entry of this ledger"
+        } else {
+            "FOREIGN - the code's genesis record is missing: this ledger was built by genesis-stripped code"
+        }
+    );
+    Ok(())
+}
+
+fn cmd_checkpoint(node: &Node) -> Result<(), String> {
+    let ids = s(node.store.entry_ids())?;
+    let (id, height) =
+        sign_checkpoint_into(&node.store, &node.key, &node.pq_key, &node.identity)?;
+    let root = merkle_root(&ids);
+    println!(
+        "checkpoint {} (height {height}) over {} entries, root {}",
+        hex::encode(id),
+        ids.len(),
+        hex::encode(root)
+    );
+    Ok(())
+}
+
+/// Sign and append a checkpoint over everything in the store. Shared by the
+/// `checkpoint` command, witness flows, and the always-on node daemon.
+pub(crate) fn sign_checkpoint_into(
+    store: &Store,
+    key: &SigningKey,
+    pq_key: &datu_core::pq::PqPrivateKey,
+    identity: &str,
+) -> Result<([u8; 32], u64), String> {
+    let ids = s(store.entry_ids())?;
+    let root = merkle_root(&ids);
+    let last = s(store.last_checkpoint(identity))?;
+    let (height, prev) = match &last {
+        Some(c) => (c.body.height + 1, Some(s(c.id())?)),
+        None => (0, None),
+    };
+    let body = CheckpointBody {
+        version: datu_core::CHECKPOINT_VERSION,
+        signer: identity.to_string(),
+        signer_pq: String::new(),
+        pq_alg: String::new(),
+        height,
+        prev,
+        timestamp_ms: now_ms(),
+        entries_count: ids.len() as u64,
+        entry_ids_root: root,
+    };
+    let checkpoint = s(Checkpoint::sign(body, key, pq_key))?;
+    let id = s(checkpoint.id())?;
+    if !s(store.append_checkpoint(&checkpoint))? {
+        return Err("checkpoint unexpectedly already present".into());
+    }
+    Ok((id, height))
+}
+
+fn cmd_status(node: &Node) -> Result<(), String> {
+    let entries = s(node.store.entry_count())?;
+    let checkpoints = s(node.store.checkpoint_count())?;
+    println!("identity:    {}", node.identity);
+    println!("database:    {}", node.store.path().unwrap_or("<memory>"));
+    println!("entries:     {entries}");
+    println!("checkpoints: {checkpoints}");
+    if let Some(c) = s(node.store.last_checkpoint(&node.identity))? {
+        println!(
+            "my last checkpoint: height {} covering {} entries, root {}",
+            c.body.height,
+            c.body.entries_count,
+            hex::encode(c.body.entry_ids_root)
+        );
+    } else {
+        println!("my last checkpoint: none (run `datu checkpoint`)");
+    }
+    Ok(())
+}
+
+fn cmd_bundle_export(node: &Node, mesh: &str, out: &Path) -> Result<(), String> {
+    let bytes = s(node.store.export_bundle(mesh))?;
+    std::fs::write(out, &bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    println!(
+        "exported {} entries + checkpoints to {} ({} bytes)",
+        s(node.store.entry_count())?,
+        out.display(),
+        bytes.len()
+    );
+    Ok(())
+}
+
+fn cmd_bundle_import(node: &Node, mesh: &str, input: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let summary = s(node.store.import_bundle(&bytes, mesh))?;
+    println!(
+        "imported: {} new entries ({} already present{}), {} new checkpoints ({} already present)",
+        summary.entries_new,
+        summary.entries_existing,
+        if summary.entries_denied > 0 {
+            format!(", {} skipped by this node's policy", summary.entries_denied)
+        } else {
+            String::new()
+        },
+        summary.checkpoints_new,
+        summary.checkpoints_existing
+    );
+    Ok(())
+}
+
+fn cmd_witness_list(node: &Node) -> Result<(), String> {
+    let checkpoints = s(node.store.all_checkpoints())?;
+    if checkpoints.is_empty() {
+        println!("no checkpoints stored (run `datu witness sign`)");
+        return Ok(());
+    }
+    let mut latest: std::collections::BTreeMap<String, &Checkpoint> =
+        std::collections::BTreeMap::new();
+    for cp in &checkpoints {
+        let update = match latest.get(&cp.body.signer) {
+            Some(prev) => prev.body.height < cp.body.height,
+            None => true,
+        };
+        if update {
+            latest.insert(cp.body.signer.clone(), cp);
+        }
+    }
+    println!("{:<16}  {:>6}  {:>8}  {}", "signer", "height", "entries", "merkle root");
+    for (signer, cp) in &latest {
+        println!(
+            "{}  {:>6}  {:>8}  {}",
+            short(signer),
+            cp.body.height,
+            cp.body.entries_count,
+            hex::encode(cp.body.entry_ids_root)
+        );
+    }
+    Ok(())
+}
+
+fn cmd_witness_export(node: &Node, mesh: &str, out: &Path) -> Result<(), String> {
+    let bytes = s(node.store.export_witness_stream(mesh))?;
+    std::fs::write(out, &bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    println!(
+        "exported witness stream: {} checkpoints to {} ({} bytes) - publish it anywhere",
+        s(node.store.checkpoint_count())?,
+        out.display(),
+        bytes.len()
+    );
+    Ok(())
+}
+
+fn cmd_witness_import(node: &Node, mesh: &str, input: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let summary = s(node.store.import_witness_stream(&bytes, mesh))?;
+    println!(
+        "imported checkpoints: {} new, {} already present",
+        summary.checkpoints_new, summary.checkpoints_existing
+    );
+    Ok(())
+}
+
+fn read_witness_stream(path: &Path) -> Result<Vec<Checkpoint>, String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let stream = s(decode_witness_stream(&bytes))?;
+    Ok(stream.checkpoints)
+}
+
+fn checkpoint_json(cp: &Checkpoint) -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "id": hex::encode(s(cp.id())?),
+        "signer": cp.body.signer,
+        "height": cp.body.height,
+        "prev": cp.body.prev.map(hex::encode),
+        "timestamp_ms": cp.body.timestamp_ms,
+        "entries_count": cp.body.entries_count,
+        "entry_ids_root": hex::encode(cp.body.entry_ids_root),
+        "signature": hex::encode(cp.signature),
+        "pq_signature": hex::encode(&cp.pq_signature),
+    }))
+}
+
+fn evidence_json(ev: &ForkEvidence) -> Result<serde_json::Value, String> {
+    let checkpoints = ev
+        .checkpoints
+        .iter()
+        .map(checkpoint_json)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::json!({
+        "kind": ev.kind,
+        "signer": ev.signer,
+        "height": ev.height,
+        "description": ev.description,
+        "checkpoints": checkpoints,
+    }))
+}
+
+fn cmd_prove_fork(
+    data_dir: &Path,
+    a: Option<PathBuf>,
+    b: Option<PathBuf>,
+    against: Option<PathBuf>,
+    out: Option<PathBuf>,
+) -> Result<(), String> {
+    let mut evidence: Vec<ForkEvidence> = if let (Some(fa), Some(fb)) = (&a, &b) {
+        let stream_a = read_witness_stream(fa)?;
+        let stream_b = read_witness_stream(fb)?;
+        s(fork::analyze(&stream_a, &stream_b))?
+    } else if let Some(bundle_path) = &against {
+        let node = load_node(data_dir)?;
+        let bytes = std::fs::read(bundle_path)
+            .map_err(|e| format!("cannot read {}: {e}", bundle_path.display()))?;
+        let bundle: datu_store::Bundle = s(datu_store::Bundle::try_from_slice(&bytes)
+            .map_err(|e| format!("not a data bundle: {e}")))?;
+        let mut ids: Vec<[u8; 32]> = Vec::with_capacity(bundle.entries.len());
+        for entry in &bundle.entries {
+            s(entry.verify())?;
+            ids.push(s(entry.id())?);
+        }
+        let root = merkle_root(&ids);
+        let count = ids.len() as u64;
+        let mut found: Vec<ForkEvidence> = Vec::new();
+        for cp in s(node.store.all_checkpoints())? {
+            if cp.body.entries_count == count && cp.body.entry_ids_root != root {
+                found.push(ForkEvidence {
+                    kind: "history-mismatch",
+                    signer: cp.body.signer.clone(),
+                    height: cp.body.height,
+                    description: format!(
+                        "a stored checkpoint by {} covers {} entries with root {}, but this bundle's {} entries hash to root {} - if that witness mirrors this history, one of the two is fabricated",
+                        short(&cp.body.signer),
+                        cp.body.entries_count,
+                        hex::encode(cp.body.entry_ids_root),
+                        count,
+                        hex::encode(root)
+                    ),
+                    checkpoints: vec![cp.clone()],
+                });
+            }
+        }
+        let stored = s(node.store.all_checkpoints())?;
+        let mut cross = s(fork::analyze(&stored, &bundle.checkpoints))?;
+        found.append(&mut cross);
+        found
+    } else {
+        return Err("provide --a and --b, or --against".into());
+    };
+    evidence.sort_by(|x, y| y.height.cmp(&x.height));
+
+    let verdict = if evidence.is_empty() {
+        "NO_CONTRADICTIONS"
+    } else {
+        "FORK_PROVEN"
+    };
+    println!("verdict: {verdict}");
+    for ev in &evidence {
+        println!("  [{}] {}", ev.kind, ev.description);
+    }
+
+    let doc = serde_json::json!({
+        "verdict": verdict,
+        "generated_at_ms": now_ms(),
+        "evidence": evidence
+            .iter()
+            .map(evidence_json)
+            .collect::<Result<Vec<_>, _>>()?,
+    });
+    let json = s(serde_json::to_string_pretty(&doc))?;
+    match &out {
+        Some(path) => {
+            std::fs::write(path, &json)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            println!("evidence package written: {}", path.display());
+        }
+        None => {
+            if !evidence.is_empty() {
+                println!("pass --out FILE to save the full evidence package");
+            }
+        }
+    }
+    if !evidence.is_empty() {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+// ---- identity attestations ----
+
+fn cmd_attest_create(
+    node: &Node,
+    subject: String,
+    claims: String,
+    label: Option<String>,
+) -> Result<(), String> {
+    parse_id(&subject).map_err(|_| "subject must be a 32-byte Ed25519 public key (hex)".to_string())?;
+    let claims: serde_json::Value =
+        serde_json::from_str(&claims).map_err(|e| format!("--claims must be a JSON object: {e}"))?;
+    if !claims.is_object() {
+        return Err("--claims must be a JSON object".into());
+    }
+    let doc = AttestationDoc {
+        subject: subject.clone(),
+        label: label.clone(),
+        claims,
+    };
+    let payload = doc.payload_bytes()?;
+    let latest = s(node.store.latest(&node.identity))?;
+    let (seq, prev) = match &latest {
+        Some(e) => (e.body.seq + 1, Some(s(e.id())?)),
+        None => (0, None),
+    };
+    let body = EntryBody {
+        version: datu_core::ENTRY_VERSION,
+        author: node.identity.clone(),
+        author_pq: String::new(),
+        pq_alg: String::new(),
+        namespace: attest::NS_ATTEST.to_string(),
+        seq,
+        prev,
+        refs: vec![],
+        timestamp_ms: now_ms(),
+        payload,
+    };
+    let entry = s(Entry::sign(body, &node.key, &node.pq_key))?;
+    let id = s(entry.id())?;
+    if !s(node.store.insert_entry(&entry))? {
+        return Err("attestation unexpectedly already present".into());
+    }
+    println!("attestation {} published", hex::encode(id));
+    println!(
+        "  attestor: {}  subject: {}{}",
+        node.identity,
+        short(&subject),
+        label.as_deref().map(|l| format!(" ({l})")).unwrap_or_default()
+    );
+    println!("  others can add weight: datu attest cosign --id {}", hex::encode(id));
+    Ok(())
+}
+
+fn cmd_attest_cosign(node: &Node, id_hex: String) -> Result<(), String> {
+    let id = parse_id(&id_hex)?;
+    let target = s(node.store.get_entry(&id))?
+        .ok_or_else(|| format!("entry {id_hex} not found on this node - sync first"))?;
+    if attest::parse_attestation(&target).is_none() {
+        return Err(format!("{id_hex} is not an identity.attest entry"));
+    }
+    let doc = CosignDoc {
+        attestation: id_hex.clone(),
+    };
+    let payload = s(serde_json::to_vec(&doc))?;
+    let latest = s(node.store.latest(&node.identity))?;
+    let (seq, prev) = match &latest {
+        Some(e) => (e.body.seq + 1, Some(s(e.id())?)),
+        None => (0, None),
+    };
+    let body = EntryBody {
+        version: datu_core::ENTRY_VERSION,
+        author: node.identity.clone(),
+        author_pq: String::new(),
+        pq_alg: String::new(),
+        namespace: attest::NS_COSIGN.to_string(),
+        seq,
+        prev,
+        refs: vec![id],
+        timestamp_ms: now_ms(),
+        payload,
+    };
+    let entry = s(Entry::sign(body, &node.key, &node.pq_key))?;
+    let cosign_id = s(entry.id())?;
+    if !s(node.store.insert_entry(&entry))? {
+        return Err("cosign unexpectedly already present".into());
+    }
+    println!("cosigned {id_hex} as {} ({})", short(&node.identity), hex::encode(cosign_id));
+    Ok(())
+}
+
+fn cmd_attest_status(node: &Node, subject: Option<String>, id: Option<String>) -> Result<(), String> {
+    let entries = s(node.store.all_entries())?;
+    if let Some(id_hex) = id {
+        let id = parse_id(&id_hex)?;
+        let entry = entries
+            .iter()
+            .find(|e| s(e.id()).map(|x| x == id).unwrap_or(false))
+            .ok_or_else(|| format!("entry {id_hex} not found on this node"))?;
+        let doc = attest::parse_attestation(entry)
+            .ok_or_else(|| format!("{id_hex} is not an identity.attest entry"))?;
+        println!("attestation {}", id_hex);
+        println!("  attestor: {}", entry.body.author);
+        println!("  subject:  {}{}", doc.subject, doc.label.as_deref().map(|l| format!(" ({l})")).unwrap_or_default());
+        println!("  claims:   {}", doc.claims);
+        let cosigners = attest::cosigners_for(entries.iter(), &id);
+        println!("  cosigners ({} distinct):", cosigners.len());
+        for (c, _) in &cosigners {
+            println!("    {}  seq {}", c.body.author, c.body.seq);
+        }
+        return Ok(());
+    }
+    let subject = subject.ok_or_else(|| "pass --subject KEY or --id ID".to_string())?;
+    let found = attest::attestations_for(entries.iter(), &subject);
+    if found.is_empty() {
+        println!("no attestations for {subject} on this node");
+        println!("  (an institution binds its key with: datu attest create --subject KEY --claims '{{\"legal_name\":\"...\"}}')");
+        return Ok(());
+    }
+    println!("subject: {subject}");
+    let has_feed = s(node.store.latest(&subject))?.is_some();
+    println!("  published on this node: {}", if has_feed { "yes" } else { "no entries seen" });
+    for (entry, doc) in found {
+        let id = s(entry.id())?;
+        let cosigners = attest::cosigners_for(entries.iter(), &id);
+        println!(
+            "  attestation {} by {} ({} cosigners)",
+            short(&hex::encode(id)),
+            short(&entry.body.author),
+            cosigners.len()
+        );
+        if let Some(label) = &doc.label {
+            println!("    label: {label}");
+        }
+        println!("    claims: {}", doc.claims);
+        for (c, _) in &cosigners {
+            println!("    + cosigned by {}", short(&c.body.author));
+        }
+    }
+    Ok(())
+}
+
+// ---- bloom-filter sync ----
+
+/// Minimal std-only HTTP POST of a JSON body; returns the parsed JSON
+/// response. Good enough for localhost/LAN peer sync.
+fn http_post_json(
+    peer: &str,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let host = peer
+        .strip_prefix("http://")
+        .unwrap_or(peer)
+        .trim_end_matches('/');
+    let payload = serde_json::to_vec(body).map_err(|e| e.to_string())?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    );
+    let mut stream = TcpStream::connect(host)
+        .map_err(|e| format!("cannot connect to {host}: {e} (is the peer running `datu serve`?)"))?;
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|_| stream.write_all(&payload))
+        .and_then(|_| stream.flush())
+        .map_err(|e| format!("send to {host} failed: {e}"))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .map_err(|e| format!("bad response: {e}"))?;
+    if !status_line.contains("200") && !status_line.contains("201") {
+        return Err(format!("peer replied {status_line}"));
+    }
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut header = String::new();
+        reader
+            .read_line(&mut header)
+            .map_err(|e| format!("bad response: {e}"))?;
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().ok();
+            }
+        }
+    }
+    let mut response = Vec::new();
+    match content_length {
+        Some(len) => {
+            let mut buf = vec![0u8; len];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| format!("truncated response: {e}"))?;
+            response = buf;
+        }
+        None => {
+            reader
+                .read_to_end(&mut response)
+                .map_err(|e| format!("bad response: {e}"))?;
+        }
+    }
+    serde_json::from_slice(&response).map_err(|e| format!("peer sent invalid JSON: {e}"))
+}
+
+fn cmd_sync(
+    node: &Node,
+    peers: &[String],
+    page: usize,
+    hello: Option<&NodeHello>,
+    our_network_id: &str,
+) -> Result<(), String> {
+    for peer in peers {
+        let stats = pull_peer(&node.store, peer, page, hello, our_network_id)?;
+        println!(
+            "{peer}: {} new entries ({} already had{}), {} new checkpoints",
+            stats.new_entries,
+            stats.known,
+            if stats.denied > 0 {
+                format!(", {} skipped by this node's policy", stats.denied)
+            } else {
+                String::new()
+            },
+            stats.new_checkpoints
+        );
+    }
+    println!("sync complete; sync is pull-only - run `datu sync --peer <addr>` on the peer (or `datu node` there) for bidirectional flow");
+    Ok(())
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct SyncStats {
+    pub new_entries: usize,
+    pub known: usize,
+    pub denied: usize,
+    pub new_checkpoints: usize,
+}
+
+/// Pull everything a peer has that this store lacks, over whichever
+/// transport the peer address implies: bare `host:port` speaks the native
+/// p2p protocol (no HTTP anywhere); `http://…` uses the HTTP API. The mesh
+/// wall applies on both: p2p via the hello handshake, HTTP via the peer's
+/// advertised network id.
+pub(crate) fn pull_peer(
+    store: &Store,
+    peer: &str,
+    page: usize,
+    hello: Option<&NodeHello>,
+    our_network_id: &str,
+) -> Result<SyncStats, String> {
+    let peer = peer.trim().trim_end_matches('/');
+    if peer.starts_with("https://") {
+        return Err("https is not supported for sync - use a bare host:port (native p2p) or an http:// endpoint".into());
+    }
+    if peer.starts_with("http://") {
+        check_peer_mesh_http(peer, our_network_id)?;
+        pull_peer_http(store, peer, page)
+    } else {
+        let addr = peer
+            .strip_prefix("datu://")
+            .or_else(|| peer.strip_prefix("dag://"))
+            .unwrap_or(peer);
+        let stats = datu_p2p::pull_and_merge(addr, store, page.clamp(1, 2000) as u16, hello)
+            .map_err(|e| e.to_string())?;
+        Ok(SyncStats {
+            new_entries: stats.entries_new,
+            known: stats.entries_existing,
+            denied: stats.entries_denied,
+            new_checkpoints: stats.checkpoints_new,
+        })
+    }
+}
+
+/// The mesh wall for HTTP sync: read the peer's advertised network id and
+/// refuse a cross-mesh pull before any data moves. A peer with no network
+/// block (older datu) counts as the open network.
+fn check_peer_mesh_http(peer: &str, our_network_id: &str) -> Result<(), String> {
+    let status =
+        http_get_json(peer, "/v1/status").map_err(|e| format!("cannot read peer status: {e}"))?;
+    let theirs = status["network"]["network_id"].as_str().unwrap_or("");
+    if theirs != our_network_id {
+        return Err(format!(
+            "network mismatch: peer is on {}, this node is on {} - the wall refuses (see `datu network`)",
+            datu_p2p::mesh_name(theirs),
+            datu_p2p::mesh_name(our_network_id)
+        ));
+    }
+    Ok(())
+}
+
+/// Minimal std-only HTTP GET returning parsed JSON (peer status checks).
+fn http_get_json(peer: &str, path: &str) -> Result<serde_json::Value, String> {
+    let host = peer
+        .strip_prefix("http://")
+        .unwrap_or(peer)
+        .trim_end_matches('/');
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    );
+    let mut stream = TcpStream::connect(host)
+        .map_err(|e| format!("cannot connect to {host}: {e}"))?;
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|_| stream.flush())
+        .map_err(|e| format!("send to {host} failed: {e}"))?;
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .map_err(|e| format!("bad response: {e}"))?;
+    if !status_line.contains("200") {
+        return Err(format!("peer replied {status_line}"));
+    }
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut header = String::new();
+        reader
+            .read_line(&mut header)
+            .map_err(|e| format!("bad response: {e}"))?;
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().ok();
+            }
+        }
+    }
+    let mut response = Vec::new();
+    match content_length {
+        Some(len) => {
+            let mut buf = vec![0u8; len];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| format!("truncated response: {e}"))?;
+            response = buf;
+        }
+        None => {
+            reader
+                .read_to_end(&mut response)
+                .map_err(|e| format!("bad response: {e}"))?;
+        }
+    }
+    serde_json::from_slice(&response).map_err(|e| format!("peer sent invalid JSON: {e}"))
+}
+
+fn pull_peer_http(store: &Store, peer: &str, page: usize) -> Result<SyncStats, String> {
+    let ids = s(store.entry_ids())?;
+    let mut have = BloomFilter::new_for(ids.len().max(16), 0.001);
+    for id in &ids {
+        have.insert(id);
+    }
+    let mut stats = SyncStats::default();
+    let mut cursor: Option<i64> = None;
+    loop {
+        let request = serde_json::json!({
+            "m": have.bit_count(),
+            "k": have.hash_count(),
+            "bits_b64": base64::engine::general_purpose::STANDARD.encode(have.bit_bytes()),
+            "cursor": cursor,
+            "limit": page,
+        });
+        let response = http_post_json(peer, "/v1/sync/haves", &request)?;
+        for item in response["entries"]
+            .as_array()
+            .ok_or("peer response missing entries")?
+        {
+            let entry = serve::entry_from_submission(item)?;
+            match store.insert_entry(&entry) {
+                Ok(true) => stats.new_entries += 1,
+                Ok(false) => stats.known += 1,
+                Err(datu_store::StoreError::Denied(_)) => stats.denied += 1,
+                Err(datu_store::StoreError::Conflict { .. }) => {
+                    return Err(format!(
+                        "peer serves history contradicting ours at author {} seq {}: {} - this is fork evidence, not a sync error; collect the peer's witness stream and run `datu prove-fork`",
+                        short(&entry.body.author),
+                        entry.body.seq,
+                        entry.id().map(|i| hex::encode(i)).unwrap_or_default()
+                    ));
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        for item in response["checkpoints"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+        {
+            let checkpoint = serve::checkpoint_from_json(item)?;
+            match store.append_checkpoint(&checkpoint) {
+                Ok(true) => stats.new_checkpoints += 1,
+                Ok(false) => {}
+                Err(datu_store::StoreError::Fork { .. }) => {
+                    return Err(format!(
+                        "peer checkpoint contradicts a stored checkpoint: {} - fork evidence, see `datu prove-fork`",
+                        item["id"].as_str().unwrap_or("?")
+                    ));
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        cursor = response["cursor"].as_i64();
+        let more = response["more"].as_bool().unwrap_or(false);
+        if !more || cursor.is_none() {
+            return Ok(stats);
+        }
+    }
+}
+
+fn cmd_delta_make(node: &Node, mesh: &str, out: &Path) -> Result<(), String> {
+    let bytes = s(node.store.export_haves_request(0.001, mesh))?;
+    std::fs::write(out, &bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    println!(
+        "request written: {} ({} bytes) - carry it to any peer by any channel",
+        out.display(),
+        bytes.len()
+    );
+    Ok(())
+}
+
+fn cmd_delta_answer(node: &Node, mesh: &str, input: &Path, out: &Path) -> Result<(), String> {
+    let request = std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let (bytes, suppressed) = s(node.store.answer_delta(&request, mesh))?;
+    std::fs::write(out, &bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    println!(
+        "answer written: {} ({} entries they lack, {suppressed} suppressed as known)",
+        out.display(),
+        s(datu_store::decode_delta_response(&bytes))?.entries.len()
+    );
+    Ok(())
+}
+
+fn cmd_delta_merge(node: &Node, mesh: &str, input: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let summary = s(node.store.merge_delta(&bytes, mesh))?;
+    println!(
+        "merged: {} new entries ({} already present{}), {} new checkpoints ({} already present) - every record verified",
+        summary.entries_new,
+        summary.entries_existing,
+        if summary.entries_denied > 0 {
+            format!(", {} skipped by this node's policy", summary.entries_denied)
+        } else {
+            String::new()
+        },
+        summary.checkpoints_new,
+        summary.checkpoints_existing
+    );
+    Ok(())
+}
+
+// ---- writer policy (validators gated, observers free) ----
+
+fn cmd_policy_init(
+    data_dir: &Path,
+    attestors: Vec<String>,
+    writers: Vec<String>,
+    gated: Vec<String>,
+    min_cosigners: usize,
+    require_roles: Vec<String>,
+    rule_specs: Vec<String>,
+    seal_field_specs: Vec<String>,
+    readonly: bool,
+) -> Result<(), String> {
+    for key in attestors.iter().chain(writers.iter()) {
+        parse_id(key).map_err(|_| format!("'{key}' is not a 32-byte Ed25519 key (hex)"))?;
+    }
+    let mut rules: Vec<datu_store::NamespaceRule> = Vec::new();
+    for spec in &rule_specs {
+        let rule = parse_rule(spec)?;
+        match rules.iter_mut().find(|existing| existing.ns == rule.ns) {
+            Some(existing) => existing.require.extend(rule.require),
+            None => rules.push(rule),
+        }
+    }
+    for spec in &seal_field_specs {
+        let (ns, field) = parse_seal_field(spec)?;
+        match rules.iter_mut().find(|existing| existing.ns == ns) {
+            Some(existing) => existing.require_sealed.push(field),
+            None => rules.push(datu_store::NamespaceRule {
+                ns,
+                require: vec![],
+                require_sealed: vec![field],
+            }),
+        }
+    }
+    let gated = if gated.is_empty() && !readonly {
+        vec!["gov.*".to_string(), "identity.attest".to_string()]
+    } else {
+        gated
+    };
+    let policy = WritePolicy {
+        version: datu_store::POLICY_VERSION,
+        readonly,
+        gated,
+        writers,
+        attestors,
+        min_cosigners,
+        required_roles: require_roles,
+        rules,
+    };
+    let path = policy_path(data_dir);
+    std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
+    std::fs::write(&path, policy.to_json()?)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    println!("policy written: {}", path.display());
+    print_policy(&policy);
+    Ok(())
+}
+
+fn cmd_policy_show(data_dir: &Path) -> Result<(), String> {
+    match read_policy(data_dir)? {
+        Some(policy) => {
+            println!("policy: {}", policy_path(data_dir).display());
+            print_policy(&policy);
+            println!("{}", policy.to_json()?);
+        }
+        None => {
+            println!("no policy file - this is a free, open observer node:");
+            println!("  it accepts every validly-signed entry, syncs, reads and witnesses.");
+            println!("  gate this node with: datu policy init --attestor KEY --ns 'gov.*'");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_policy_clear(data_dir: &Path) -> Result<(), String> {
+    let path = policy_path(data_dir);
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+        println!("policy removed: this node is now a free, open observer (accepts everything)");
+    } else {
+        println!("no policy file - already a free, open observer");
+    }
+    Ok(())
+}
+
+// ---- network modes (permissioned vs permissionless joining) ----
+
+fn cmd_network_init(
+    data_dir: &Path,
+    mode: String,
+    network_id: String,
+    members: Vec<String>,
+    roots: Vec<String>,
+) -> Result<(), String> {
+    for key in members.iter().chain(roots.iter()) {
+        parse_id(key).map_err(|_| format!("'{key}' is not a 32-byte Ed25519 key (hex)"))?;
+    }
+    if mode != "permissioned" && mode != "permissionless" {
+        return Err(format!(
+            "mode must be 'permissioned' or 'permissionless', not '{mode}'"
+        ));
+    }
+    if mode == "permissioned" && members.is_empty() && roots.is_empty() {
+        return Err(
+            "a permissioned network needs at least one --member or --root (who may join?)"
+                .into(),
+        );
+    }
+    let net = NetworkPolicy {
+        version: NETWORK_POLICY_VERSION,
+        mode,
+        network_id,
+        members,
+        roots,
+    };
+    let path = network_path(data_dir);
+    std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
+    std::fs::write(&path, net.to_json()?)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    println!("network policy written: {}", path.display());
+    print_network(&net);
+    if net.is_permissioned() {
+        let node = load_node(data_dir)?;
+        if !net.self_admitted(&node.identity) {
+            println!(
+                "  warning: this node's key {} is NOT a member or root - `datu node` will refuse to start (fail-closed)",
+                short(&node.identity)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_network_show(data_dir: &Path) -> Result<(), String> {
+    match read_network(data_dir)? {
+        Some(net) => {
+            println!("network: {}", network_path(data_dir).display());
+            print_network(&net);
+            println!("{}", net.to_json()?);
+        }
+        None => {
+            println!("no network policy - this node is the open network:");
+            println!("  permissionless: anyone may sync, read, and witness.");
+            println!("  wall or gate joining with: datu network init --mode permissioned --network-id gov-mesh --member KEY");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_network_clear(data_dir: &Path) -> Result<(), String> {
+    let path = network_path(data_dir);
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+        println!("network policy removed: this node is the open network (permissionless, no walls)");
+    } else {
+        println!("no network policy - already the open network");
+    }
+    Ok(())
+}
+
+// ---- party signatures (the citizens a record is about consent to it) ----
+
+fn cmd_parties_sign(
+    node: &Node,
+    role: String,
+    kind: Option<String>,
+    input: &Path,
+    out: &Option<PathBuf>,
+) -> Result<(), String> {
+    let mut document = load_or_wrap_document(input, kind.as_deref())?;
+    s(document.sign(&role, &node.key, Some(&node.pq_key)))?;
+    let json = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
+    write_output(out, &json)?;
+    println!(
+        "signed as party '{role}' with {} (Ed25519 + ML-DSA-65) - kind {}",
+        node.identity, document.kind
+    );
+    Ok(())
+}
+
+fn cmd_parties_show(node: &Node, id_hex: String) -> Result<(), String> {
+    let id = parse_id(&id_hex)?;
+    let entry = s(node.store.get_entry(&id))?
+        .ok_or_else(|| format!("entry {id_hex} not found"))?;
+    let document = SignedDocument::from_payload(&entry.body.payload)
+        .ok_or_else(|| format!("{id_hex} payload is not a party-signed document"))?;
+    println!("entry:  {id_hex}");
+    println!("author: {}", entry.body.author);
+    println!("kind:   {}", document.kind);
+    println!(
+        "doc:    {}",
+        serde_json::to_string(&document.doc).map_err(|e| e.to_string())?
+    );
+    let parties = s(document.verify())?;
+    println!("parties ({}):", parties.len());
+    for (role, key) in parties {
+        println!("  [{role:<10}] {key}  verified");
+    }
+    Ok(())
+}
+
+fn cmd_wallet_cosign_doc(
+    data_dir: &Path,
+    name: &str,
+    passphrase: &str,
+    role: &str,
+    kind: Option<String>,
+    input: &Path,
+    out: &Option<PathBuf>,
+) -> Result<(), String> {
+    let wallet = datu_wallet::Wallet::open(data_dir);
+    let identity = wallet.load(name, passphrase)?;
+    let mut document = load_or_wrap_document(input, kind.as_deref())?;
+    identity.sign_document(&mut document, role)?;
+    let json = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
+    write_output(out, &json)?;
+    println!(
+        "signed as party '{role}' with wallet identity {} (Ed25519 + ML-DSA-65) - kind {}",
+        identity.public.name, document.kind
+    );
+    Ok(())
+}
+
+fn run(cli: Cli) -> Result<(), String> {
+    match &cli.command {
+        Commands::Init => cmd_init(&cli.data_dir),
+        Commands::Keys => {
+            let node = load_node(&cli.data_dir)?;
+            println!("identity (ed25519): {}", node.identity);
+            println!("pq key:              ml-dsa-65 (hybrid signatures)");
+            Ok(())
+        }
+        Commands::Publish {
+            ns,
+            payload,
+            file,
+            refs,
+        } => {
+            let node = load_node(&cli.data_dir)?;
+            cmd_publish(&node, ns.clone(), payload.clone(), file.clone(), refs.clone())
+        }
+        Commands::Log { ns, author, limit } => {
+            let node = load_node(&cli.data_dir)?;
+            cmd_log(&node, ns.clone(), author.clone(), *limit)
+        }
+        Commands::Get { id } => {
+            let node = load_node(&cli.data_dir)?;
+            cmd_get(&node, id.clone())
+        }
+        Commands::Verify => {
+            let node = load_node(&cli.data_dir)?;
+            cmd_verify(&node)
+        }
+        Commands::Checkpoint => {
+            let node = load_node(&cli.data_dir)?;
+            cmd_checkpoint(&node)
+        }
+        Commands::Witness { cmd } => {
+            match cmd {
+                WitnessCmd::Sign => {
+                    let node = load_node(&cli.data_dir)?;
+                    cmd_checkpoint(&node)
+                }
+                WitnessCmd::List => {
+                    let node = load_node(&cli.data_dir)?;
+                    cmd_witness_list(&node)
+                }
+                WitnessCmd::Export { out } => {
+                    let node = load_node(&cli.data_dir)?;
+                    let mesh = our_network_id(&cli.data_dir)?;
+                    cmd_witness_export(&node, &mesh, out)
+                }
+                WitnessCmd::Import { input } => {
+                    let node = load_node(&cli.data_dir)?;
+                    let mesh = our_network_id(&cli.data_dir)?;
+                    cmd_witness_import(&node, &mesh, input)
+                }
+            }
+        }
+        Commands::ProveFork {
+            a,
+            b,
+            against,
+            out,
+        } => cmd_prove_fork(&cli.data_dir, a.clone(), b.clone(), against.clone(), out.clone()),
+        Commands::Serve { addr, read_only } => serve::serve(
+            &cli.data_dir,
+            addr,
+            effective_policy(&cli.data_dir, *read_only)?,
+        ),
+        Commands::Wallet { cmd } => match cmd {
+            WalletCmd::Create {
+                name,
+                passphrase,
+            } => {
+                let pass = get_passphrase(passphrase.clone())?;
+                cmd_wallet_create(&cli.data_dir, name, &pass)
+            }
+            WalletCmd::List => cmd_wallet_list(&cli.data_dir),
+            WalletCmd::Show { name } => cmd_wallet_show(&cli.data_dir, name),
+            WalletCmd::Sign {
+                name,
+                passphrase,
+                request,
+                out,
+            } => {
+                let pass = get_passphrase(passphrase.clone())?;
+                cmd_wallet_sign(&cli.data_dir, name, &pass, request, out)
+            }
+            WalletCmd::Seal {
+                name,
+                passphrase,
+                to,
+                to_fields,
+                input,
+                fields,
+                out,
+            } => {
+                let pass = get_passphrase(passphrase.clone())?;
+                cmd_wallet_seal(&cli.data_dir, name, &pass, to, to_fields, &input, &fields, &out)
+            }
+            WalletCmd::Open {
+                name,
+                passphrase,
+                input,
+                out,
+            } => {
+                let pass = get_passphrase(passphrase.clone())?;
+                cmd_wallet_open(&cli.data_dir, name, &pass, &input, &out)
+            }
+            WalletCmd::Export {
+                name,
+                passphrase,
+                backup_passphrase,
+                out,
+            } => {
+                let pass = get_passphrase(passphrase.clone())?;
+                let backup_pass = get_backup_passphrase(backup_passphrase.clone())?;
+                cmd_wallet_export(&cli.data_dir, name, &pass, &backup_pass, out)
+            }
+            WalletCmd::Import {
+                input,
+                backup_passphrase,
+                rename,
+            } => {
+                let backup_pass = get_backup_passphrase(backup_passphrase.clone())?;
+                cmd_wallet_import(&cli.data_dir, input, &backup_pass, rename.clone())
+            }
+            WalletCmd::Serve { addr, allow_origins } => {
+                walletd::serve(&cli.data_dir, addr, allow_origins.clone())
+            }
+            WalletCmd::CosignDoc {
+                name,
+                passphrase,
+                role,
+                kind,
+                input,
+                out,
+            } => {
+                let pass = get_passphrase(passphrase.clone())?;
+                cmd_wallet_cosign_doc(&cli.data_dir, name, &pass, role, kind.clone(), input, out)
+            }
+        },
+        Commands::Attest { cmd } => {
+            let node = load_node(&cli.data_dir)?;
+            match cmd {
+                AttestCmd::Create {
+                    subject,
+                    claims,
+                    label,
+                } => cmd_attest_create(&node, subject.clone(), claims.clone(), label.clone()),
+                AttestCmd::Cosign { id } => cmd_attest_cosign(&node, id.clone()),
+                AttestCmd::Status { subject, id } => {
+                    cmd_attest_status(&node, subject.clone(), id.clone())
+                }
+            }
+        }
+        Commands::Policy { cmd } => match cmd {
+            PolicyCmd::Init {
+                attestors,
+                writers,
+                gated,
+                min_cosigners,
+                require_roles,
+                rules,
+                seal_fields,
+                readonly,
+            } => cmd_policy_init(
+                &cli.data_dir,
+                attestors.clone(),
+                writers.clone(),
+                gated.clone(),
+                *min_cosigners,
+                require_roles.clone(),
+                rules.clone(),
+                seal_fields.clone(),
+                *readonly,
+            ),
+            PolicyCmd::Show => cmd_policy_show(&cli.data_dir),
+            PolicyCmd::Clear => cmd_policy_clear(&cli.data_dir),
+        },
+        Commands::Network { cmd } => match cmd {
+            NetworkCmd::Init {
+                mode,
+                network_id,
+                members,
+                roots,
+            } => cmd_network_init(
+                &cli.data_dir,
+                mode.clone(),
+                network_id.clone(),
+                members.clone(),
+                roots.clone(),
+            ),
+            NetworkCmd::Show => cmd_network_show(&cli.data_dir),
+            NetworkCmd::Clear => cmd_network_clear(&cli.data_dir),
+        },
+        Commands::Parties { cmd } => {
+            let node = load_node(&cli.data_dir)?;
+            match cmd {
+                PartiesCmd::Sign {
+                    role,
+                    kind,
+                    input,
+                    out,
+                } => cmd_parties_sign(&node, role.clone(), kind.clone(), input, out),
+                PartiesCmd::Show { id } => cmd_parties_show(&node, id.clone()),
+            }
+        }
+        Commands::Sync { peers, page } => {
+            let node = load_node(&cli.data_dir)?;
+            let hello = network_hello(&cli.data_dir, &node.key)?;
+            let mesh = our_network_id(&cli.data_dir)?;
+            cmd_sync(&node, peers, *page, hello.as_ref(), &mesh)
+        }
+        Commands::Node {
+            addr,
+            peers,
+            every,
+            discover,
+            witness,
+            http,
+            read_only,
+        } => node::run(
+            &cli.data_dir,
+            addr,
+            peers.clone(),
+            *every,
+            *discover,
+            *witness,
+            http.clone(),
+            *read_only,
+        ),
+        Commands::Discover { seconds } => node::discover(*seconds),
+        Commands::Delta { cmd } => {
+            let node = load_node(&cli.data_dir)?;
+            let mesh = our_network_id(&cli.data_dir)?;
+            match cmd {
+                DeltaCmd::Make { out } => cmd_delta_make(&node, &mesh, out),
+                DeltaCmd::Answer { input, out } => cmd_delta_answer(&node, &mesh, input, out),
+                DeltaCmd::Merge { input } => cmd_delta_merge(&node, &mesh, input),
+            }
+        }
+        Commands::Genesis => cmd_genesis(&cli.data_dir),
+        Commands::Status => {
+            let node = load_node(&cli.data_dir)?;
+            cmd_status(&node)
+        }
+        Commands::Bundle { cmd } => {
+            let node = load_node(&cli.data_dir)?;
+            let mesh = our_network_id(&cli.data_dir)?;
+            match cmd {
+                BundleCmd::Export { out } => cmd_bundle_export(&node, &mesh, out),
+                BundleCmd::Import { input } => cmd_bundle_import(&node, &mesh, input),
+            }
+        }
+    }
+}
+
+fn main() {
+    let cli = Cli::parse();
+    if let Err(e) = run(cli) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+}

@@ -1,0 +1,10 @@
+/target
+node_modules/
+dist/
+.dag/
+.datu/
+node.db*
+secret.key
+secret.mldsa65
+.crush/
+.DS_Store

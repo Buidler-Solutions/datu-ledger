@@ -1,0 +1,67 @@
+:root {
+  color-scheme: dark;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  background: #0d1117;
+  color: #c9d1d9;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+.page { max-width: 1200px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+header h1 { font-size: 1.35rem; margin: 0 0 .25rem; }
+.muted { color: #8b949e; }
+.small { font-size: .75rem; }
+.grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+.card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 1rem 1.1rem 1.25rem;
+  margin-top: 1rem;
+}
+.card h2 { font-size: .95rem; margin: .1rem 0 .9rem; color: #79c0ff; }
+.card h3 { font-size: .8rem; margin: 1rem 0 .4rem; color: #8b949e; text-transform: uppercase; }
+label { display: block; font-size: .75rem; color: #8b949e; margin-bottom: .7rem; }
+label em.tag { font-style: normal; background: #1f6feb33; color: #79c0ff; border-radius: 4px; padding: 0 .3rem; margin-left: .35rem; }
+label em.tag.pub { background: #3fb95022; color: #3fb950; }
+input, textarea {
+  width: 100%;
+  margin-top: .3rem;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #c9d1d9;
+  padding: .45rem .55rem;
+  font: inherit;
+  font-size: .8rem;
+}
+textarea { resize: vertical; }
+.row { display: flex; gap: .6rem; }
+.row label { flex: 1; }
+button {
+  background: #238636;
+  color: #fff;
+  border: 1px solid #2ea043;
+  border-radius: 6px;
+  padding: .5rem .9rem;
+  font: inherit;
+  font-size: .8rem;
+  cursor: pointer;
+  margin-top: .3rem;
+}
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.ghost { background: #21262d; border-color: #30363d; color: #c9d1d9; }
+.ids { list-style: none; padding: 0; margin: 0; font-size: .75rem; }
+.ids li { display: flex; justify-content: space-between; padding: .25rem 0; border-bottom: 1px solid #21262d; }
+.logs ul { list-style: none; padding: 0; margin: 0; font-size: .78rem; }
+.logs li { padding: .2rem 0; }
+.err { color: #f85149; }
+.ok { color: #3fb950; }
+.result { margin-top: .8rem; font-size: .78rem; border-radius: 6px; padding: .6rem .7rem; }
+.okbox { background: #23863622; border: 1px solid #2ea043; }
+.dupbox { background: #bb800022; border: 1px solid #bb8000; }
+pre { overflow: auto; max-height: 260px; background: #0d1117; padding: .6rem; border-radius: 6px; }
+code { color: #79c0ff; }

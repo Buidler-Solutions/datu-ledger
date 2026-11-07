@@ -1,0 +1,554 @@
+# DATU - Tokenless, Quantum-Resistant Accountability Ledger
+
+A distributed system for **accountability and transparency** where:
+
+- **A DATU-type ledger, not a blockchain** - entries link by causal references
+  forming a directed acyclic graph; no blocks, no global consensus, no miners
+- **Anyone can run a node** - a single static binary, runs on a laptop, Raspberry Pi, or VPS
+- **No token, no mining, no staking** - nothing to buy, nothing to speculate on
+- **Not internet-dependent** - nodes sync by any channel: LAN, USB stick, Bluetooth, or internet when available
+- **Immutable** - records cannot be edited or deleted, ever, provably
+- **Quantum-resistant** - every record is hybrid-signed: Ed25519 + ML-DSA-65 (FIPS 204)
+- **Open to run, gated to write** - anyone runs an observer node freely; official
+  namespaces (`gov.*`) admit only attested validators, and the people a record
+  is about must sign it themselves
+
+## Guarantees
+
+| Property | How it's enforced |
+|---|---|
+| Immutability (content) | Entry ID = BLAKE3-256 of canonical bytes; any change breaks the ID, both signatures, and all later links |
+| Immutability (storage) | SQLite triggers ABORT every `UPDATE`/`DELETE`; the protocol has no mutation operation |
+| Authorship | Every entry is hybrid-signed by its author; both signatures must verify |
+| Feed integrity | Per-author hash chain (`seq`, `prev`); rewriting entry N orphans the entire rest of the feed - detected on verify |
+| Tamper evidence at scale | Merkle checkpoints signed by nodes; contradictory checkpoints by the same signer are cryptographic fork proof |
+| Quantum resistance | ML-DSA-65 (FIPS 204 final) on every entry and checkpoint, alongside Ed25519 |
+| Offline operation | Verification is 100% local; sync is file exchange, transport-agnostic |
+| Writer gate | Local policy per node: gated namespaces admit only trust roots, explicit writers, or authors attested by a trust root (`--min-cosigners` optional) |
+| Citizen consent | Gated documents can require party signatures (`--require-role holder`): the affected person's own hybrid signature over the exact document bytes |
+
+## Protocol
+
+### Entry (the DAG node)
+
+```text
+EntryBody = {
+  version, author (Ed25519 pubkey), author_pq (ML-DSA-65 pubkey), pq_alg,
+  namespace,               // e.g. "gov.records", "audit.claims"
+  seq,                     // per-author sequence number
+  prev,                    // hash of author's previous entry → hash chain
+  refs: [entry-id],        // causal links to other entries → DAG edges
+  timestamp_ms,            // author's claim (not proof)
+  payload                  // opaque bytes, typically JSON (≤256 KiB)
+}
+Entry = { body, signature: Ed25519(body), pq_signature: ML-DSA-65(body) }
+id      = BLAKE3(borsh(body))
+```
+
+- **No global consensus is needed.** There is no double-spend problem; concurrent
+  statements coexist. Provable ordering exists only along causal paths
+  (`prev`/`refs`) - which is exactly what accountability requires.
+- Out-of-order delivery is fine: entries whose `prev`/`refs` aren't yet known
+  are stored and counted as *pending links*, not errors.
+
+### Checkpoint (tamper evidence)
+
+A node periodically signs:
+
+```text
+CheckpointBody = { signer, signer_pq, height, prev, timestamp_ms,
+                   entries_count, entry_ids_root: MerkleRoot(all known entry ids) }
+```
+
+Checkpoints chain per signer. If a node (or an attacker rewriting its storage)
+later serves history that contradicts a checkpoint it previously signed, anyone
+holding the old checkpoint can prove it. Checkpoints are tiny - a root is 32
+bytes - so they can travel by QR code, radio, or voice.
+
+### Sync (anti-entropy, any transport)
+
+`datu bundle export` produces a self-contained, fully-verifiable file; `import`
+verifies every signature and chain before merging anything. Bundles can travel
+by USB, LAN copy, email, or anything that moves bytes. Sync is transitive:
+A ← USB ← B ← internet ← C converges globally.
+
+### Genesis record (the lineage mark)
+
+The code itself carries a genesis record - a signed `genesis`-namespace entry,
+minted once by the founder's dedicated keypair (Ed25519 + ML-DSA-65), whose
+payload is the founder's statement. **Every ledger seeded from this code
+begins with it**: `Store::open` plants it below the writer policy (policy
+gates what peers may land; the genesis is the ledger's own definition), and
+it rides every sync, bundle, and delta to any node that ever missed it.
+
+```sh
+datu genesis      # verify the record and check this ledger's lineage
+```
+
+Nobody - not even a fork - can forge a record claiming this lineage: the
+signature, the entry id, and the author key embedded in the code cross-check
+on every use. A fork that keeps the constant descends from this lineage; a
+fork that mints its own genesis (the minter is `crates/core/examples/
+mint_genesis.rs`) walks its own. The founder's private halves live outside
+the repo, with the founder.
+
+## Usage
+
+```sh
+cargo build --release
+
+datu init                          # create a node (identity + hybrid keys)
+datu publish --ns gov.records --payload '{"statement":"..."}'
+datu publish --ns audit.claims --ref <entry-id> --payload '{"claim":"..."}'
+datu log --ns gov.records
+datu get --id <entry-id>
+datu verify                        # verify every signature, chain, checkpoint
+datu checkpoint                    # sign tamper-evidence over everything seen
+datu bundle export --out today.bundle
+datu bundle import --input today.bundle
+```
+
+### Witnessing and fork proof (citizen audit, Tier 3)
+
+Witnesses (NGOs, press, universities, opposition - anyone) periodically sign
+what they have seen and publish the small stream anywhere (email, newspaper,
+QR). Citizens compare streams from independent sources:
+
+```sh
+datu witness sign                          # sign a checkpoint
+ datu witness list                          # every signer's latest root
+datu witness export --out witness.cks      # checkpoint-only stream (~KBs)
+datu witness import --input witness.cks    # merge another party's stream
+
+datu prove-fork --a ngo.cks --b ministry.cks --out evidence.json
+datu prove-fork --against suspect.bundle   # vs this node's stored history
+```
+
+Verdicts: `NO_CONTRADICTIONS` (exit 0) or `FORK_PROVEN` (exit 2) with an
+evidence package containing both contradictory, fully-signed checkpoints -
+re-verifiable by anyone with zero other context. Detected evidence kinds:
+`same-height-fork` (same signer, same height, different Merkle root - proof
+that at least one history is fabricated), `chain-break` (a signer's checkpoint
+chain was rewritten or spliced), and `history-mismatch` (a served bundle's
+root contradicts a stored witness checkpoint over the same entry count).
+
+Default node directory is `.datu/` (`--data-dir` to override). It contains:
+`secret.key` (Ed25519), `secret.mldsa65` (ML-DSA-65), `node.db` (append-only store),
+`wallet/` (identities + index).
+
+## Wallet, dApps, and field-level encryption (Tier 4)
+
+The **wallet is the keychain minus the money**: named identities, each holding an
+Ed25519 signing key (authorship), an ML-DSA-65 key (quantum-resistant signature)
+and an X25519 sealing key (who can decrypt fields addressed to you). Keystores
+are encrypted at rest (Argon2id-stretched passphrase → XChaCha20-Poly1305,
+64 MiB / 3 passes; v1 BLAKE3 files still readable). The CLI wallet is the
+**reference signer** - the exact JSON contracts a browser-extension or mobile
+keychain app would embed. The wallet never needs network access: entries are
+self-verifying objects, not messages.
+
+```sh
+DATU_WALLET_PASS=... datu wallet create --name bidder     # make an identity
+DATU_WALLET_PASS=... datu wallet list                     # name + public keys
+DATU_WALLET_PASS=... datu wallet show --name bidder       # publish the seal key
+```
+
+### The dApp flow (form with encrypted selected fields)
+
+A web app submits a tender form where `bid_amount` and `tax_id` are encrypted
+**to the ministry's seal key**, then the whole document is hybrid-signed and
+posted to any node. The entry travels publicly; only the ministry can read the
+sealed fields. Every sealed field carries a BLAKE3 commitment so a later
+decryption can be *proven* to match what was signed.
+
+```sh
+# 1. dApp encrypts selected fields to the reader(s) - one or many seal keys
+datu wallet seal --name bidder --to <ministry_seal>,<auditor_seal> \
+  --fields bid_amount,tax_id --input form.json --out sealed.json
+
+# 2. dApp fetches the author's chain head and builds a sign request
+#    GET /v1/feed/<author> → {"head":…, "next": {"seq":0, "prev":null}}
+#    SignRequest = {namespace, seq, prev, refs[], payload_json|payload_base64}
+
+# 3. wallet signs - the only step that touches private keys
+DATU_WALLET_PASS=... datu wallet sign --name bidder --request request.json --out entry.json
+
+# 4. submit to any node (no account, no token, no permission needed)
+curl -X POST -d @entry.json http://127.0.0.1:7474/v1/entries   # → 201
+
+# 5. the ministry decrypts its fields later (and only its fields)
+DATU_WALLET_PASS=... datu wallet open --name ministry --input sealed.json
+```
+
+### `datu serve` - node HTTP API + explorer
+
+`datu serve --addr 127.0.0.1:7474` exposes a std-only HTTP API plus a dark-theme
+ledger explorer at `/` (entries, search, witnesses - read-only mirror-node view):
+
+- `GET /v1/status` - node counters
+- `GET /v1/entries?limit&ns&author` - recent entries
+- `GET /v1/entry/{id}` - full entry (payload base64, both signatures)
+- `GET /v1/feed/{author}` - head **plus `next`** ({seq, prev}) so dApps build
+  correct sign requests without racing the chain
+- `GET /v1/checkpoints` - signed tamper-evidence
+- `POST /v1/entries` - submission contract: the node accepts only fully-signed
+  entries (Ed25519 + ML-DSA-65 both verified server-side); `201` inserted,
+  `200` duplicate (idempotent), `403` denied by this node's writer policy,
+  `409` rejected as fork evidence
+- `POST /v1/sync/haves` - bloom-filter reconciliation over HTTP
+  (`{m, k, bits_b64, cursor, limit}` → `{entries[], cursor, more, checkpoints[]}`;
+  the same exchange also runs over raw TCP and over files - see transports)
+
+A browser-extension wallet implements exactly two JSON contracts:
+`SignRequest` in (from the dApp, after checking `GET /v1/feed`), entry-JSON out
+(`POST /v1/entries` body). Sealing uses X25519 ECDH (ephemeral sender → each
+reader) with XChaCha20-Poly1305 and one shared BLAKE3 commitment per field;
+see `datu-sealed-v2` (multi-reader, current write format); legacy `dag-sealed-v2`
+and `dag-sealed-v1` blobs stay readable
+in `crates/wallet`.
+
+## Run a node anywhere: transports & the home node (Tier 6)
+
+Entries are self-verifying objects, not messages - so the transport is a
+swap-in detail. The same reconciliation (Bloom filter of the ids you have →
+peer sends what you lack → verify everything on arrival) runs over four
+transports, and **none of them is required**:
+
+| Transport | Command | Use when |
+|---|---|---|
+| **Native p2p (raw TCP, DATUP2P1)** | `datu sync --peer host:port` | any IP reachability; no web stack at all |
+| **HTTP API** | `datu sync --peer http://host:port` | behind a proxy / mixed with dApp traffic |
+| **Delta files** | `datu delta make` → `answer` → `merge` | zero network: USB, email, Bluetooth, radio |
+| **Full bundles** | `datu bundle export/import` | cold mirror, archival |
+
+Sync is pull-only (run it both ways for bidirectional flow), a Bloom false
+positive merely defers an entry to the next sync, and a peer serving
+contradictory history aborts with fork evidence instead of merging
+(`datu prove-fork` builds the case).
+
+### The home node (daemon)
+
+One cheap computer at home runs 24/7 with zero configuration and no central
+server - anyone's node is a peer, like running your own daemon:
+
+```sh
+datu node                                  # native p2p on 0.0.0.0:7476
+datu node --discover --witness             # + find LAN peers (mDNS), witness what it sees
+datu node --peer ministry.example:7476 --peer 10.0.0.4:7476 --every 300 \
+         --witness --http 127.0.0.1:7474  # + configured peers + optional explorer
+```
+
+The daemon announces itself on the LAN (`_dag-sync._tcp`), pulls from
+configured and discovered peers each cycle, and signs a witness checkpoint
+whenever its view changes - a home computer quietly becomes an independent
+witness of everything it has seen. `datu discover` lists the nodes around
+you. The HTTP explorer (`--http`) is a convenience frontend for humans and
+dApps - node-to-node sync never touches it.
+
+### Offline reconciliation by files
+
+```sh
+datu delta make --out req.datureq           # on your laptop, before travel
+# ... carry req.datureq to any node by any channel ...
+datu delta answer --input req.datureq --out res.datures   # on the peer
+# ... carry res.datures back ...
+datu delta merge --input res.datures        # verify-then-merge, conflicts = fork evidence
+```
+
+## Identity attestations & N-of-M cosigning (Tier 5)
+
+Accounts and logins are replaced by attestations: an institution publishes an
+`identity.attest` entry binding claims (legal name, role) to a subject's
+Ed25519 key. Others add independent weight by cosigning - a plain
+`identity.cosign` entry referencing the attestation id. No registry, no
+privilege: anyone can attest, anyone can count cosigners, verifiers choose
+their own N-of-M policy.
+
+```sh
+datu attest create --subject <ed-pubkey-hex> \
+  --claims '{"legal_name":"Acme Ltd","role":"bidder"}' --label "Acme Ltd"
+datu sync --peer http://ministry-node:7475      # cosigner must see it first
+                                              # (or bare host:port - native p2p)
+datu attest cosign --id <attestation-id>        # another node adds weight
+datu attest status --subject <ed-pubkey-hex>    # attestations + cosigner count
+datu attest status --id <attestation-id>        # one attestation in detail
+```
+
+Every attestation and cosignature is an ordinary hybrid-signed entry - it
+inherits append-only storage, the author's feed chain, checkpoint coverage,
+and fork detection for free. Attestation revocation is publication (a later
+claim entry by the same attestor); readers decide what weight history has.
+
+## Three roles: validators, citizens, observers (Tier 7)
+
+Government records need a gate on *who may write* - but the network must stay
+free to *run and read*. So there are three roles, and only one of them is
+gated:
+
+| Role | Who | Can do | Needs permission to run? |
+|---|---|---|---|
+| **Validator** (registrar, ministry) | attested institution nodes | write gated namespaces (`gov.*`) | yes - admitted by the local policy of every node that accepts their writes |
+| **Citizen / holder** | wallet identities | sign their own transactions; own their data | no - a keypair and a wallet |
+| **Observer** | anyone with a computer | run a node, sync, view everything, witness | **never** - no policy file = accepts everything |
+
+The gate is **local node policy** (`<data-dir>/policy.json`), not a global
+permission. Each node enforces it on every transport - HTTP submission, p2p
+pull, delta merge, bundle import - and it is rooted in the attestation graph
+(the same keys that make entries attributable). A rogue writer is simply not
+admitted on policy-abiding nodes; nothing is censored, their entries keep
+verifying and mirroring among observers, they just never count as official.
+
+### Validator gate
+
+```sh
+datu policy init --attestor <registry-key-hex> --ns 'gov.titles.*' \
+  --rule 'gov.titles.*:holder@holder_key'     # default gated: gov.* + identity.attest
+datu policy show                               # mode, trust roots, rules
+datu policy clear                              # back to a free, open observer
+```
+
+Admission to a gated namespace is: the author is a **trust root** or an
+**explicit writer**, *or* the author holds an **attestation from a trust
+root** (optionally with `--min-cosigners N` independent cosignatures). This is
+the procurement story: the registry attests a bidder once; every validator
+node that trusts the registry then admits that bidder automatically - the
+attestation entry must simply have synced first (bootstrap ordering; a later
+sync heals it).
+
+**Per-namespace rules.** `--rule NS:ROLE[@FIELD][=KEY]` (repeatable) adds
+party requirements for one namespace pattern only, so a single policy can
+demand a `holder` on `gov.titles.*`, a `bidder` on `gov.bids.*`, and pin
+`gov.degrees.*:registrar=<registry-key>` - whoever holds the key, nobody else
+signs the role. `@FIELD` is **self-binding**: the signing party's key must
+equal the value of that document field, so the `holder_key` named inside the
+title must be exactly the key that signed as `holder`. Consent cannot be
+replayed to another document, role, or person, and tampering after signing
+fails the gate.
+
+**Encryption is enforced, not requested.** `--seal-field NS:FIELD` (repeatable)
+makes a validator refuse any gated entry that carries that field in plaintext:
+
+```sh
+datu policy init --attestor <registry-key> --ns 'gov.titles.*' \
+  --rule 'gov.titles.*:holder@holder_key' \
+  --seal-field 'gov.titles.*:holder_name' \
+  --seal-field 'gov.titles.*:birth_date'
+# publishing a title with a plaintext holder_name is denied:
+#   policy denied: … requires personal field 'holder_name' to be encrypted
+```
+
+A field that is absent is fine (nothing to leak); a present field must be a
+`datu-sealed-*` object (legacy `dag-sealed-*` accepted on read). So the holder's name exists in the ledger only as
+ciphertext for the registry office and the holder - validators enforce it on
+every transport (publish, HTTP submit, p2p pull, delta/bundle merge), and an
+open observer that mirrors a plaintext copy still cannot push it into a
+validator.
+
+A `--read-only` node (`datu serve --read-only`, `datu node --read-only`) accepts
+no new entries at all - a frozen archival view that still serves and witnesses.
+
+### Who can read what: reader enclaves
+
+Gating decides *who may write*; sealing decides *who may read*. Sensitive
+fields are encrypted once to several reader keys - the registry office and the
+holder - while the rest of the record stays public:
+
+```sh
+# the document names its own holder and the holder's seal key
+# {parcel, district, holder_key, holder_seal, holder_name, birth_date}
+DATU_WALLET_PASS=... datu wallet seal --name registrar \
+  --to <registry-seal-key> --to-field holder_seal \
+  --fields holder_name,birth_date --input title.json --out title.sealed.json
+
+datu parties sign --role registrar --kind land.title.application \
+  --input title.sealed.json --out title.reg.json
+DATU_WALLET_PASS=... datu wallet cosign-doc --name amina --role holder \
+  --input title.reg.json --out title.full.json
+datu publish --ns gov.titles.application --file title.full.json
+
+DATU_WALLET_PASS=... datu wallet open --name registrar --input title.full.json  # 2 fields: registry reads all
+DATU_WALLET_PASS=... datu wallet open --name amina     --input title.full.json  # 2 fields: holder reads her own
+DATU_WALLET_PASS=... datu wallet open --name reporter  --input title.full.json  # 0 fields: everyone else sees commitments only
+```
+
+`--to-field` pulls reader keys straight out of the document (a hex string or
+an array), so the registrar does not need a separate directory: the record
+says who may read it. Sealing happens *before* the party signatures, so the
+signatures cover the sealed form - the commitments are tamper-evident, and a
+field that was swapped after sealing breaks the digest.
+
+### Citizen consent: party signatures
+
+A record about a person is invalid without that person's signature. The
+holder of a title signs the exact document themselves - from their wallet,
+with their own keys, not the institution's:
+
+```sh
+# 1. the registry prepares and signs the application
+datu parties sign --role registrar --kind land.title.application \
+  --input title.json --out title.reg.json
+# 2. the citizen (holder) consents from their wallet - offline is fine
+DATU_WALLET_PASS=... datu wallet cosign-doc --name amina --role holder \
+  --input title.reg.json --out title.full.json
+# 3. publish; any node verifies every party signature on it
+datu publish --ns gov.titles.application --file title.full.json
+datu parties show --id <entry-id>
+```
+
+A `SignedDocument` binds each signature to `(version, kind, doc, role, key)`,
+so a consent cannot be replayed onto a different document, role, or party.
+Ed25519 is mandatory; ML-DSA-65 rides along from the wallet, so consent is
+quantum-resistant too. Policy decides *whose* signature counts: `--require-role
+holder` wants some verified holder; `--rule 'gov.titles.*:holder@holder_key'`
+wants **the** holder - the key named inside the document.
+
+## Network modes: who may join and sync
+
+`policy.json` gates whose **entries land** (write admission). `network.json`
+decides who may **join** - sync, pull, and share in this node's mesh - a
+separate, orthogonal gate at the transport layer:
+
+| `network.json` | Meaning | Who syncs with this node |
+|---|---|---|
+| *(absent)* | the open network - today's behavior, zero migration | anyone (old peers keep working) |
+| `permissionless` + `network_id: "gov-mesh"` | a dedicated free observer of one walled mesh | any peer presenting the same mesh id |
+| `permissioned` + `network_id` + `members`/`roots` | a walled, membership-gated mesh | member keys and keys attested on-ledger by a configured root |
+
+```sh
+datu network init --mode permissioned --network-id gov-mesh \
+  --member <peer-node-key-hex> --root <own-key-hex>
+datu network show
+datu network clear          # back to the open network
+```
+
+**Joining = membership that propagates by the sync it authorizes.** A peer is
+admitted with an explicit `members` key *or* any on-ledger attestation
+(`identity.attest`) from a configured `roots` trust root - the same
+attestation graph that admits writers. A root attests a new node once; every
+member that syncs the attestation admits the node automatically. No signed
+manifest to re-issue, no operator round-trip to add a peer; eject by editing
+`network.json` (revocation is future work).
+
+**The mesh wall is mutual and everywhere.** Bundles, witness streams, haves
+requests and delta responses carry the mesh id; a node refuses foreign ones
+in both directions (set vs empty, set vs different). The walled mesh and the
+open network can never merge through any transport - p2p, HTTP pull, or
+offline files. HTTP *reads* stay public.
+
+**On the wire**, a walled node must learn who is dialing: clients open with a
+signed `NodeHello` (fresh Ed25519 signature, ±300 s clock-skew window, no
+state kept). Walled servers answer plain old clients with a self-explaining
+`hello required` error; open servers need no hello - pre-network-mode peers
+interoperate unchanged. A permissioned node whose own key is not a member or
+root refuses to start (fail-closed) rather than run isolated.
+
+## Web: registrar dApp + landowner wallet (Tier 8)
+
+Two browser-facing pieces sit on top of the same protocol - no new trust
+anchors, no accounts:
+
+- **`web/registrar`** - Vite + React land-title form: fills the application,
+  seals personal fields, gets the registrar's consent signature, collects the
+  landowner's consent, and submits the signed entry to a validator node.
+- **`web/wallet-extension`** - the citizen's wallet as a **Chrome side panel**
+  (MetaMask-style: click the toolbar icon, the panel slides in on the right).
+  It is **namespace-agnostic**: land titles, driver licences, procurement
+  bids, permits - any gated namespace. It finds every record that concerns
+  you (a party signature is yours, or the document names your key in any
+  field such as `holder_key`, `licensee_key`, `bidder_key`), verifies
+  signatures locally from any node, and decrypts only the fields sealed to
+  you. Before signing it enforces the same self-binding rule as the
+  validators: `<role>_key` in the document must be your key.
+- **One wallet per person, several identities per wallet** for context
+  (`alice-home`, `alice-business`). The panel keeps a **wallet profile list**
+  (label + bridge URL) and switches between local bridges; pairing tokens
+  live in `chrome.storage.session` only. Identities move between wallets and
+  devices as **encrypted backups**: `datu wallet export/import` (CLI) or the
+  panel's *Backup & move devices* section - the backup uses a separate backup
+  passphrase, is re-verified against its own public keys on import, and the
+  restored identity unlocks with that backup passphrase.
+
+Both talk to **`datu wallet serve`**, a local bridge (default
+`127.0.0.1:7482`) that owns the keystore and performs all signing and sealing:
+
+```
+GET  /v1/wallet/identities     public identities (ed + seal keys)
+POST /v1/wallet/party-sign     {name, passphrase, role, document, kind?}
+POST /v1/wallet/seal           {name, passphrase, document, fields, to[], to_fields[]}
+POST /v1/wallet/open           {name, passphrase, document}
+POST /v1/wallet/verify-entry   {entry}  → verify both hybrid signatures locally
+POST /v1/wallet/sign-entry     {name, passphrase, request}
+```
+
+The wallet reads from **any** node - a validator or a free observer - and
+verifies each record itself with `verify-entry`, so the serving node is never
+trusted: point the extension at an observer, find the titles that name you as
+holder, verify the signatures, and decrypt the fields sealed to you. A node
+that lies or tampers is caught locally with
+`400 signature verification failed`.
+
+```sh
+datu wallet serve --addr 127.0.0.1:7482      # prints a pairing token; keys never leave this process
+cd web/registrar && npm install && npm run dev
+# chrome://extensions → Developer mode → "Load unpacked" → web/wallet-extension
+#   then click the toolbar icon: the wallet slides in as a side panel
+#   Settings → paste the pairing token (wallet/bridge.token) → Pair
+```
+
+The bridge is **paired**, not open: every `/v1` call needs
+`Authorization: Bearer <token>` (256-bit, generated once into
+`wallet/bridge.token`, mode 0600, compared in constant time), browser
+origins are restricted to extension pages plus explicit `--allow-origin`
+values, and five wrong passphrases lock that identity for 15 s (429). The
+extension (`v1.0.0`) ships icons, a strict CSP, two-step
+**review → confirm** before signing, and auto-clears passphrase and decrypted
+views after 2 minutes idle; the token itself lives only in
+`chrome.storage.session` and is forgotten when the browser closes.
+
+Flow: the registrar seals `holder_name`/`birth_date` to the registry office
+and to the landowner's seal key found in the document, signs as `registrar`,
+then hands the document to the landowner; the landowner signs as `holder` in
+the extension; the dApp authors the entry with the registry's signer identity
+and POSTs it. Validators check author admission, party self-binding, and the
+sealed-field rule; the private data never appears in plaintext in the ledger,
+and third parties can read only the commitments.
+
+## Threat model
+
+**Prevented:** undetected modification or deletion of any record; forged
+authorship; feed rewrites (same author+seq with different content is rejected
+as fork evidence); contradictory checkpoints from the same signer.
+
+**Detected, not prevented:** a node deleting its own data (detectable by anyone
+who replicated it or holds its checkpoints - that's what replication and
+checkpoint gossip are for); total network partition (physics; data flows only
+where contacts exist).
+
+**Inherent limits:** timestamps are author claims; there is no global total
+order, only causal order. This is the deliberate trade for permissionless,
+tokenless, offline-capable operation.
+
+## Layout
+
+- `crates/core` - entries, hash chains, Merkle set-roots, checkpoints, hybrid
+  crypto, bloom filters, attestation/cosign helpers, party signatures
+- `crates/store` - append-only storage (immutability triggers), writer policy
+  gate, bundles, delta files, reconciliation pages, full verification
+- `crates/p2p` - DATUP2P1: the native node-to-node sync protocol over raw TCP
+- `crates/wallet` - keychain identities (Argon2id), reference signer,
+  party consent signing, multi-reader field sealing (`datu-sealed-v2`; reads
+  legacy `dag-sealed-v2` and `dag-sealed-v1`)
+- `crates/cli` - the `datu` binary (node daemon, p2p + mDNS discovery, serve,
+  sync, delta, attest, policy, parties, wallet, witness, prove-fork)
+
+## Roadmap
+
+1. NAT traversal helpers (port-forward guides / relay peers) so home nodes
+   can dial each other across the internet without a fixed IP
+2. Optional anchoring of checkpoints to Bitcoin (Open Timestamps)
+3. Compact checkpoint encoding for QR / radio broadcast
+4. HPKE sealing + post-quantum KEM (ML-KEM) for long-term field confidentiality
+5. Policy tooling depth: cosigner-only trust sets, per-namespace role rules,
+   revocation-aware admission
+6. Network admission depth: `identity.revoke` (eject an attested node without
+   editing every `network.json`), hello nonces/epoch replay hardening

@@ -1,0 +1,16 @@
+[package]
+name = "datu-p2p"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+datu-core.workspace = true
+datu-store.workspace = true
+borsh.workspace = true
+ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
