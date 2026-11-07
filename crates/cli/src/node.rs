@@ -130,7 +130,7 @@ pub fn run(
     read_only: bool,
 ) -> Result<(), String> {
     let node = load_node(data_dir)?;
-    let policy = effective_policy(data_dir, read_only)?;
+    let policy = effective_policy(data_dir, read_only, false)?;
     let frozen = matches!(&policy, Some(p) if p.readonly);
     let network = read_network(data_dir)?;
     let our_id = our_network_id(data_dir)?;

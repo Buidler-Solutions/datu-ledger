@@ -615,10 +615,13 @@ pub(crate) fn read_policy(data_dir: &Path) -> Result<Option<WritePolicy>, String
 /// policy.json - the manifest is the auditable, on-ledger source of official
 /// admission; policy.json stays for ungoverned local gating. `--read-only`
 /// freezes the node regardless of source. Fail-closed: a pinned root without
-/// a verifiable chain is an error, never a silent fallback.
+/// a verifiable chain is an error, never a silent fallback - unless
+/// `allow_bootstrap`, which the founding node needs in order to publish
+/// manifest entry #0 at all.
 pub(crate) fn effective_policy(
     data_dir: &Path,
     read_only: bool,
+    allow_bootstrap: bool,
 ) -> Result<Option<WritePolicy>, String> {
     let network = read_network(data_dir)?;
     if let Some(net) = &network {
@@ -631,17 +634,19 @@ pub(crate) fn effective_policy(
                 std::slice::from_ref(root),
             )
             .map_err(|e| format!("governance manifest: {e}"))?;
-            let compiled = compiled.ok_or_else(|| {
-                format!(
+            if let Some(compiled) = compiled {
+                return Ok(match read_only {
+                    true => Some(WritePolicy::readonly()),
+                    false => Some(compiled.policy),
+                });
+            }
+            if !allow_bootstrap {
+                return Err(format!(
                     "network.json pins manifest root {} but no verifiable manifest exists in {} - sync one, publish one (`datu manifest publish`), or clear the pin (fail-closed)",
                     short(root),
                     datu_store::manifest::manifest_namespace(&net.network_id)
-                )
-            })?;
-            return Ok(match read_only {
-                true => Some(WritePolicy::readonly()),
-                false => Some(compiled.policy),
-            });
+                ));
+            }
         }
     }
     if read_only {
@@ -1043,7 +1048,26 @@ fn payload_preview(bytes: &[u8]) -> String {
     flat.chars().take(60).collect()
 }
 
+/// Open this node with the policy a *writer* must respect: a pinned
+/// governance manifest wins, and a pin with no verifiable chain fails closed.
 fn load_node(dir: &Path) -> Result<Node, String> {
+    open_node(dir, effective_policy(dir, false, false)?)
+}
+
+/// Open this node for the one bootstrap case - founding or publishing a
+/// manifest - where a pinned chain may not exist yet. Falls back to
+/// policy.json only in that case, so entry #0 can be published at all.
+fn load_node_bootstrap(dir: &Path) -> Result<Node, String> {
+    open_node(dir, effective_policy(dir, false, true)?)
+}
+
+/// Open this node for commands that only read. No admission policy: a
+/// governance break must never stop anyone inspecting the evidence.
+fn load_node_reader(dir: &Path) -> Result<Node, String> {
+    open_node(dir, None)
+}
+
+fn open_node(dir: &Path, policy: Option<WritePolicy>) -> Result<Node, String> {
     let secret_path = dir.join("secret.key");
     if !secret_path.exists() {
         return Err(format!(
@@ -1069,7 +1093,7 @@ fn load_node(dir: &Path) -> Result<Node, String> {
         std::fs::read_to_string(&pq_secret_path).map_err(|e| e.to_string())?;
     let pq_key = s(datu_core::pq::sk_from_hex(pq_hex.trim()))?;
     let identity = hex::encode(key.verifying_key().as_bytes());
-    let store = s(Store::open_with_policy(&dir.join("node.db"), read_policy(dir)?))?;
+    let store = s(Store::open_with_policy(&dir.join("node.db"), policy))?;
     Ok(Node {
         store,
         key,
@@ -1458,7 +1482,7 @@ fn cmd_prove_fork(
         let stream_b = read_witness_stream(fb)?;
         s(fork::analyze(&stream_a, &stream_b))?
     } else if let Some(bundle_path) = &against {
-        let node = load_node(data_dir)?;
+        let node = load_node_reader(data_dir)?;
         let bytes = std::fs::read(bundle_path)
             .map_err(|e| format!("cannot read {}: {e}", bundle_path.display()))?;
         let bundle: datu_store::Bundle = s(datu_store::Bundle::try_from_slice(&bytes)
@@ -2148,7 +2172,7 @@ fn cmd_network_init(
     println!("network policy written: {}", path.display());
     print_network(&net);
     if net.is_permissioned() {
-        let node = load_node(data_dir)?;
+        let node = load_node_bootstrap(data_dir)?;
         if !net.self_admitted(&node.identity) {
             println!(
                 "  warning: this node's key {} is NOT a member or root - `datu node` will refuse to start (fail-closed)",
@@ -2162,7 +2186,7 @@ fn cmd_network_init(
 // ---- governance manifests (design §D: who may write, as an on-ledger chain) ----
 
 fn cmd_manifest_init(data_dir: &Path, network_id: String, out: PathBuf) -> Result<(), String> {
-    let node = load_node(data_dir)?;
+    let node = load_node_bootstrap(data_dir)?;
     if network_id.is_empty() || !network_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
         return Err(
             "--network-id must be 1+ chars of [a-z0-9-] (the chain lives at gov.mesh.<id>.policy)"
@@ -2186,7 +2210,7 @@ fn cmd_manifest_init(data_dir: &Path, network_id: String, out: PathBuf) -> Resul
 }
 
 fn cmd_manifest_publish(data_dir: &Path, file: PathBuf) -> Result<(), String> {
-    let node = load_node(data_dir)?;
+    let node = load_node_bootstrap(data_dir)?;
     let text =
         std::fs::read_to_string(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let mut doc: datu_store::ManifestDoc =
@@ -2318,7 +2342,7 @@ fn cmd_manifest_show(data_dir: &Path) -> Result<(), String> {
 // ---- disputes (design §A/C: preserved evidence + resolution records) ----
 
 fn cmd_disputes(data_dir: &Path) -> Result<(), String> {
-    let node = load_node(data_dir)?;
+    let node = load_node_reader(data_dir)?;
     let conflicts = s(node.store.list_conflicts(200))?;
     if conflicts.is_empty() {
         println!("no recorded feed disputes on this node");
@@ -2448,7 +2472,7 @@ fn run(cli: Cli) -> Result<(), String> {
     match &cli.command {
         Commands::Init => cmd_init(&cli.data_dir),
         Commands::Keys => {
-            let node = load_node(&cli.data_dir)?;
+            let node = load_node_reader(&cli.data_dir)?;
             println!("identity (ed25519): {}", node.identity);
             println!("pq key:              ml-dsa-65 (hybrid signatures)");
             Ok(())
@@ -2463,38 +2487,38 @@ fn run(cli: Cli) -> Result<(), String> {
             cmd_publish(&node, ns.clone(), payload.clone(), file.clone(), refs.clone())
         }
         Commands::Log { ns, author, limit } => {
-            let node = load_node(&cli.data_dir)?;
+            let node = load_node_reader(&cli.data_dir)?;
             cmd_log(&node, ns.clone(), author.clone(), *limit)
         }
         Commands::Get { id } => {
-            let node = load_node(&cli.data_dir)?;
+            let node = load_node_reader(&cli.data_dir)?;
             cmd_get(&node, id.clone())
         }
         Commands::Verify => {
-            let node = load_node(&cli.data_dir)?;
+            let node = load_node_reader(&cli.data_dir)?;
             cmd_verify(&node)
         }
         Commands::Checkpoint => {
-            let node = load_node(&cli.data_dir)?;
+            let node = load_node_reader(&cli.data_dir)?;
             cmd_checkpoint(&node)
         }
         Commands::Witness { cmd } => {
             match cmd {
                 WitnessCmd::Sign => {
-                    let node = load_node(&cli.data_dir)?;
+                    let node = load_node_reader(&cli.data_dir)?;
                     cmd_checkpoint(&node)
                 }
                 WitnessCmd::List => {
-                    let node = load_node(&cli.data_dir)?;
+                    let node = load_node_reader(&cli.data_dir)?;
                     cmd_witness_list(&node)
                 }
                 WitnessCmd::Export { out } => {
-                    let node = load_node(&cli.data_dir)?;
+                    let node = load_node_reader(&cli.data_dir)?;
                     let mesh = our_network_id(&cli.data_dir)?;
                     cmd_witness_export(&node, &mesh, out)
                 }
                 WitnessCmd::Import { input } => {
-                    let node = load_node(&cli.data_dir)?;
+                    let node = load_node_reader(&cli.data_dir)?;
                     let mesh = our_network_id(&cli.data_dir)?;
                     cmd_witness_import(&node, &mesh, input)
                 }
@@ -2513,7 +2537,7 @@ fn run(cli: Cli) -> Result<(), String> {
         } => serve::serve(
             &cli.data_dir,
             addr,
-            effective_policy(&cli.data_dir, *read_only)?,
+            effective_policy(&cli.data_dir, *read_only, false)?,
             *submit_per_min as usize,
         ),
         Commands::Wallet { cmd } => match cmd {
@@ -2656,7 +2680,7 @@ fn run(cli: Cli) -> Result<(), String> {
         },
         Commands::Disputes => cmd_disputes(&cli.data_dir),
         Commands::Parties { cmd } => {
-            let node = load_node(&cli.data_dir)?;
+            let node = load_node_reader(&cli.data_dir)?;
             match cmd {
                 PartiesCmd::Sign {
                     role,
@@ -2693,25 +2717,33 @@ fn run(cli: Cli) -> Result<(), String> {
         ),
         Commands::Discover { seconds } => node::discover(*seconds),
         Commands::Delta { cmd } => {
-            let node = load_node(&cli.data_dir)?;
             let mesh = our_network_id(&cli.data_dir)?;
             match cmd {
-                DeltaCmd::Make { out } => cmd_delta_make(&node, &mesh, out),
-                DeltaCmd::Answer { input, out } => cmd_delta_answer(&node, &mesh, input, out),
-                DeltaCmd::Merge { input } => cmd_delta_merge(&node, &mesh, input),
+                DeltaCmd::Make { out } => {
+                    cmd_delta_make(&load_node_reader(&cli.data_dir)?, &mesh, out)
+                }
+                DeltaCmd::Answer { input, out } => {
+                    cmd_delta_answer(&load_node_reader(&cli.data_dir)?, &mesh, input, out)
+                }
+                DeltaCmd::Merge { input } => {
+                    cmd_delta_merge(&load_node(&cli.data_dir)?, &mesh, input)
+                }
             }
         }
         Commands::Genesis => cmd_genesis(&cli.data_dir),
         Commands::Status => {
-            let node = load_node(&cli.data_dir)?;
+            let node = load_node_reader(&cli.data_dir)?;
             cmd_status(&node)
         }
         Commands::Bundle { cmd } => {
-            let node = load_node(&cli.data_dir)?;
             let mesh = our_network_id(&cli.data_dir)?;
             match cmd {
-                BundleCmd::Export { out } => cmd_bundle_export(&node, &mesh, out),
-                BundleCmd::Import { input } => cmd_bundle_import(&node, &mesh, input),
+                BundleCmd::Export { out } => {
+                    cmd_bundle_export(&load_node_reader(&cli.data_dir)?, &mesh, out)
+                }
+                BundleCmd::Import { input } => {
+                    cmd_bundle_import(&load_node(&cli.data_dir)?, &mesh, input)
+                }
             }
         }
     }
@@ -2722,5 +2754,113 @@ fn main() {
     if let Err(e) = run(cli) {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli(data_dir: &Path, command: Commands) -> Cli {
+        Cli {
+            data_dir: data_dir.to_path_buf(),
+            command,
+        }
+    }
+
+    fn publish(data_dir: &Path, ns: &str) -> Result<(), String> {
+        run(cli(
+            data_dir,
+            Commands::Publish {
+                ns: ns.into(),
+                payload: Some("{\"statement\":\"x\"}".into()),
+                file: None,
+                refs: vec![],
+            },
+        ))
+    }
+
+    /// A pinned manifest governs every CLI write path, not only `datu serve`:
+    /// a pin with no chain fails closed, and a verified chain supplies the
+    /// gate. Read-only commands keep working either way - evidence must stay
+    /// inspectable precisely when governance is broken.
+    #[test]
+    fn pinned_manifest_governs_cli_writes_but_never_reads() {
+        // `run` holds one frame per subcommand arm; the default 2 MiB test
+        // stack is not enough for the whole dispatch tree.
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(pinned_manifest_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn pinned_manifest_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        run(cli(d, Commands::Init)).unwrap();
+        let root = load_node(d).unwrap().identity.clone();
+
+        run(cli(
+            d,
+            Commands::Network {
+                cmd: NetworkCmd::Init {
+                    mode: "permissionless".into(),
+                    network_id: "gov-mesh".into(),
+                    members: vec![],
+                    roots: vec![],
+                    manifest_root: Some(root.clone()),
+                },
+            },
+        ))
+        .unwrap();
+
+        let err = publish(d, "gov.records").unwrap_err();
+        assert!(
+            err.contains("fail-closed") && err.contains("manifest"),
+            "a pin without a verifiable chain must refuse CLI writes: {err}"
+        );
+        run(cli(
+            d,
+            Commands::Log {
+                ns: None,
+                author: None,
+                limit: 5,
+            },
+        ))
+        .unwrap();
+
+        let template = d.join("mesh.json");
+        run(cli(
+            d,
+            Commands::Manifest {
+                cmd: ManifestCmd::Init {
+                    network_id: "gov-mesh".into(),
+                    out: template.clone(),
+                },
+            },
+        ))
+        .unwrap();
+        run(cli(
+            d,
+            Commands::Manifest {
+                cmd: ManifestCmd::Publish {
+                    file: template.clone(),
+                },
+            },
+        ))
+        .unwrap();
+
+        publish(d, "gov.records").expect("the manifest admits its own root");
+        let store = Store::open(&d.join("node.db")).unwrap();
+        assert!(
+            store
+                .list(Some("gov.mesh.gov-mesh.policy"), None, 10)
+                .unwrap()
+                .len()
+                == 1,
+            "the chain itself is an ordinary entry in the manifest namespace"
+        );
     }
 }

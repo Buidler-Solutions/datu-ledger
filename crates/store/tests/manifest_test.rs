@@ -222,3 +222,43 @@ fn junk_and_foreign_manifests_are_ignored() {
         "empty namespace compiles to None, not an error"
     );
 }
+
+#[test]
+fn unauthorized_continuation_cannot_manufacture_a_split() {
+    let store = Store::open_in_memory().unwrap();
+    let founder = keys();
+    let successor = keys();
+    let stranger = keys();
+
+    let m1 = ManifestDoc::new(
+        "gov-mesh",
+        vec![successor.author.clone()],
+        WritePolicy::default(),
+    );
+    let e1 = publish_manifest(&store, &founder, &m1, 0, None);
+
+    // A stranger spams a "continuation" of the genesis into the namespace.
+    // Anyone may hold anything - it is simply never a candidate, so it can
+    // neither capture the chain nor force a split that would block publishing.
+    let rogue = ManifestDoc {
+        supersedes: Some(hex::encode(e1.id().unwrap())),
+        ..ManifestDoc::new("gov-mesh", vec![stranger.author.clone()], WritePolicy::default())
+    };
+    publish_manifest(&store, &stranger, &rogue, 0, None);
+
+    let compiled = compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().unwrap();
+    assert_eq!(compiled.manifest_id, hex::encode(e1.id().unwrap()));
+    assert_eq!(compiled.chain.len(), 1);
+    let (head_id, _) = head(&store, "gov-mesh").unwrap().unwrap();
+    assert_eq!(head_id, hex::encode(e1.id().unwrap()));
+
+    // The real successor still extends the chain, with the spam still present.
+    let m2 = ManifestDoc {
+        supersedes: Some(hex::encode(e1.id().unwrap())),
+        ..ManifestDoc::new("gov-mesh", vec![successor.author.clone()], WritePolicy::default())
+    };
+    let e2 = publish_manifest(&store, &successor, &m2, 0, None);
+    let compiled2 = compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().unwrap();
+    assert_eq!(compiled2.manifest_id, hex::encode(e2.id().unwrap()));
+    assert_eq!(compiled2.chain.len(), 2);
+}

@@ -142,19 +142,19 @@ pub fn compile(
     chain.push((geneses[0].0.clone(), geneses[0].1.clone(), current_doc.note.clone()));
 
     loop {
+        // Only continuations signed by a key the *current* manifest still
+        // names are candidates. Anything else - a retired root, a stranger,
+        // junk - is invisible here, so it can neither link nor manufacture a
+        // split. A split is two *authorized* claims to the same succession.
         let nexts: Vec<&(String, String, ManifestDoc)> = docs
             .iter()
             .filter(|(_, _, doc)| doc.supersedes.as_deref() == Some(current_id.as_str()))
+            .filter(|(_, author, _)| current_doc.roots.iter().any(|r| r == author))
             .collect();
         match nexts.len() {
             0 => break,
             1 => {
                 let (id, author, doc) = nexts[0];
-                if !current_doc.roots.iter().any(|r| r == author) {
-                    // A continuation signed by a key the previous manifest
-                    // retired (or never named): not linked - ignore it.
-                    break;
-                }
                 chain.push((id.clone(), author.clone(), doc.note.clone()));
                 current_id = id.clone();
                 current_doc = doc.clone();
@@ -217,16 +217,12 @@ pub fn head(store: &Store, network_id: &str) -> Result<Option<(String, Vec<Strin
         let nexts: Vec<&(String, String, ManifestDoc)> = docs
             .iter()
             .filter(|(_, _, doc)| doc.supersedes.as_deref() == Some(current_id.as_str()))
+            .filter(|(_, author, _)| current_roots.iter().any(|r| r == author))
             .collect();
         match nexts.len() {
             0 => return Ok(Some((current_id, current_roots))),
             1 => {
-                let (id, author, doc) = nexts[0];
-                if !current_roots.iter().any(|r| r == author) {
-                    // Signed by a key the previous manifest retired or never
-                    // named: not linked into the chain - stop at the head.
-                    return Ok(Some((current_id, current_roots)));
-                }
+                let (id, _, doc) = nexts[0];
                 current_id = id.clone();
                 current_roots = doc.roots.clone();
             }

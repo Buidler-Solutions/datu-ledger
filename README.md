@@ -413,6 +413,18 @@ always admitted as attestors, so governance can always publish the next
 manifest; `readonly` is forced off (read-only is an operational flag of a node,
 not a governance act).
 
+**Enforced wherever entries land.** The compiled manifest is the store's
+admission policy, so every local write path obeys it - `datu publish`, p2p
+`sync`, `datu delta merge`, `datu bundle import`, `datu serve` and `datu node`
+alike (a foreign writer's bundle is *skipped by this node's policy*, not merged
+and not silently dropped from the report). Two deliberate asymmetries: the
+block is never applied to reads - `log`, `get`, `verify`, `status`, `disputes`
+keep working while governance is broken, because evidence must stay
+inspectable - and `manifest init/publish` plus `network init` may run
+*before* a chain exists, so a mesh can be founded at all. Keep `gov.mesh.*`
+inside the gated set (the default template's `gov.*` already covers it): the
+governance namespace is the one namespace that must not be spammable.
+
 ### Who can read what: reader enclaves
 
 Gating decides *who may write*; sealing decides *who may read*. Sensitive
