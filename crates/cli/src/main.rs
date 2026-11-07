@@ -26,7 +26,7 @@ const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 #[command(
     name = "datu",
     version,
-    about = "DATU - tokenless, offline-capable, DAG-type accountability ledger (not a blockchain): signed entries, append-only, run a node anywhere"
+    about = "DATU (Decentralized Accountable Trust Union) - tokenless, offline-capable, DAG-type accountability ledger (not a blockchain): signed entries, append-only, run a node anywhere"
 )]
 struct Cli {
     /// Node directory (database + identity key)
