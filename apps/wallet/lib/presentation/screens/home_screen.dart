@@ -61,9 +61,22 @@ class _ReadyPane extends ConsumerWidget {
       children: [
         Card(
           child: ListTile(
-            leading: const Icon(Icons.check_circle, color: Colors.green),
-            title: Text('Wallet service: ${bridge.baseUrl}'),
-            subtitle: Text('${state.identities.length} identities · keys stay in the service'),
+            leading: Icon(
+              state.native ? Icons.memory : Icons.check_circle,
+              color: Colors.green,
+            ),
+            title: Text(state.native
+                ? 'Native wallet core · in-process Rust'
+                : 'Wallet service: ${bridge.baseUrl}'),
+            subtitle: Text(state.native
+                ? '${state.identities.length} identities · keys never leave this device'
+                : '${state.identities.length} identities · keys stay in the service'),
+            trailing: state.native
+                ? const Chip(
+                    label: Text('native core'),
+                    visualDensity: VisualDensity(horizontal: -4, vertical: -4),
+                  )
+                : null,
           ),
         ),
         const SizedBox(height: 8),

@@ -20,12 +20,14 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use datu_core::bloom::BloomFilter;
-use datu_core::{Checkpoint, CheckpointBody, Entry, EntryBody};
+use datu_core::{Checkpoint, CheckpointBody, Entry};
 use datu_p2p::NetworkPolicy;
 use datu_store::{Store, StoreError, WritePolicy};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+
+pub use datu_wallet::wire::{entry_from_submission, entry_full_json};
 
 /// Hard cap on an HTTP request body (a single entry JSON is ≤ ~350 KB).
 pub const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -344,22 +346,6 @@ fn entry_summary_json(entry: &Entry) -> Result<serde_json::Value, String> {
     }))
 }
 
-pub fn entry_full_json(entry: &Entry) -> Result<serde_json::Value, String> {    Ok(serde_json::json!({
-        "author": entry.body.author,
-        "author_pq": entry.body.author_pq,
-        "pq_alg": entry.body.pq_alg,
-        "namespace": entry.body.namespace,
-        "seq": entry.body.seq,
-        "prev": entry.body.prev.map(hex::encode),
-        "refs": entry.body.refs.iter().map(hex::encode).collect::<Vec<_>>(),
-        "timestamp_ms": entry.body.timestamp_ms,
-        "payload_base64": B64.encode(&entry.body.payload),
-        "signature": hex::encode(entry.signature),
-        "pq_signature": B64.encode(&entry.pq_signature),
-        "id": hex::encode(entry.id().map_err(|e| e.to_string())?),
-    }))
-}
-
 /// Full wire format for a checkpoint - enough to reconstruct and verify it.
 pub fn checkpoint_full_json(cp: &Checkpoint) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
@@ -416,69 +402,6 @@ pub fn checkpoint_from_json(value: &serde_json::Value) -> Result<Checkpoint, Str
             entry_ids_root: root,
         },
         signature,
-        pq_signature,
-    })
-}
-
-/// The dApp submission format - exactly what a wallet signer returns.
-#[derive(serde::Deserialize)]
-struct EntrySubmission {
-    author: String,
-    author_pq: String,
-    pq_alg: String,
-    namespace: String,
-    seq: u64,
-    #[serde(default)]
-    prev: Option<String>,
-    #[serde(default)]
-    refs: Vec<String>,
-    timestamp_ms: u64,
-    payload_base64: String,
-    signature: String,
-    pq_signature: String,
-}
-
-pub fn entry_from_submission(value: &serde_json::Value) -> Result<Entry, String> {
-    let sub: EntrySubmission =
-        serde_json::from_value(value.clone()).map_err(|e| format!("bad entry JSON: {e}"))?;
-    let prev = match &sub.prev {
-        Some(p) => Some(
-            hex::decode(p)
-                .ok()
-                .and_then(|b| <[u8; 32]>::try_from(b).ok())
-                .ok_or("bad prev id")?,
-        ),
-        None => None,
-    };
-    let mut refs = Vec::with_capacity(sub.refs.len());
-    for r in &sub.refs {
-        refs.push(
-            hex::decode(r)
-                .ok()
-                .and_then(|b| <[u8; 32]>::try_from(b).ok())
-                .ok_or("bad ref id")?,
-        );
-    }
-    let payload = B64.decode(&sub.payload_base64).map_err(|_| "bad payload_base64")?;
-    let signature_arr: [u8; 64] = hex::decode(&sub.signature)
-        .ok()
-        .and_then(|b| <[u8; 64]>::try_from(b).ok())
-        .ok_or("bad signature")?;
-    let pq_signature = B64.decode(&sub.pq_signature).map_err(|_| "bad pq_signature")?;
-    Ok(Entry {
-        body: EntryBody {
-            version: datu_core::ENTRY_VERSION,
-            author: sub.author,
-            author_pq: sub.author_pq,
-            pq_alg: sub.pq_alg,
-            namespace: sub.namespace,
-            seq: sub.seq,
-            prev,
-            refs,
-            timestamp_ms: sub.timestamp_ms,
-            payload,
-        },
-        signature: signature_arr,
         pq_signature,
     })
 }

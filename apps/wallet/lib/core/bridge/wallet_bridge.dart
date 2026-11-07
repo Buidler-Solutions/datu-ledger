@@ -2,10 +2,59 @@ import 'dart:convert';
 
 import 'package:dio/dio.dart';
 
+/// The wallet surface every screen talks to. Two implementations:
+/// - [HttpWalletBridge] - desktop, talks to the local bridge process
+///   (`datu wallet serve`);
+/// - `NativeWalletBridge` - mobile / FFI demo, links the Rust core into the
+///   app process (crates/wallet-ffi).
+///
+/// The keys never live in this app either way: both implementations only
+/// accept passphrase-gated sign/seal requests and hand back results.
+abstract class WalletBridge {
+  String get baseUrl;
+  String get token;
+
+  Future<List<Map<String, dynamic>>> identities();
+
+  Future<Map<String, dynamic>> create({
+    required String name,
+    required String passphrase,
+  });
+
+  Future<Map<String, dynamic>> partySign({
+    required String name,
+    required String passphrase,
+    required String role,
+    required String kind,
+    required Map<String, dynamic> document,
+  });
+
+  Future<Map<String, dynamic>> seal({
+    required String name,
+    required String passphrase,
+    required Map<String, dynamic> document,
+    required List<String> fields,
+    required List<String> to,
+    List<String> toFields,
+  });
+
+  Future<Map<String, dynamic>> signEntry({
+    required String name,
+    required String passphrase,
+    required String namespace,
+    required int seq,
+    String? prev,
+    required Map<String, dynamic> payloadJson,
+  });
+
+  static String pretty(Object? value) =>
+      const JsonEncoder.withIndent('  ').convert(value);
+}
+
 /// Thin client over the local DATU wallet bridge (`datu wallet serve`).
 /// The bridge holds the keys; this app only asks it to sign and read.
-class WalletBridge {
-  WalletBridge({required String baseUrl, required this.token})
+class HttpWalletBridge implements WalletBridge {
+  HttpWalletBridge({required String baseUrl, required this.token})
       : baseUrl = baseUrl.replaceAll(RegExp(r'/+$'), '') {
     _dio = Dio(
       BaseOptions(
@@ -23,16 +72,32 @@ class WalletBridge {
     );
   }
 
+  @override
   final String baseUrl;
+  @override
   final String token;
   late final Dio _dio;
 
+  @override
   Future<List<Map<String, dynamic>>> identities() async {
     final res = await _dio.get('$baseUrl/v1/wallet/identities');
     final list = (res.data['identities'] as List?) ?? const [];
     return list.cast<Map<String, dynamic>>();
   }
 
+  @override
+  Future<Map<String, dynamic>> create({
+    required String name,
+    required String passphrase,
+  }) async {
+    final res = await _dio.post('$baseUrl/v1/wallet/create', data: {
+      'name': name,
+      'passphrase': passphrase,
+    });
+    return (res.data as Map).cast<String, dynamic>();
+  }
+
+  @override
   Future<Map<String, dynamic>> partySign({
     required String name,
     required String passphrase,
@@ -50,6 +115,7 @@ class WalletBridge {
     return (res.data as Map).cast<String, dynamic>();
   }
 
+  @override
   Future<Map<String, dynamic>> seal({
     required String name,
     required String passphrase,
@@ -69,6 +135,7 @@ class WalletBridge {
     return (res.data as Map).cast<String, dynamic>();
   }
 
+  @override
   Future<Map<String, dynamic>> signEntry({
     required String name,
     required String passphrase,
@@ -89,7 +156,4 @@ class WalletBridge {
     });
     return (res.data as Map).cast<String, dynamic>();
   }
-
-  static String pretty(Object? value) =>
-      const JsonEncoder.withIndent('  ').convert(value);
 }

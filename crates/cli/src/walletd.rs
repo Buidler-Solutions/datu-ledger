@@ -34,7 +34,8 @@
 //!   POST /v1/wallet/verify-entry{entry}
 //!   POST /v1/wallet/sign-entry  {name, passphrase, request}
 
-use crate::{entry_from_sign_request, serve as ledger_api, SignRequest};
+use crate::serve as ledger_api;
+use datu_wallet::wire::{entry_from_sign_request, SignRequest};
 use datu_core::parties::SignedDocument;
 use datu_wallet::{IdentityBackup, LoadedIdentity, Wallet};
 use std::collections::HashMap;

@@ -11,6 +11,7 @@ use datu_core::merkle::merkle_root;
 use datu_core::parties::SignedDocument;
 use datu_core::{BloomFilter, Checkpoint, CheckpointBody, Entry, EntryBody};
 use datu_store::{decode_witness_stream, Store, WritePolicy};
+use datu_wallet::wire::{entry_from_sign_request, SignRequest};
 use datu_p2p::{sign_hello, NetworkPolicy, NodeHello, NETWORK_POLICY_VERSION};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -487,63 +488,6 @@ fn parse_id(hex_str: &str) -> Result<[u8; 32], String> {
 
 fn short(h: &str) -> &str {
     &h[..8.min(h.len())]
-}
-
-#[derive(serde::Deserialize)]
-pub(crate) struct SignRequest {
-    pub(crate) namespace: String,
-    pub(crate) seq: u64,
-    #[serde(default)]
-    pub(crate) prev: Option<String>,
-    #[serde(default)]
-    pub(crate) refs: Vec<String>,
-    #[serde(default)]
-    pub(crate) timestamp_ms: Option<u64>,
-    #[serde(default)]
-    pub(crate) payload_base64: Option<String>,
-    #[serde(default)]
-    pub(crate) payload_json: Option<serde_json::Value>,
-}
-
-/// Build and hybrid-sign an entry from a dApp sign request. Shared by the
-/// `wallet sign` CLI command and the local wallet bridge (`wallet serve`).
-pub(crate) fn entry_from_sign_request(
-    identity: &datu_wallet::LoadedIdentity,
-    request: &SignRequest,
-) -> Result<Entry, String> {
-    if request.payload_base64.is_none() && request.payload_json.is_none() {
-        return Err("sign request needs payload_base64 or payload_json".into());
-    }
-    let payload = if let Some(b64) = &request.payload_base64 {
-        use base64::Engine;
-        base64::engine::general_purpose::STANDARD
-            .decode(b64)
-            .map_err(|_| "bad payload_base64".to_string())?
-    } else {
-        let value = request.payload_json.as_ref().expect("checked above");
-        serde_json::to_vec(value).map_err(|e| e.to_string())?
-    };
-    let prev = match &request.prev {
-        Some(p) => Some(parse_id(p)?),
-        None => None,
-    };
-    let mut refs = Vec::with_capacity(request.refs.len());
-    for r in &request.refs {
-        refs.push(parse_id(r)?);
-    }
-    let body = EntryBody {
-        version: datu_core::ENTRY_VERSION,
-        author: identity.public.ed_public.clone(),
-        author_pq: identity.public.pq_public.clone(),
-        pq_alg: "mldsa65".to_string(),
-        namespace: request.namespace.clone(),
-        seq: request.seq,
-        prev,
-        refs,
-        timestamp_ms: request.timestamp_ms.unwrap_or_else(now_ms),
-        payload,
-    };
-    identity.sign_entry(body)
 }
 
 fn get_passphrase(flag: Option<String>) -> Result<String, String> {

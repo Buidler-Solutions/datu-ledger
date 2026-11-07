@@ -35,6 +35,8 @@ use std::path::{Path, PathBuf};
 use x25519_dalek::{EphemeralSecret, PublicKey as XPublicKey, StaticSecret};
 pub type WResult<T> = Result<T, String>;
 
+pub mod wire;
+
 pub const SEALED_MARK: &str = "dag-sealed-v1";
 pub const SEALED_V2_MARK: &str = "datu-sealed-v2";
 /// Pre-rebrand v2 seal mark: still readable, never written.
