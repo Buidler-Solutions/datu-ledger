@@ -207,13 +207,22 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const ids = await listIdentities(bridgeUrl);
-      setIdentities(ids);
       const { body } = await nodeGet(nodeUrl, '/v1/status');
       setNodeStatus(body);
-      say(`bridge: ${ids.length} identities · node mode: ${body?.policy?.mode ?? '?'}`);
+      say(`node: ${body?.entries ?? '?'} entries · mode ${body?.policy?.mode ?? '?'}`);
     } catch (e) {
-      say(`cannot reach services: ${e.message}`, 'err');
+      say(`cannot reach the node at ${nodeUrl}: ${e.message}`, 'err');
+    }
+    if (!getToken()) {
+      say('bridge: paste the pairing token above to list wallet identities', 'muted');
+      return;
+    }
+    try {
+      const ids = await listIdentities(bridgeUrl);
+      setIdentities(ids);
+      say(`bridge: ${ids.length} identities on ${bridgeUrl}`, 'ok');
+    } catch (e) {
+      say(`cannot reach the bridge at ${bridgeUrl}: ${e.message}`, 'err');
     }
   }, [bridgeUrl, nodeUrl]);
 
@@ -224,9 +233,17 @@ export default function App() {
 
   useEffect(() => {
     let alive = true;
-    walletPing().then((ok) => {
-      if (alive) setWallet((w) => ({ ...w, detected: ok }));
-    });
+    let attempts = 0;
+    const probe = async () => {
+      const ok = await walletPing();
+      if (!alive) return;
+      if (ok) {
+        setWallet((w) => ({ ...w, detected: true }));
+        return;
+      }
+      if (++attempts < 20) setTimeout(probe, 2000);
+    };
+    probe();
     const off = onWalletState((state) => {
       if (!alive) return;
       setWallet({
@@ -553,6 +570,8 @@ export default function App() {
               type="password"
               defaultValue={getToken()}
               onChange={(e) => setToken(e.target.value)}
+              onBlur={refresh}
+              onKeyDown={(e) => e.key === 'Enter' && refresh()}
               placeholder="64 hex characters"
             />
           </label>
@@ -568,7 +587,7 @@ export default function App() {
         )}
         <p className={wallet.detected ? 'ok small' : 'err small'}>
           wallet extension:{' '}
-          {wallet.detected ? `active · ${wallet.wallets.length} wallet(s) paired` : 'not detected'}
+          {wallet.detected ? `active · ${wallet.wallets.length} wallet(s) paired` : 'not detected - load/reload it in chrome://extensions, then reload this page'}
           {wallet.detected && ` · unlocked: ${wallet.unlocked.join(', ') || 'none (panel will ask once)'}`}
         </p>
       </section>
