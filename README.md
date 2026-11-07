@@ -305,8 +305,11 @@ The gate is **local node policy** (`<data-dir>/policy.json`), not a global
 permission. Each node enforces it on every transport - HTTP submission, p2p
 pull, delta merge, bundle import - and it is rooted in the attestation graph
 (the same keys that make entries attributable). A rogue writer is simply not
-admitted on policy-abiding nodes; nothing is censored, their entries keep
-verifying and mirroring among observers, they just never count as official.
+admitted on policy-abiding nodes; no protocol mechanism deletes their entries
+- they keep verifying and mirroring among every observer that receives them -
+they just never count as official. (Withholding is detectable when
+independent replicas or witnesses hold the evidence; propagation itself is
+never guaranteed.)
 
 ### Validator gate
 
