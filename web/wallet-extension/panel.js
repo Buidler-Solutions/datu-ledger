@@ -128,7 +128,7 @@ async function pairWallet(url, token, label) {
   checkNode(true);
 }
 
-const PROBE_PORTS = ['7482', '7483', '7480', '7481', '7484', '7485'];
+const PROBE_PORTS = ['7482', '7483', '7480', '7481', '7484', '7485', '7488', '7489', '7490'];
 async function autoPair() {
   for (const port of PROBE_PORTS) {
     const url = `http://127.0.0.1:${port}`;
