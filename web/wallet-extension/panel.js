@@ -128,6 +128,24 @@ async function pairWallet(url, token, label) {
   checkNode(true);
 }
 
+const PROBE_PORTS = ['7482', '7483', '7480', '7481', '7484', '7485'];
+async function autoPair() {
+  for (const port of PROBE_PORTS) {
+    const url = `http://127.0.0.1:${port}`;
+    if (wallets.some((w) => w.url === url && tokens[w.url])) continue;
+    try {
+      const res = await fetch(`${url}/v1/pair`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!data || !data.token) continue;
+      await pairWallet(url, data.token, `datu · ${port}`);
+      status(`auto-paired with the wallet service at ${url}`, 'ok');
+      return true;
+    } catch {}
+  }
+  return false;
+}
+
 async function addWallet() {
   try {
     const label = $('walletLabel').value.trim() || 'wallet';
@@ -685,6 +703,10 @@ pollRequests();
 
 // ---------- wiring ----------
 $('addWallet').addEventListener('click', addWallet);
+$('findWallet').addEventListener('click', async () => {
+  status('looking for a local wallet service…', 'muted');
+  if (!(await autoPair())) status('nothing found on 127.0.0.1:7480-7485 - paste a token instead', 'err');
+});
 $('switchWallet').addEventListener('click', switchWallet);
 $('removeWallet').addEventListener('click', removeWallet);
 $('forget').addEventListener('click', forgetToken);
@@ -723,8 +745,10 @@ $('node').addEventListener('change', () => {
     } catch (e) {
       status(e.message, 'err');
     }
+  } else if (await autoPair()) {
+    // paired itself - nothing for the user to do
   } else {
-    status('pair a wallet - paste its bridge token in Settings', 'muted');
+    status('no wallet service found on this machine - paste a bridge token in Settings', 'muted');
     document.querySelector('nav button[data-tab="settings"]').click();
   }
   armIdleTimer();

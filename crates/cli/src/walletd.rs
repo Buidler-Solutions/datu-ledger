@@ -23,6 +23,9 @@
 //!
 //! Routes:
 //!   GET  /                      bridge doc page (no token)
+//!   GET  /v1/pair               token handed to browser wallet extensions only
+//!                               (Origin must be chrome-extension://) - lets the
+//!                               extension pair itself; web pages are refused
 //!   GET  /v1/wallet/identities  public identities (ed + seal keys)
 //!   POST /v1/wallet/create      {name, passphrase}
 //!   POST /v1/wallet/party-sign  {name, passphrase, role, document, kind?}
@@ -68,7 +71,8 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
     }
     println!("  pairing token: {}", data_dir.join(TOKEN_FILE).display());
     println!("    {token}");
-    println!("  paste that token into the wallet panel's Settings (pairing)");
+    println!("  the browser wallet extension can pair itself - no paste needed");
+    println!("  (manual fallback: paste the token into the panel's Settings)");
     println!("  allowed browser origins: chrome-extension://… , {}", origins.join(" , "));
     if !addr.starts_with("127.0.0.1") && !addr.starts_with("localhost") {
         println!("  WARNING: bound to a non-loopback address - anyone who can reach");
@@ -134,6 +138,33 @@ fn handle_inner(
 
     if route == "/" && method == "GET" {
         return respond(stream, "200 OK", "text/html; charset=utf-8", BRIDGE_HTML);
+    }
+
+    // Self-pairing for browser wallet extensions: a human never copies the
+    // token. Only an extension page carries a chrome-extension:// Origin - web
+    // pages cannot forge it - and the extension only gains the right to *ask*
+    // for signatures (still passphrase-gated) plus read access.
+    if route == "/v1/pair" && method == "GET" {
+        let origin = headers.get("origin").cloned().unwrap_or_default();
+        if origin.starts_with("chrome-extension://") {
+            println!("[pair] browser wallet extension paired: {origin}");
+            return respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({
+                    "ok": true,
+                    "service": "datu-wallet-bridge",
+                    "token": token,
+                }),
+            );
+        }
+        return respond_json(
+            stream,
+            "403 Forbidden",
+            &serde_json::json!({
+                "error": "auto-pairing is only offered to browser wallet extensions (chrome-extension:// origin); web pages must be paired explicitly",
+            }),
+        );
     }
 
     if let Err((status, message)) = check_access(&headers, token, origins) {
