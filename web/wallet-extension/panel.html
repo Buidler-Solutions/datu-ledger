@@ -31,6 +31,15 @@
       <button data-tab="settings">Settings</button>
     </nav>
 
+    <section id="requestsCard" style="display:none; margin: .6rem 1rem 0; border:1px solid #d29922; border-radius:8px; padding:.6rem .8rem;">
+      <b>Sign requests from dApps</b>
+      <p class="muted small">
+        Confirm each request with your wallet passphrase - remembered for this session until you
+        close the panel. The dApp never sees your keys or the passphrase.
+      </p>
+      <div id="requests"></div>
+    </section>
+
     <main>
       <section data-panel="records" class="active">
         <h2>Read from any node</h2>

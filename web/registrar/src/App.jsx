@@ -1,23 +1,22 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { listIdentities, nodeGet, nodePost, bridgePost, getToken, setToken } from './api.js';
+import { listIdentities, nodeGet, nodePost, getToken, setToken } from './api.js';
+import { walletPing, walletSign } from './wallet.js';
 
 const NS = 'gov.titles.application';
 const KIND = 'land.title.application';
-
-const emptyForm = {
-  parcel: 'TIT-0101-23',
-  district: 'Westfield',
-  holder_name: '',
-  birth_date: '',
-  holder_key: '',
-  holder_seal: '',
-};
+const CLAIM_KIND = 'land.ownership.registration';
 
 const defaultName = (page) =>
-  page === 'registrar' ? 'registrar' : page === 'landowner' ? 'amina' : 'registry-signer';
+  page === 'register'
+    ? 'amina'
+    : page === 'registrar'
+      ? 'registrar'
+      : page === 'landowner'
+        ? 'amina'
+        : 'registry-signer';
 
 function useHashPage() {
-  const read = () => window.location.hash.replace(/^#\/?/, '') || 'registrar';
+  const read = () => window.location.hash.replace(/^#\/?/, '') || 'register';
   const [page, setPage] = useState(read);
   useEffect(() => {
     const on = () => setPage(read());
@@ -75,16 +74,12 @@ function parseEnvelope(text) {
 
 const partyOf = (doc, role) => (doc.parties || []).find((p) => p.role === role);
 
-function WalletLogin({ page, bridgeUrl, nodeUrl, session, onLogin, onLogout }) {
+function WalletLogin({ page, bridgeUrl, nodeUrl, session, onLogin, onLogout, say }) {
   const [name, setName] = useState(defaultName(page));
-  const [pass, setPass] = useState('');
-  const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     setName(defaultName(page));
-    setPass('');
-    setErr('');
   }, [page]);
 
   if (session) {
@@ -94,8 +89,8 @@ function WalletLogin({ page, bridgeUrl, nodeUrl, session, onLogin, onLogout }) {
           Signed in through the wallet as <b>{session.name}</b> · {session.ed.slice(0, 16)}…
         </p>
         <p className="muted small">
-          challenge {session.challenge.nonce.slice(0, 12)}… signed {session.at} · signature{' '}
-          {session.sig.slice(0, 24)}…
+          challenge {session.challenge.nonce.slice(0, 12)}… signed {session.at} at the wallet ·
+          signature {session.sig.slice(0, 24)}…
         </p>
         <button className="ghost" onClick={onLogout}>
           Log out
@@ -106,36 +101,36 @@ function WalletLogin({ page, bridgeUrl, nodeUrl, session, onLogin, onLogout }) {
 
   async function login() {
     setBusy(true);
-    setErr('');
     try {
-      if (!name.trim()) throw new Error('identity name is required');
-      if (!pass) throw new Error('the wallet passphrase is required');
-      const challenge = {
-        page,
-        node: nodeUrl,
-        nonce: randomHex(16),
-        ts: Date.now(),
-      };
-      const res = await bridgePost(bridgeUrl, '/v1/wallet/party-sign', {
-        name: name.trim(),
-        passphrase: pass,
-        role: 'login',
-        kind: 'datu.login',
-        document: challenge,
+      if (!(await walletPing())) {
+        throw new Error(
+          'wallet extension not detected - load it from chrome://extensions and reload this page'
+        );
+      }
+      const challenge = { page, node: nodeUrl, nonce: randomHex(16), ts: Date.now() };
+      const res = await walletSign({
+        bridgeUrl,
+        path: '/v1/wallet/party-sign',
+        summary: `Login - page "${page}" signs a one-time challenge as ${name.trim()}`,
+        body: {
+          name: name.trim(),
+          role: 'login',
+          kind: 'datu.login',
+          document: challenge,
+        },
       });
-      if (res.status !== 200) throw new Error(res.body.error || 'wallet refused the challenge');
-      const party = ((res.body.document || {}).parties || []).find((p) => p.role === 'login');
+      const party = ((res.body || {}).parties || []).find((p) => p.role === 'login');
       if (!party) throw new Error('wallet returned no login signature');
       onLogin({
         name: name.trim(),
-        pass,
         ed: party.key,
         sig: party.signature || '',
         at: new Date().toLocaleTimeString(),
         challenge,
       });
+      say(`${page} logged in via the wallet as ${name.trim()} (${party.key.slice(0, 16)}…)`, 'ok');
     } catch (e) {
-      setErr(e.message);
+      say(e.message, 'err');
     } finally {
       setBusy(false);
     }
@@ -145,28 +140,18 @@ function WalletLogin({ page, bridgeUrl, nodeUrl, session, onLogin, onLogout }) {
     <div className="card login">
       <h2>Login through the wallet</h2>
       <p className="muted small">
-        The wallet signs a one-time challenge - only the right passphrase produces it. The dApp never
-        sees your keys.
+        No passphrase here - the wallet signs a one-time challenge and asks you to confirm it in the
+        side panel. The dApp only receives the signed challenge.
       </p>
       <div className="row">
         <label>
           Identity on the bridge
           <input value={name} onChange={(e) => setName(e.target.value)} />
         </label>
-        <label>
-          Passphrase
-          <input
-            type="password"
-            value={pass}
-            onChange={(e) => setPass(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && login()}
-          />
-        </label>
+        <button onClick={login} disabled={busy} style={{ marginTop: '1.4rem' }}>
+          {busy ? 'signing challenge…' : 'Login with wallet'}
+        </button>
       </div>
-      <button onClick={login} disabled={busy}>
-        {busy ? 'signing challenge…' : 'Login with wallet'}
-      </button>
-      {err && <p className="err small">{err}</p>}
     </div>
   );
 }
@@ -183,7 +168,18 @@ export default function App() {
 
   const [sessions, setSessions] = useState({});
 
-  const [form, setForm] = useState(emptyForm);
+  const [claimForm, setClaimForm] = useState({ parcel: 'TIT-0101-25', district: 'Westfield' });
+  const [claim, setClaim] = useState(null);
+
+  const [claimIn, setClaimIn] = useState('');
+  const [form, setForm] = useState({
+    parcel: '',
+    district: '',
+    holder_name: '',
+    birth_date: '',
+    holder_key: '',
+    holder_seal: '',
+  });
   const [registrarEnvelope, setRegistrarEnvelope] = useState(null);
 
   const [holderIn, setHolderIn] = useState('');
@@ -213,11 +209,8 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const setField = (k) => (e) => setForm({ ...form, [k]: e.target.value });
-
   function onLogin(p, session) {
     setSessions((s) => ({ ...s, [p]: session }));
-    say(`${p} logged in via wallet as ${session.name} (${session.ed.slice(0, 16)}…)`, 'ok');
   }
   function onLogout(p) {
     setSessions((s) => {
@@ -228,7 +221,59 @@ export default function App() {
     say(`${p} logged out`);
   }
 
-  // ---- registrar: prepare, seal, sign, hand over ----
+  // ---- 0 · landowner registers the ownership claim ----
+  async function registerOwnership() {
+    const session = sessions.register;
+    if (!session) return say('login through the wallet first', 'err');
+    setBusy(true);
+    try {
+      const me = identities.find((i) => i.name === session.name);
+      if (!me) throw new Error(`identity '${session.name}' vanished from the bridge`);
+      const document = {
+        parcel: claimForm.parcel,
+        district: claimForm.district,
+        claimant_key: session.ed,
+        claimant_seal: me.seal_public,
+        registered_at: new Date().toISOString(),
+      };
+      const res = await walletSign({
+        bridgeUrl,
+        path: '/v1/wallet/party-sign',
+        summary: `Register land ownership - ${claimForm.parcel} (${claimForm.district}) signed by ${session.name}`,
+        body: { name: session.name, role: 'claimant', kind: CLAIM_KIND, document },
+      });
+      setClaim(res.body);
+      say('ownership claim signed by the landowner - hand it to the registrar');
+    } catch (e) {
+      say(e.message, 'err');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ---- 1 · registrar receives the claim, prepares and signs ----
+  function loadClaim() {
+    try {
+      const doc = parseEnvelope(claimIn);
+      const claimant = partyOf(doc, 'claimant');
+      if (!claimant) throw new Error('this file has no claimant signature');
+      if (doc.doc?.claimant_key && claimant.key !== doc.doc.claimant_key) {
+        throw new Error('claimant signature does not match claimant_key');
+      }
+      setForm((f) => ({
+        ...f,
+        parcel: doc.doc.parcel || '',
+        district: doc.doc.district || '',
+        holder_key: doc.doc.claimant_key || '',
+        holder_seal: doc.doc.claimant_seal || '',
+      }));
+      setClaim(doc);
+      say(`claim verified: ${doc.doc.parcel} · claimant ${claimant.key.slice(0, 16)}…`);
+    } catch (e) {
+      say(`claim not accepted: ${e.message}`, 'err');
+    }
+  }
+
   async function signAsRegistrar() {
     const session = sessions.registrar;
     if (!session) return say('login through the wallet first', 'err');
@@ -236,7 +281,7 @@ export default function App() {
     setResult(null);
     try {
       if (!form.holder_key || !form.holder_seal) {
-        throw new Error('holder key and holder seal key are required');
+        throw new Error('holder key and holder seal key are required (load the claim first)');
       }
       const me = identities.find((i) => i.name === session.name);
       if (!me) throw new Error(`identity '${session.name}' vanished from the bridge`);
@@ -247,29 +292,43 @@ export default function App() {
         holder_seal: form.holder_seal.trim(),
         holder_name: form.holder_name,
         birth_date: form.birth_date,
+        claim: claim
+          ? {
+              kind: claim.kind,
+              claimant: claim.parties.find((p) => p.role === 'claimant')?.key,
+              signature: claim.parties.find((p) => p.role === 'claimant')?.signature,
+              registered_at: claim.doc.registered_at,
+            }
+          : undefined,
       };
       say('sealing personal fields to registry + holder…');
-      const sealed = await bridgePost(bridgeUrl, '/v1/wallet/seal', {
-        name: session.name,
-        passphrase: session.pass,
-        document,
-        fields: ['holder_name', 'birth_date'],
-        to: [me.seal_public],
-        to_fields: ['holder_seal'],
+      const sealed = await walletSign({
+        bridgeUrl,
+        path: '/v1/wallet/seal',
+        summary: `Seal holder_name + birth_date for ${form.parcel} (readers: registrar + holder)`,
+        body: {
+          name: session.name,
+          document,
+          fields: ['holder_name', 'birth_date'],
+          to: [me.seal_public],
+          to_fields: ['holder_seal'],
+        },
       });
-      if (sealed.status !== 200) throw new Error(sealed.body.error || 'seal failed');
       say(`${sealed.body.sealed} field(s) sealed to ${sealed.body.readers} readers`);
 
-      const signed = await bridgePost(bridgeUrl, '/v1/wallet/party-sign', {
-        name: session.name,
-        passphrase: session.pass,
-        role: 'registrar',
-        kind: KIND,
-        document: sealed.body.document,
+      const signed = await walletSign({
+        bridgeUrl,
+        path: '/v1/wallet/party-sign',
+        summary: `Registrar certification - ${form.parcel} signed as registrar by ${session.name}`,
+        body: {
+          name: session.name,
+          role: 'registrar',
+          kind: KIND,
+          document: sealed.body.document,
+        },
       });
-      if (signed.status !== 200) throw new Error(signed.body.error || 'party sign failed');
-      say('registrar signature added (Ed25519 + ML-DSA-65) - envelope ready for the landowner');
-      setRegistrarEnvelope(signed.body.document);
+      say('registrar signature added - envelope ready for the landowner');
+      setRegistrarEnvelope(signed.body);
       setHolderEnvelope(null);
       setReadyDoc(null);
     } catch (e) {
@@ -279,7 +338,7 @@ export default function App() {
     }
   }
 
-  // ---- landowner: review, consent-sign, hand over ----
+  // ---- 2 · landowner consents ----
   async function signAsHolder() {
     const session = sessions.landowner;
     if (!session) return say('login through the wallet first', 'err');
@@ -292,17 +351,14 @@ export default function App() {
           `this envelope names holder ${doc.doc.holder_key.slice(0, 16)}… but you are ${session.ed.slice(0, 16)}…`
         );
       }
-      say('signing consent as holder…');
-      const signed = await bridgePost(bridgeUrl, '/v1/wallet/party-sign', {
-        name: session.name,
-        passphrase: session.pass,
-        role: 'holder',
-        kind: KIND,
-        document: doc,
+      const res = await walletSign({
+        bridgeUrl,
+        path: '/v1/wallet/party-sign',
+        summary: `Holder consent - ${doc.doc.parcel} signed as holder by ${session.name}`,
+        body: { name: session.name, role: 'holder', kind: KIND, document: doc },
       });
-      if (signed.status !== 200) throw new Error(signed.body.error || 'consent signing failed');
       say('holder consent added - envelope ready for the registry-signer');
-      setHolderEnvelope(signed.body.document);
+      setHolderEnvelope(res.body);
     } catch (e) {
       say(e.message, 'err');
     } finally {
@@ -310,7 +366,7 @@ export default function App() {
     }
   }
 
-  // ---- registry: verify, author, record ----
+  // ---- 3 · registry-signer records ----
   function checkForRecording() {
     try {
       const doc = parseEnvelope(registryIn);
@@ -339,17 +395,21 @@ export default function App() {
       const next = feed.body.next || { seq: 0, prev: null };
       say(`authoring entry seq ${next.seq} as ${session.ed.slice(0, 16)}…`);
 
-      const signed = await bridgePost(bridgeUrl, '/v1/wallet/sign-entry', {
-        name: session.name,
-        passphrase: session.pass,
-        request: {
-          namespace: NS,
-          seq: next.seq,
-          prev: next.prev,
-          payload_json: readyDoc,
+      const signed = await walletSign({
+        bridgeUrl,
+        path: '/v1/wallet/sign-entry',
+        summary: `Record title ${readyDoc.doc?.parcel} into ${NS} as ${session.name} (seq ${next.seq})`,
+        body: {
+          name: session.name,
+          request: {
+            namespace: NS,
+            seq: next.seq,
+            prev: next.prev,
+            payload_json: readyDoc,
+          },
         },
       });
-      if (signed.status !== 200) throw new Error(signed.body.error || 'entry signing failed');
+      if (!signed.body || !signed.body.entry) throw new Error('wallet returned no signed entry');
       say(`entry ${signed.body.id.slice(0, 16)}… signed`);
 
       const submit = await nodePost(nodeUrl, '/v1/entries', signed.body.entry);
@@ -371,9 +431,10 @@ export default function App() {
   }
 
   const pages = [
+    ['register', '0 · Landowner registers'],
     ['registrar', '1 · Registrar'],
-    ['landowner', '2 · Landowner'],
-    ['registry', '3 · Registry'],
+    ['landowner', '2 · Landowner signs'],
+    ['registry', '3 · Registry records'],
   ];
 
   return (
@@ -381,25 +442,21 @@ export default function App() {
       <header>
         <h1>DATU · Land Registry</h1>
         <p className="muted">
-          Title application - one page per party. The envelope travels by file: registrar → landowner
-          → registry. Each party logs in through their wallet and signs with it.
+          Ownership registration → registrar certification → landowner consent → ledger record. The
+          envelope travels by file; every signature is confirmed in the browser wallet extension.
         </p>
       </header>
 
       <nav className="navtabs">
         {pages.map(([key, label]) => (
-          <button
-            key={key}
-            className={page === key ? 'tab active' : 'tab'}
-            onClick={() => go(key)}
-          >
+          <button key={key} className={page === key ? 'tab active' : 'tab'} onClick={() => go(key)}>
             {label}
           </button>
         ))}
       </nav>
 
       <section className="card">
-        <h2>Services (this party's node + wallet bridge)</h2>
+        <h2>Services (node + wallet bridge)</h2>
         <div className="row">
           <label>
             Registry node
@@ -412,7 +469,7 @@ export default function App() {
         </div>
         <div className="row">
           <label>
-            Bridge pairing token (printed by <code>datu wallet serve</code>)
+            Bridge pairing token (read-only bridge calls: identities, feed)
             <input
               type="password"
               defaultValue={getToken()}
@@ -440,66 +497,119 @@ export default function App() {
         session={sessions[page]}
         onLogin={(s) => onLogin(page, s)}
         onLogout={() => onLogout(page)}
+        say={say}
       />
 
-      {page === 'registrar' && sessions.registrar && (
+      {page === 'register' && sessions.register && (
         <section className="grid">
           <div className="card">
-            <h2>Prepare the title application</h2>
+            <h2>Register your land ownership</h2>
             <label>
               Parcel
-              <input value={form.parcel} onChange={setField('parcel')} />
+              <input
+                value={claimForm.parcel}
+                onChange={(e) => setClaimForm({ ...claimForm, parcel: e.target.value })}
+              />
             </label>
             <label>
               District
-              <input value={form.district} onChange={setField('district')} />
+              <input
+                value={claimForm.district}
+                onChange={(e) => setClaimForm({ ...claimForm, district: e.target.value })}
+              />
             </label>
-            <label>
-              Holder name <em className="tag">encrypted</em>
-              <input value={form.holder_name} onChange={setField('holder_name')} placeholder="Amina Yusuf" />
-            </label>
-            <label>
-              Birth date <em className="tag">encrypted</em>
-              <input value={form.birth_date} onChange={setField('birth_date')} placeholder="1990-04-12" />
-            </label>
-            <label>
-              Holder Ed25519 key <em className="tag pub">public</em>
-              <input value={form.holder_key} onChange={setField('holder_key')} placeholder="64 hex" />
-            </label>
-            <label>
-              Holder seal key (X25519) <em className="tag pub">public</em>
-              <input value={form.holder_seal} onChange={setField('holder_seal')} placeholder="64 hex" />
-            </label>
-            <button onClick={signAsRegistrar} disabled={busy}>
-              Seal fields &amp; sign as registrar
+            <button onClick={registerOwnership} disabled={busy}>
+              Sign ownership claim with the wallet
             </button>
           </div>
 
           <div className="card">
-            <h2>Envelope → landowner</h2>
-            {!registrarEnvelope && <p className="muted small">- seal &amp; sign to produce the envelope -</p>}
+            <h2>Claim → registrar</h2>
+            {!claim && <p className="muted small">- sign to produce the ownership claim -</p>}
+            {claim && (
+              <>
+                <p className="ok small">claimant signed · {claim.doc.parcel}</p>
+                <button onClick={() => downloadJson(`${claim.doc.parcel}-0-claim.json`, claim)}>
+                  Download claim for the registrar
+                </button>
+                <details>
+                  <summary>claim preview</summary>
+                  <pre>{JSON.stringify(claim, null, 2)}</pre>
+                </details>
+              </>
+            )}
+          </div>
+        </section>
+      )}
+
+      {page === 'registrar' && sessions.registrar && (
+        <section className="grid">
+          <div className="card">
+            <h2>Process the ownership claim</h2>
+            <FileLoader label="Load the claim file from the landowner" onText={setClaimIn} />
+            <label>
+              …or paste it
+              <textarea
+                rows={5}
+                value={claimIn}
+                onChange={(e) => setClaimIn(e.target.value)}
+                placeholder="claim JSON"
+              />
+            </label>
+            <button className="ghost" onClick={loadClaim} disabled={!claimIn}>
+              Verify claim &amp; prefill
+            </button>
+            {claim && <p className="ok small">claim verified - form prefilled</p>}
+          </div>
+
+          <div className="card">
+            <h2>Certify the title</h2>
+            <label>
+              Parcel
+              <input value={form.parcel} onChange={(e) => setForm({ ...form, parcel: e.target.value })} />
+            </label>
+            <label>
+              District
+              <input value={form.district} onChange={(e) => setForm({ ...form, district: e.target.value })} />
+            </label>
+            <label>
+              Holder name <em className="tag">encrypted</em>
+              <input
+                value={form.holder_name}
+                onChange={(e) => setForm({ ...form, holder_name: e.target.value })}
+                placeholder="Amina Yusuf"
+              />
+            </label>
+            <label>
+              Birth date <em className="tag">encrypted</em>
+              <input
+                value={form.birth_date}
+                onChange={(e) => setForm({ ...form, birth_date: e.target.value })}
+                placeholder="1990-04-12"
+              />
+            </label>
+            <label>
+              Holder Ed25519 key <em className="tag pub">from the claim</em>
+              <input value={form.holder_key} onChange={(e) => setForm({ ...form, holder_key: e.target.value })} />
+            </label>
+            <label>
+              Holder seal key (X25519) <em className="tag pub">from the claim</em>
+              <input value={form.holder_seal} onChange={(e) => setForm({ ...form, holder_seal: e.target.value })} />
+            </label>
+            <button onClick={signAsRegistrar} disabled={busy}>
+              Seal fields &amp; sign as registrar
+            </button>
             {registrarEnvelope && (
               <>
                 <p className="ok small">
-                  registrar signed · parties: {registrarEnvelope.parties.map((p) => p.role).join(', ')}
+                  registrar signed · parties:{' '}
+                  {registrarEnvelope.parties.map((p) => p.role).join(', ')}
                 </p>
                 <button
-                  onClick={() =>
-                    downloadJson(`${form.parcel || 'title'}-1-registrar.json`, registrarEnvelope)
-                  }
+                  onClick={() => downloadJson(`${form.parcel || 'title'}-1-registrar.json`, registrarEnvelope)}
                 >
                   Download envelope for the landowner
                 </button>
-                <button
-                  className="ghost"
-                  onClick={() => navigator.clipboard.writeText(JSON.stringify(registrarEnvelope))}
-                >
-                  Copy envelope JSON
-                </button>
-                <details>
-                  <summary>envelope preview</summary>
-                  <pre>{JSON.stringify(registrarEnvelope, null, 2)}</pre>
-                </details>
               </>
             )}
           </div>
@@ -525,9 +635,9 @@ export default function App() {
                 {(() => {
                   try {
                     const doc = parseEnvelope(holderIn);
-                    const parcels = doc.doc?.parcel ?? '?';
-                    const roles = (doc.parties || []).map((p) => p.role).join(', ') || '-';
-                    return `parcel ${parcels} · signatures: ${roles}`;
+                    return `parcel ${doc.doc?.parcel ?? '?'} · signatures: ${(doc.parties || [])
+                      .map((p) => p.role)
+                      .join(', ')}`;
                   } catch (e) {
                     return `unreadable: ${e.message}`;
                   }
@@ -538,12 +648,8 @@ export default function App() {
 
           <div className="card">
             <h2>Consent as holder</h2>
-            <p className="muted small">
-              Your identity must be the one named in <code>holder_key</code>; the registry checks it
-              again on the ledger.
-            </p>
             <button onClick={signAsHolder} disabled={busy || !holderIn || !sessions.landowner}>
-              Sign consent as holder
+              Sign consent with the wallet
             </button>
             {holderEnvelope && (
               <>
@@ -552,19 +658,10 @@ export default function App() {
                 </p>
                 <button
                   onClick={() =>
-                    downloadJson(
-                      `${holderEnvelope.doc?.parcel || 'title'}-2-consented.json`,
-                      holderEnvelope
-                    )
+                    downloadJson(`${holderEnvelope.doc?.parcel || 'title'}-2-consented.json`, holderEnvelope)
                   }
                 >
                   Download consented envelope for the registry
-                </button>
-                <button
-                  className="ghost"
-                  onClick={() => navigator.clipboard.writeText(JSON.stringify(holderEnvelope))}
-                >
-                  Copy envelope JSON
                 </button>
               </>
             )}
@@ -595,7 +692,7 @@ export default function App() {
           <div className="card">
             <h2>Record to the ledger</h2>
             <button onClick={recordToLedger} disabled={busy || !readyDoc || !sessions.registry}>
-              Sign entry &amp; POST to node
+              Sign entry with the wallet &amp; POST to node
             </button>
             {result && (
               <div className={`result ${result.status === 201 ? 'okbox' : 'dupbox'}`}>

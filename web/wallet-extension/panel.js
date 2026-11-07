@@ -547,6 +547,101 @@ function armIdleTimer() {
   document.addEventListener(event, armIdleTimer, { passive: true }),
 );
 
+// ---------- dApp sign requests ----------
+// The background relays {kind:'datu-rpc'} jobs queued in session storage.
+// We render each one; the user confirms with the passphrase (remembered in
+// panel memory for this session), and the result goes back to the tab.
+const REQUESTS_KEY = 'datuRpcQueue';
+const passCache = {}; // identity name -> passphrase, panel memory only
+let requestsFingerprint = '';
+
+async function pollRequests() {
+  try {
+    const o = await chrome.storage.session.get(REQUESTS_KEY);
+    const queue = o[REQUESTS_KEY] || [];
+    const card = $('requestsCard');
+    if (!queue.length) {
+      card.style.display = 'none';
+      requestsFingerprint = '';
+      return;
+    }
+    card.style.display = 'block';
+    const fingerprint = queue.map((r) => r.id).join(',');
+    if (fingerprint === requestsFingerprint) return;
+    requestsFingerprint = fingerprint;
+    const holder = $('requests');
+    holder.innerHTML = '';
+    for (const req of queue) holder.appendChild(renderRequest(req));
+  } catch {}
+}
+
+function renderRequest(req) {
+  const payload = req.payload || {};
+  const path = payload.path || '';
+  const body = payload.body || {};
+  const url = (payload.bridgeUrl || '').replace(/\/+$/, '');
+  const token = tokens[url];
+
+  const box = document.createElement('div');
+  box.style.borderTop = '1px solid #30363d';
+  box.style.padding = '.45rem 0';
+
+  const head = document.createElement('div');
+  head.innerHTML = `<b>${esc(payload.summary || path || req.action)}</b>
+    <div class="muted small">${esc(url)}${esc(path)} · identity ${esc(body.name || '?')} · ${new Date(req.at).toLocaleTimeString()}</div>`;
+  box.appendChild(head);
+
+  const pass = document.createElement('input');
+  pass.type = 'password';
+  pass.placeholder = passCache[body.name] ? 'passphrase remembered for this session' : 'wallet passphrase';
+  pass.value = passCache[body.name] || '';
+  pass.style.marginTop = '.3rem';
+  box.appendChild(pass);
+
+  const row = document.createElement('div');
+  row.className = 'row';
+  const confirm = document.createElement('button');
+  confirm.className = 'primary';
+  confirm.textContent = 'Confirm & sign';
+  const reject = document.createElement('button');
+  reject.className = 'ghost';
+  reject.textContent = 'Reject';
+  row.append(confirm, reject);
+  box.appendChild(row);
+
+  confirm.addEventListener('click', async () => {
+    confirm.disabled = true;
+    try {
+      if (!token) throw new Error('this wallet is not paired - paste its bridge token in Settings');
+      const payloadBody = { ...body };
+      if (pass.value) {
+        payloadBody.passphrase = pass.value;
+        passCache[body.name] = pass.value;
+      }
+      const res = await call(`${url}${path}`, {
+        method: 'POST',
+        body: payloadBody,
+        auth: true,
+        token,
+      });
+      chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: true, result: { status: 200, body: res } });
+      status('sign request completed', 'ok');
+    } catch (e) {
+      chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: false, error: e.message });
+      status(e.message, 'err');
+      confirm.disabled = false;
+    }
+  });
+  reject.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: false, error: 'rejected in the wallet' });
+  });
+
+  return box;
+}
+
+setInterval(pollRequests, 1200);
+pollRequests();
+
 // ---------- wiring ----------
 $('addWallet').addEventListener('click', addWallet);
 $('switchWallet').addEventListener('click', switchWallet);

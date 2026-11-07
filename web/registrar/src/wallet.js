@@ -1,0 +1,61 @@
+// Wallet RPC client: talks to the DATU browser wallet extension through the
+// page <-> content-script postMessage bridge (inject.js). The extension queues
+// each request, the human confirms it in the side panel with the passphrase,
+// and only the signed result comes back here. The dApp never sees keys and
+// never asks for a passphrase itself.
+
+const PAGE = 'datu-dapp';
+const WALLET = 'datu-wallet';
+
+const pending = new Map();
+
+window.addEventListener('message', (ev) => {
+  const d = ev.data;
+  if (!d || d.source !== WALLET || !d.id) return;
+  const p = pending.get(d.id);
+  if (!p) return;
+  pending.delete(d.id);
+  clearTimeout(p.timer);
+  if (d.ok) p.resolve({ status: (d.result && d.result.status) || 200, body: (d.result && d.result.body) ?? d.result });
+  else p.reject(new Error(d.error || 'wallet rejected the request'));
+});
+
+function send(action, payload, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const id =
+      window.crypto && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(
+        new Error(
+          'no answer from the wallet extension - load it (chrome://extensions) and reload this page'
+        )
+      );
+    }, timeoutMs);
+    pending.set(id, { resolve, reject, timer });
+    window.postMessage({ source: PAGE, id, action, payload }, '*');
+  });
+}
+
+export function walletPing() {
+  return new Promise((resolve) => {
+    const id =
+      window.crypto && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      resolve(false);
+    }, 1500);
+    pending.set(id, { resolve: () => resolve(true), reject: () => resolve(false), timer });
+    window.postMessage({ source: PAGE, id, action: 'ping' }, '*');
+  });
+}
+
+// One wallet signature: the extension will ask the human to confirm and will
+// unlock the named identity with the passphrase typed there.
+export function walletSign({ bridgeUrl, path, body, summary }) {
+  return send('sign', { bridgeUrl, path, body, summary }, 300000);
+}

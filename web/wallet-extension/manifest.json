@@ -36,5 +36,18 @@
   ],
   "content_security_policy": {
     "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src http://127.0.0.1:* http://localhost:*"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://127.0.0.1:5173/*",
+        "http://localhost:5173/*",
+        "http://127.0.0.1:4173/*"
+      ],
+      "js": [
+        "inject.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
 }
