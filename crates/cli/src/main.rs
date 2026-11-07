@@ -113,6 +113,13 @@ enum Commands {
         #[command(subcommand)]
         cmd: NetworkCmd,
     },
+    /// Governance manifests: the on-ledger policy chain for official meshes
+    Manifest {
+        #[command(subcommand)]
+        cmd: ManifestCmd,
+    },
+    /// Recorded feed disputes + any resolution records referencing them
+    Disputes,
     /// Show and verify this code's genesis record - the founder-signed
     /// statement every ledger seeded from this code begins with
     Genesis,
@@ -330,11 +337,35 @@ enum NetworkCmd {
         /// Attestation root key: any node it attests on-ledger is admitted (repeatable)
         #[arg(long = "root", value_delimiter = ',')]
         roots: Vec<String>,
+        /// Pin the governance manifest root key (hex): this node compiles
+        /// its writer policy from the on-ledger chain
+        /// gov.mesh.<network-id>.policy (fail-closed without a valid chain)
+        #[arg(long = "manifest-root")]
+        manifest_root: Option<String>,
     },
     /// Show the current network policy (or say you are the open network)
     Show,
     /// Delete the network policy - this node becomes the open network
     Clear,
+}
+
+#[derive(Subcommand)]
+enum ManifestCmd {
+    /// Write a manifest template to start a chain from (this node = first root)
+    Init {
+        #[arg(long)]
+        network_id: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Publish the next manifest entry, authored by this node's key -
+    /// must be a root of the current manifest (or the founder of the first)
+    Publish {
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Show the compiled policy + chain provenance this node enforces
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -579,12 +610,40 @@ pub(crate) fn read_policy(data_dir: &Path) -> Result<Option<WritePolicy>, String
     WritePolicy::from_json(&text).map(Some)
 }
 
-/// The policy a long-running service enforces: `--read-only` freezes the
-/// node even when it has no policy file.
+/// The policy a long-running service enforces. Precedence: a pinned
+/// governance manifest (network.json → manifest_root) **replaces**
+/// policy.json - the manifest is the auditable, on-ledger source of official
+/// admission; policy.json stays for ungoverned local gating. `--read-only`
+/// freezes the node regardless of source. Fail-closed: a pinned root without
+/// a verifiable chain is an error, never a silent fallback.
 pub(crate) fn effective_policy(
     data_dir: &Path,
     read_only: bool,
 ) -> Result<Option<WritePolicy>, String> {
+    let network = read_network(data_dir)?;
+    if let Some(net) = &network {
+        if let Some(root) = &net.manifest_root {
+            let store =
+                Store::open(&data_dir.join("node.db")).map_err(|e| e.to_string())?;
+            let compiled = datu_store::manifest::compile(
+                &store,
+                &net.network_id,
+                std::slice::from_ref(root),
+            )
+            .map_err(|e| format!("governance manifest: {e}"))?;
+            let compiled = compiled.ok_or_else(|| {
+                format!(
+                    "network.json pins manifest root {} but no verifiable manifest exists in {} - sync one, publish one (`datu manifest publish`), or clear the pin (fail-closed)",
+                    short(root),
+                    datu_store::manifest::manifest_namespace(&net.network_id)
+                )
+            })?;
+            return Ok(match read_only {
+                true => Some(WritePolicy::readonly()),
+                false => Some(compiled.policy),
+            });
+        }
+    }
     if read_only {
         return Ok(Some(WritePolicy::readonly()));
     }
@@ -719,6 +778,13 @@ fn print_network(net: &NetworkPolicy) {
         println!(
             "  mesh:              {} (peers presenting any other id are refused)",
             net.network_id
+        );
+    }
+    if let Some(root) = &net.manifest_root {
+        println!(
+            "  governance:        manifest chain {} pinned to root {} (replaces policy.json; fail-closed)",
+            datu_store::manifest_namespace(&net.network_id),
+            short(root)
         );
     }
     println!(
@@ -2005,8 +2071,18 @@ fn cmd_policy_show(data_dir: &Path) -> Result<(), String> {
         }
         None => {
             println!("no policy file - this is a free, open observer node:");
-            println!("  it accepts every validly-signed entry, syncs, reads and witnesses.");
+            println!(  "  it accepts every validly-signed entry, syncs, reads and witnesses.");
             println!("  gate this node with: datu policy init --attestor KEY --ns 'gov.*'");
+        }
+    }
+    if let Some(net) = read_network(data_dir)? {
+        if let Some(root) = &net.manifest_root {
+            println!(
+                "note: network.json pins manifest root {} - when a chain verifies in {},",
+                short(root),
+                datu_store::manifest_namespace(&net.network_id)
+            );
+            println!("      the manifest REPLACES this policy file; see `datu manifest show`");
         }
     }
     Ok(())
@@ -2032,9 +2108,19 @@ fn cmd_network_init(
     network_id: String,
     members: Vec<String>,
     roots: Vec<String>,
+    manifest_root: Option<String>,
 ) -> Result<(), String> {
     for key in members.iter().chain(roots.iter()) {
         parse_id(key).map_err(|_| format!("'{key}' is not a 32-byte Ed25519 key (hex)"))?;
+    }
+    if let Some(root) = &manifest_root {
+        parse_id(root).map_err(|_| format!("'{root}' is not a 32-byte Ed25519 key (hex)"))?;
+        if network_id.is_empty() {
+            return Err(
+                "a manifest root needs a --network-id: the chain lives at gov.mesh.<id>.policy"
+                    .into(),
+            );
+        }
     }
     if mode != "permissioned" && mode != "permissionless" {
         return Err(format!(
@@ -2053,6 +2139,7 @@ fn cmd_network_init(
         network_id,
         members,
         roots,
+        manifest_root,
     };
     let path = network_path(data_dir);
     std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
@@ -2066,6 +2153,200 @@ fn cmd_network_init(
             println!(
                 "  warning: this node's key {} is NOT a member or root - `datu node` will refuse to start (fail-closed)",
                 short(&node.identity)
+            );
+        }
+    }
+    Ok(())
+}
+
+// ---- governance manifests (design §D: who may write, as an on-ledger chain) ----
+
+fn cmd_manifest_init(data_dir: &Path, network_id: String, out: PathBuf) -> Result<(), String> {
+    let node = load_node(data_dir)?;
+    if network_id.is_empty() || !network_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err(
+            "--network-id must be 1+ chars of [a-z0-9-] (the chain lives at gov.mesh.<id>.policy)"
+                .into(),
+        );
+    }
+    let mut policy = WritePolicy::default();
+    policy.version = datu_store::POLICY_VERSION;
+    policy.gated = vec!["gov.*".into()];
+    policy.attestors = vec![node.identity.clone()];
+    let mut doc = datu_store::ManifestDoc::new(&network_id, vec![node.identity.clone()], policy);
+    doc.note = Some("founding manifest - edit the policy, keep the roots, then `datu manifest publish`".into());
+    let json = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&out, &json).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    println!("manifest template: {}", out.display());
+    println!("  network:  {} (chain namespace: {})", network_id, datu_store::manifest_namespace(&network_id));
+    println!("  founder:  {} (this node - signs the first entry)", short(&node.identity));
+    println!("next: edit the template, `datu manifest publish --file {}`, then pin the root", out.display());
+    println!("      on every member: `datu network init --mode permissioned --network-id {network_id} --manifest-root {}`", node.identity);
+    Ok(())
+}
+
+fn cmd_manifest_publish(data_dir: &Path, file: PathBuf) -> Result<(), String> {
+    let node = load_node(data_dir)?;
+    let text =
+        std::fs::read_to_string(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    let mut doc: datu_store::ManifestDoc =
+        serde_json::from_str(&text).map_err(|e| format!("bad manifest JSON: {e}"))?;
+    if doc.version != 1 {
+        return Err(format!("unsupported manifest version {} (expected 1)", doc.version));
+    }
+    if doc.network_id.is_empty()
+        || !doc.network_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err("manifest network_id must be 1+ chars of [a-z0-9-]".into());
+    }
+    if doc.roots.is_empty() {
+        return Err("a manifest must name at least one root - who signs the next one?".into());
+    }
+    for key in &doc.roots {
+        parse_id(key).map_err(|_| format!("root '{key}' is not a 32-byte Ed25519 key (hex)"))?;
+    }
+    if doc.policy.readonly {
+        return Err(
+            "a manifest cannot be read-only - read-only is an operational flag of a node, not a governance act"
+                .into(),
+        );
+    }
+
+    let ns = datu_store::manifest_namespace(&doc.network_id);
+    let supersedes = match datu_store::manifest::head(&node.store, &doc.network_id)? {
+        None => {
+            if !doc.roots.contains(&node.identity) {
+                println!(
+                    "  warning: founding a chain whose roots do not include this key - you cannot publish the next manifest from here"
+                );
+            }
+            None
+        }
+        Some((head_id, roots)) => {
+            if !roots.contains(&node.identity) {
+                return Err(format!(
+                    "this node's key {} is not a root of the current manifest - the current authority authorizes the next",
+                    short(&node.identity)
+                ));
+            }
+            Some(head_id)
+        }
+    };
+    doc.supersedes = supersedes.clone();
+
+    let payload = serde_json::to_vec(&doc).map_err(|e| e.to_string())?;
+    let latest = s(node.store.latest(&node.identity))?;
+    let (seq, prev) = match &latest {
+        Some(e) => (e.body.seq + 1, Some(s(e.id())?)),
+        None => (0, None),
+    };
+    let body = EntryBody {
+        version: datu_core::ENTRY_VERSION,
+        author: node.identity.clone(),
+        author_pq: String::new(),
+        pq_alg: String::new(),
+        namespace: ns.clone(),
+        seq,
+        prev,
+        refs: supersedes.as_ref().map(|p| parse_id(p)).transpose()?.into_iter().collect(),
+        timestamp_ms: now_ms(),
+        payload,
+    };
+    let entry = s(Entry::sign(body, &node.key, &node.pq_key))?;
+    let id = s(entry.id())?;
+    if !s(node.store.insert_entry(&entry))? {
+        return Err("manifest unexpectedly already present".into());
+    }
+    println!("manifest published {} ({} seq {seq})", hex::encode(id), ns);
+    println!("  roots:       {}", doc.roots.iter().map(|k| short(k).to_string()).collect::<Vec<_>>().join(", "));
+    match &doc.supersedes {
+        Some(prev_id) => println!("  supersedes:  {prev_id}"),
+        None => println!("  founding manifest - pin its root in every member's network.json:"),
+    }
+    if doc.supersedes.is_none() {
+        println!("                datu network init --mode permissioned --network-id {} --manifest-root {}", doc.network_id, doc.roots[0]);
+    }
+    Ok(())
+}
+
+fn cmd_manifest_show(data_dir: &Path) -> Result<(), String> {
+    let net = read_network(data_dir)?;
+    let pinned = net.as_ref().and_then(|n| n.manifest_root.clone());
+    match (net, pinned) {
+        (Some(net), Some(root)) => {
+            let store = Store::open(&data_dir.join("node.db")).map_err(|e| e.to_string())?;
+            match datu_store::manifest::compile(&store, &net.network_id, std::slice::from_ref(&root))? {
+                Some(compiled) => {
+                    println!(
+                        "governance: {} (pinned root {})",
+                        datu_store::manifest_namespace(&net.network_id),
+                        short(&root)
+                    );
+                    for (i, (id, author, note)) in compiled.chain.iter().enumerate() {
+                        println!(
+                            "  #{} {} by {}{}",
+                            i,
+                            short(id),
+                            short(author),
+                            note.as_ref().map(|n| format!(" - {n}")).unwrap_or_default()
+                        );
+                    }
+                    println!(
+                        "  current roots: {} (they may sign the next manifest)",
+                        compiled.doc.roots.iter().map(|k| short(k).to_string()).collect::<Vec<_>>().join(", ")
+                    );
+                    println!("compiled writer policy (what this node's gate enforces):");
+                    print_policy(&compiled.policy);
+                    if policy_path(data_dir).exists() {
+                        println!("  note: policy.json exists but is SHADOWED by the manifest while the pin holds");
+                    }
+                }
+                None => println!(
+                    "pinned root {} but no verifiable manifest in {} - nodes fail closed until one syncs or is published",
+                    short(&root),
+                    datu_store::manifest_namespace(&net.network_id)
+                ),
+            }
+        }
+        _ => println!(
+            "no manifest pinned - writer policy comes from policy.json; pin one with `datu network init --manifest-root KEY`"
+        ),
+    }
+    Ok(())
+}
+
+// ---- disputes (design §A/C: preserved evidence + resolution records) ----
+
+fn cmd_disputes(data_dir: &Path) -> Result<(), String> {
+    let node = load_node(data_dir)?;
+    let conflicts = s(node.store.list_conflicts(200))?;
+    if conflicts.is_empty() {
+        println!("no recorded feed disputes on this node");
+        return Ok(());
+    }
+    let resolutions: Vec<datu_core::Entry> = s(node.store.all_entries())?
+        .into_iter()
+        .filter(|e| e.body.namespace.starts_with("gov.dispute."))
+        .collect();
+    for c in &conflicts {
+        println!("dispute: {} seq {} by {}", c.namespace, c.seq, short(&c.author));
+        println!("  stored:      {}", hex::encode(c.stored_id));
+        println!("  conflicting: {}", hex::encode(c.id));
+        let sides = [c.id, c.stored_id];
+        let linked: Vec<&datu_core::Entry> = resolutions
+            .iter()
+            .filter(|e| e.body.refs.iter().any(|r| sides.contains(r)))
+            .collect();
+        if linked.is_empty() {
+            println!("  resolution:  none recorded - evidence preserved, dispute open");
+        }
+        for e in linked {
+            println!(
+                "  resolution:  {} in {} by {}: {}",
+                hex::encode(s(e.id())?),
+                e.body.namespace,
+                short(&e.body.author),
+                String::from_utf8_lossy(&e.body.payload).chars().take(80).collect::<String>()
             );
         }
     }
@@ -2354,16 +2635,26 @@ fn run(cli: Cli) -> Result<(), String> {
                 network_id,
                 members,
                 roots,
+                manifest_root,
             } => cmd_network_init(
                 &cli.data_dir,
                 mode.clone(),
                 network_id.clone(),
                 members.clone(),
                 roots.clone(),
+                manifest_root.clone(),
             ),
             NetworkCmd::Show => cmd_network_show(&cli.data_dir),
             NetworkCmd::Clear => cmd_network_clear(&cli.data_dir),
         },
+        Commands::Manifest { cmd } => match cmd {
+            ManifestCmd::Init { network_id, out } => {
+                cmd_manifest_init(&cli.data_dir, network_id.clone(), out.clone())
+            }
+            ManifestCmd::Publish { file } => cmd_manifest_publish(&cli.data_dir, file.clone()),
+            ManifestCmd::Show => cmd_manifest_show(&cli.data_dir),
+        },
+        Commands::Disputes => cmd_disputes(&cli.data_dir),
         Commands::Parties { cmd } => {
             let node = load_node(&cli.data_dir)?;
             match cmd {

@@ -126,6 +126,8 @@ datu witness import --input witness.cks    # merge another party's stream
 
 datu prove-fork --a ngo.cks --b ministry.cks --out evidence.json
 datu prove-fork --against suspect.bundle   # vs this node's stored history
+
+datu disputes                              # disputes this node holds evidence for
 ```
 
 Verdicts: `NO_CONTRADICTIONS` (exit 0) or `FORK_PROVEN` (exit 2) with an
@@ -135,6 +137,15 @@ re-verifiable by anyone with zero other context. Detected evidence kinds:
 that at least one history is fabricated), `chain-break` (a signer's checkpoint
 chain was rewritten or spliced), and `history-mismatch` (a served bundle's
 root contradicts a stored witness checkpoint over the same entry count).
+
+**A dispute is preserved, never settled by the protocol.** `datu disputes`
+prints every `(author, seq)` collision this node holds evidence for, both
+sides, and any resolution records. A resolution is an ordinary entry in
+`gov.dispute.*` that `refs` the disputed entry - anyone may publish one
+(`datu publish --ns gov.dispute.records --ref <conflicting-id> --payload …`),
+and whether it *counts* is a judgement each institution makes for itself. The
+ledger only makes the disagreement, and every attempted answer to it,
+auditable.
 
 Default node directory is `.datu/` (`--data-dir` to override). It contains:
 `secret.key` (Ed25519), `secret.mldsa65` (ML-DSA-65), `node.db` (append-only store),
@@ -203,8 +214,10 @@ ledger explorer at `/` (entries, search, witnesses - read-only mirror-node view)
   (`--submit-per-min`, default 60/min, 0 = off; `Retry-After` header)
 - `GET /v1/conflicts` - recorded feed disputes: both signed sides of every
   `(author, seq)` collision this node has seen (evidence, never resolution);
+  each conflict carries `resolutions[]` - any `gov.dispute.*` entry whose
+  `refs` name either side - and `null`/empty means the dispute is still open;
   `GET /v1/conflict/{id}` serves the full losing entry; the explorer shows a
-  disputes banner + view
+  disputes banner + view with open/resolved tags
 - `POST /v1/sync/haves` - bloom-filter reconciliation over HTTP
   (`{m, k, bits_b64, cursor, limit}` → `{entries[], cursor, more, checkpoints[]}`;
   the same exchange also runs over raw TCP and over files - see transports)
@@ -360,6 +373,46 @@ validator.
 A `--read-only` node (`datu serve --read-only`, `datu node --read-only`) accepts
 no new entries at all - a frozen archival view that still serves and witnesses.
 
+### Governance manifests: policy everyone can verify (Tier 7b)
+
+`policy.json` says what *this* node accepts. A **manifest** says what the mesh's
+governance *officially is*, as an on-ledger, signed chain anyone can replay
+offline - so "registered institution" stops being a claim each operator makes
+about a file only they can see:
+
+```sh
+datu manifest init --network-id gov-mesh --out mesh.json   # template: this node = first root
+datu manifest publish --file mesh.json                     # signs entry #0 of the chain
+datu network init --mode permissioned --network-id gov-mesh \
+  --member <peer-key> --manifest-root <root-key>            # pin the root, out of band
+datu manifest show                                          # chain + compiled policy + provenance
+```
+
+The chain is the authority model, nothing else:
+
+- entry **#0** (`supersedes: null`) counts only if authored by a key this node
+  **pinned out of band** (`network.json` → `manifest_root`);
+- every **later** entry counts only if authored by a key in the *previous*
+  manifest's `roots` - **the current authority authorizes the next**;
+- rotation = add the new key to `roots`; revocation = omit the old key. Key
+  status at signing time is derivable by replaying the chain, so a retired key
+  can never speak for the mesh again;
+- entries that are junk, name another mesh, or are signed by a non-root key are
+  simply never linked. Observers may hold anything; governance comes from
+  verifiable linkage only.
+
+**Precedence, and the one way it fails.** When `network.json` pins a
+`manifest_root`, the compiled manifest **replaces** `policy.json` (the file is
+shadowed, `datu manifest show` says so) and `datu policy show` prints the
+manifest provenance. A pin with **no verifiable chain fails closed** - the node
+refuses to serve rather than quietly fall back to a local file. Two different
+valid continuations of the same manifest (or two pinned-root geneses) are a
+**split**: reported as an error, never silently picked - the same
+fail-visible-not-fail-silent rule as fork evidence. The current roots are
+always admitted as attestors, so governance can always publish the next
+manifest; `readonly` is forced off (read-only is an operational flag of a node,
+not a governance act).
+
 ### Who can read what: reader enclaves
 
 Gating decides *who may write*; sealing decides *who may read*. Sensitive
@@ -433,6 +486,10 @@ datu network init --mode permissioned --network-id gov-mesh \
 datu network show
 datu network clear          # back to the open network
 ```
+
+`--manifest-root <key-hex>` additionally pins the mesh's governance manifest
+chain (`gov.mesh.<network-id>.policy`), which then supplies the writer policy -
+see *Governance manifests* above.
 
 **Joining = membership that propagates by the sync it authorizes.** A peer is
 admitted with an explicit `members` key *or* any on-ledger attestation

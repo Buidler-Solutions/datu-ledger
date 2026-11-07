@@ -302,11 +302,34 @@ fn handle_inner(
         }
         ("GET", "/v1/conflicts") => {
             let count = store.conflicts_count().map_err(|e| e.to_string())?;
+            // Resolution records (design §A/C): entries in gov.dispute.*
+            // referencing either side of a dispute. One scan, matched per
+            // conflict below.
+            let resolutions: Vec<(String, datu_core::Entry)> = store
+                .all_entries()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter(|e| e.body.namespace.starts_with("gov.dispute."))
+                .filter_map(|e| e.id().ok().map(|id| (hex::encode(id), e)))
+                .collect();
             let items: Vec<serde_json::Value> = store
                 .list_conflicts(200)
                 .map_err(|e| e.to_string())?
                 .iter()
                 .map(|c| {
+                    let sides = [c.id, c.stored_id];
+                    let linked: Vec<serde_json::Value> = resolutions
+                        .iter()
+                        .filter(|(_, e)| e.body.refs.iter().any(|r| sides.contains(r)))
+                        .map(|(id, e)| {
+                            serde_json::json!({
+                                "id": id,
+                                "namespace": e.body.namespace,
+                                "author": e.body.author,
+                                "resolution_preview": String::from_utf8_lossy(&e.body.payload).chars().take(120).collect::<String>(),
+                            })
+                        })
+                        .collect();
                     serde_json::json!({
                         "id": hex::encode(c.id),
                         "author": c.author,
@@ -314,6 +337,7 @@ fn handle_inner(
                         "seq": c.seq,
                         "stored_id": hex::encode(c.stored_id),
                         "timestamp_ms": c.timestamp_ms,
+                        "resolutions": linked,
                     })
                 })
                 .collect();
@@ -680,8 +704,12 @@ async function loadConflicts(){const d=await j('/v1/conflicts');
  const rows=document.getElementById('rows');
  rows.innerHTML='<tr><th>disputed author</th><th>seq</th><th>stored id</th><th>conflicting id</th><th>namespace</th></tr>';
  (d.conflicts||[]).forEach(c=>{const tr=document.createElement('tr');
-  tr.innerHTML=`<td>${short(c.author)}</td><td>${c.seq}</td><td><a href="#" onclick="show('${c.stored_id}');return false">${short(c.stored_id)}</a></td><td><a href="#" onclick="show('${c.id}');return false">${short(c.id)}</a></td><td>${esc(c.namespace)}</td>`;
-  rows.appendChild(tr)})}
+  const res=(c.resolutions||[]).length?(' <span class="tag">resolved</span>'):' <span class="tag" style="background:#f8514933;color:#ffa198">open</span>';
+  tr.innerHTML=`<td>${short(c.author)}</td><td>${c.seq}</td><td><a href="#" onclick="show('${c.stored_id}');return false">${short(c.stored_id)}</a></td><td><a href="#" onclick="show('${c.id}');return false">${short(c.id)}</a></td><td>${esc(c.namespace)}${res}</td>`;
+  rows.appendChild(tr)});
+ (d.conflicts||[]).forEach(c=>{(c.resolutions||[]).forEach(r=>{const tr=document.createElement('tr');
+  tr.innerHTML=`<td colspan="4" class="muted">↳ resolved by <a href="#" onclick="show('${r.id}');return false">${short(r.id)}</a> in ${esc(r.namespace)}</td><td>${esc(r.resolution_preview)}</td>`;
+  rows.appendChild(tr)})})}
 loadEntries();
 checkDisputes();
 </script></body></html>
@@ -706,6 +734,24 @@ mod tests {
             prev,
             refs: vec![],
             timestamp_ms: 1,
+            payload: payload.to_vec(),
+        };
+        Entry::sign(body, &ed, &pq).unwrap()
+    }
+
+    fn resolution(refs: Vec<[u8; 32]>, payload: &[u8]) -> Entry {
+        let ed = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let pq = datu_core::pq::keypair().unwrap().1;
+        let body = EntryBody {
+            version: datu_core::ENTRY_VERSION,
+            author: String::new(),
+            author_pq: String::new(),
+            pq_alg: String::new(),
+            namespace: "gov.dispute.title".into(),
+            seq: 0,
+            prev: None,
+            refs,
+            timestamp_ms: 2,
             payload: payload.to_vec(),
         };
         Entry::sign(body, &ed, &pq).unwrap()
@@ -753,6 +799,17 @@ mod tests {
         let port = probe.local_addr().unwrap().port();
         drop(probe);
         let data = dir.path().to_path_buf();
+        let original = signed(0, None, b"original");
+        let rewrite = signed(0, None, b"rewritten");
+        // A resolution record (design §A) already references the disputed
+        // side: resolutions are ordinary gov.dispute.* entries, and the
+        // conflict listing links them at read time - ordering never matters.
+        let resolution_id = {
+            let store = Store::open(&data.join("node.db")).unwrap();
+            let r = resolution(vec![rewrite.id().unwrap()], b"{\"verdict\":\"stored history stands\"}");
+            store.insert_entry(&r).unwrap();
+            hex::encode(r.id().unwrap())
+        };
         std::thread::spawn(move || {
             let _ = serve(&data, &format!("127.0.0.1:{port}"), None, 5);
         });
@@ -767,8 +824,6 @@ mod tests {
         }
         assert!(ready, "serve did not come up");
 
-        let original = signed(0, None, b"original");
-        let rewrite = signed(0, None, b"rewritten");
         let submit = serde_json::to_string(&entry_full_json(&original).unwrap()).unwrap();
         let (status, _) = http(port, "POST", "/v1/entries", &submit);
         assert!(status.contains("201"), "first insert: {status}");
@@ -788,6 +843,11 @@ mod tests {
         assert_eq!(
             listing["conflicts"][0]["stored_id"].as_str().map(str::to_string),
             Some(hex::encode(original.id().unwrap()))
+        );
+        assert_eq!(
+            listing["conflicts"][0]["resolutions"][0]["id"].as_str(),
+            Some(resolution_id.as_str()),
+            "the gov.dispute.* entry refs the conflicting side, so it is surfaced as a resolution"
         );
 
         let (status, body) = http(port, "GET", &format!("/v1/conflict/{conflict_id}"), "");

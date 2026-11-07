@@ -78,6 +78,7 @@ fn permissioned(network_id: &str, members: Vec<String>, roots: Vec<String>) -> N
         network_id: network_id.into(),
         members,
         roots,
+        manifest_root: None,
     }
 }
 
@@ -88,6 +89,7 @@ fn walled_observer(network_id: &str) -> NetworkPolicy {
         network_id: network_id.into(),
         members: Vec::new(),
         roots: Vec::new(),
+        manifest_root: None,
     }
 }
 

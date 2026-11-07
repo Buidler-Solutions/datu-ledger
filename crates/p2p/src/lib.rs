@@ -77,6 +77,13 @@ pub struct NetworkPolicy {
     /// Trust roots: any node key they attest on-ledger is admitted too.
     #[serde(default)]
     pub roots: Vec<String>,
+    /// Pinned governance root (hex ed25519). When set, this node compiles
+    /// its writer policy from the on-ledger manifest chain
+    /// `gov.mesh.<network_id>.policy` instead of `policy.json` (fail-closed
+    /// when it cannot verify a chain). The out-of-band trust act of joining
+    /// a governed mesh, made explicit and auditable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_root: Option<String>,
 }
 
 impl NetworkPolicy {
@@ -87,6 +94,7 @@ impl NetworkPolicy {
             network_id: String::new(),
             members: Vec::new(),
             roots: Vec::new(),
+            manifest_root: None,
         }
     }
 
