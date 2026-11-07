@@ -10,7 +10,9 @@ quantum-resistant accountability ledger: a distributed system for
 - **No token, no mining, no staking** - nothing to buy, nothing to speculate on
 - **Not internet-dependent** - nodes sync by any channel: LAN, USB stick, Bluetooth, or internet when available
 - **Immutable** - records cannot be edited or deleted, ever, provably
-- **Quantum-resistant** - every record is hybrid-signed: Ed25519 + ML-DSA-65 (FIPS 204)
+- **Quantum-resistant signatures** - every record is hybrid-signed: Ed25519 + ML-DSA-65 (FIPS
+  204); sealed *fields* use X25519 today (classical) - a hybrid ML-KEM sealing migration is on
+  the roadmap
 - **Open to run, gated to write** - anyone runs an observer node freely; official
   namespaces (`gov.*`) admit only attested validators, and the people a record
   is about must sign it themselves
