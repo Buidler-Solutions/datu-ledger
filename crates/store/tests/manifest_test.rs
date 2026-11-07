@@ -1,5 +1,7 @@
 use datu_core::{Entry, EntryBody};
-use datu_store::manifest::{compile, head, manifest_namespace};
+use datu_core::merkle::merkle_root;
+use datu_core::{Checkpoint, CheckpointBody};
+use datu_store::manifest::{compile, head, manifest_namespace, status, Freshness};
 use datu_store::{ManifestDoc, Store, WritePolicy};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -261,4 +263,200 @@ fn unauthorized_continuation_cannot_manufacture_a_split() {
     let compiled2 = compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().unwrap();
     assert_eq!(compiled2.manifest_id, hex::encode(e2.id().unwrap()));
     assert_eq!(compiled2.chain.len(), 2);
+}
+
+/// A checkpoint over everything `store` holds, signed by `k` - the evidence
+/// that decides freshness in these tests.
+fn checkpoint(store: &Store, k: &Keys) -> Checkpoint {
+    let ids = store.entry_ids().unwrap();
+    let last = store.last_checkpoint(&k.author).unwrap();
+    let (height, prev) = match &last {
+        Some(c) => (c.body.height + 1, Some(c.id().unwrap())),
+        None => (0, None),
+    };
+    let body = CheckpointBody {
+        version: datu_core::CHECKPOINT_VERSION,
+        signer: k.author.clone(),
+        signer_pq: String::new(),
+        pq_alg: String::new(),
+        height,
+        prev,
+        timestamp_ms: 1_000,
+        entries_count: ids.len() as u64,
+        entry_ids_root: merkle_root(&ids),
+    };
+    let c = Checkpoint::sign(body, &k.ed, &k.pq).unwrap();
+    assert!(store.append_checkpoint(&c).unwrap());
+    c
+}
+
+#[test]
+fn freshness_requires_independent_evidence() {
+    let store = Store::open_in_memory().unwrap();
+    let founder = keys();
+    let witness = keys();
+
+    let m1 = ManifestDoc::new("gov-mesh", vec![founder.author.clone()], WritePolicy::default());
+    publish_manifest(&store, &founder, &m1, 0, None);
+
+    // A chain that verifies is still not "current": nothing but its own
+    // author has ever confirmed the mesh was alive after it.
+    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    assert_eq!(st.freshness, Freshness::Stale, "reason: {}", st.reason);
+    assert!(st.corroborated_by.is_none());
+
+    // The manifest author checkpointing about itself proves nothing.
+    checkpoint(&store, &founder);
+    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    assert_eq!(st.freshness, Freshness::Stale);
+    assert!(st.reason.contains("independent"), "{}", st.reason);
+
+    // An independent signature over a view at/after it does.
+    checkpoint(&store, &witness);
+    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    assert_eq!(st.freshness, Freshness::Current, "reason: {}", st.reason);
+    assert_eq!(st.corroborated_by.as_deref(), Some(witness.author.as_str()));
+    assert_eq!(st.manifest_id.as_deref(), Some(
+        hex::encode(
+            store
+                .list(Some(&manifest_namespace("gov-mesh")), None, 10)
+                .unwrap()[0]
+                .id()
+                .unwrap(),
+        )
+        .as_str()
+    ));
+}
+
+#[test]
+fn revoked_writer_under_stale_policy_is_reported_not_hidden() {
+    let store = Store::open_in_memory().unwrap();
+    let founder = keys();
+    let successor = keys();
+    let writer = keys();
+
+    let m1 = ManifestDoc::new(
+        "gov-mesh",
+        vec![successor.author.clone()],
+        policy_admitting(vec![writer.author.clone()]),
+    );
+    let e1 = publish_manifest(&store, &founder, &m1, 0, None);
+
+    // The revocation exists on this node…
+    let m2 = ManifestDoc {
+        supersedes: Some(hex::encode(e1.id().unwrap())),
+        ..ManifestDoc::new(
+            "gov-mesh",
+            vec![successor.author.clone()],
+            policy_admitting(vec![]),
+        )
+    };
+    let e2 = publish_manifest(&store, &successor, &m2, 0, None);
+
+    // …and it applies…
+    let compiled = compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().unwrap();
+    assert_eq!(compiled.manifest_id, hex::encode(e2.id().unwrap()));
+    let gated = Store::open_in_memory_with_policy(Some(compiled.policy.clone())).unwrap();
+    assert!(gated
+        .insert_entry(&writer_entry(&writer, "gov.titles.application", b"x", 0, None))
+        .is_err());
+
+    // …but this node cannot claim its authorization is current: nothing
+    // independent has confirmed the revocation was seen by anyone else, so a
+    // *further* revocation may exist that this node never received.
+    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    assert_eq!(st.freshness, Freshness::Stale, "reason: {}", st.reason);
+    assert_eq!(st.manifest_id.as_deref(), Some(hex::encode(e2.id().unwrap()).as_str()));
+    assert!(st.roots.contains(&successor.author), "the stale policy is still the newest known one");
+}
+
+#[test]
+fn rollback_leaves_evidence_and_is_stale() {
+    let store = Store::open_in_memory().unwrap();
+    let founder = keys();
+    let successor = keys();
+
+    let m1 = ManifestDoc::new("gov-mesh", vec![successor.author.clone()], WritePolicy::default());
+    let e1 = publish_manifest(&store, &founder, &m1, 0, None);
+
+    // This node only holds m1. The world moved on: another replica's manifest
+    // (which this node received without its predecessor) names a successor of
+    // m1 this node never got.
+    let missing = "ab".repeat(32);
+    let orphan = ManifestDoc {
+        supersedes: Some(missing.clone()),
+        ..ManifestDoc::new("gov-mesh", vec![successor.author.clone()], WritePolicy::default())
+    };
+    publish_manifest(&store, &successor, &orphan, 0, None);
+
+    // The chain still verifies up to m1 - old evidence stays usable…
+    let compiled = compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().unwrap();
+    assert_eq!(compiled.manifest_id, hex::encode(e1.id().unwrap()));
+    // …and the node says out loud that it is behind.
+    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    assert_eq!(st.freshness, Freshness::Stale, "reason: {}", st.reason);
+    assert_eq!(st.missing_predecessors, vec![missing]);
+}
+
+#[test]
+fn conflicting_policy_versions_are_never_applied() {
+    let store = Store::open_in_memory().unwrap();
+    let founder = keys();
+
+    let mut future = ManifestDoc::new("gov-mesh", vec![founder.author.clone()], WritePolicy::default());
+    future.policy.version = 99;
+    publish_manifest(&store, &founder, &future, 0, None);
+
+    // Not authority: this build cannot evaluate it, so nothing verifies…
+    assert!(compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().is_none());
+    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    assert_eq!(st.freshness, Freshness::Unverified);
+    assert!(st.reason.contains("99"), "{}", st.reason);
+}
+
+#[test]
+fn invalid_genesis_claims_stay_unverified() {
+    let store = Store::open_in_memory().unwrap();
+    let founder = keys();
+    let impostor = keys();
+
+    // A stranger founds a chain for the mesh: structurally perfect, but not
+    // signed by the key this node pinned.
+    let fake = ManifestDoc::new("gov-mesh", vec![impostor.author.clone()], WritePolicy::default());
+    publish_manifest(&store, &impostor, &fake, 0, None);
+
+    assert!(compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().is_none());
+    assert!(head(&store, "gov-mesh").unwrap().is_some(), "the impostor can see its own chain");
+    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    assert_eq!(st.freshness, Freshness::Unverified);
+    assert!(st.manifest_id.is_none());
+}
+
+#[test]
+fn status_reports_a_conflict_with_both_sides() {
+    let store = Store::open_in_memory().unwrap();
+    let founder = keys();
+    let a = keys();
+    let b = keys();
+
+    let m1 = ManifestDoc::new("gov-mesh", vec![a.author.clone(), b.author.clone()], WritePolicy::default());
+    let e1 = publish_manifest(&store, &founder, &m1, 0, None);
+
+    let mut ids = Vec::new();
+    for (k, note) in [(&a, "A's line"), (&b, "B's line")] {
+        let m = ManifestDoc {
+            supersedes: Some(hex::encode(e1.id().unwrap())),
+            note: Some(note.into()),
+            ..ManifestDoc::new("gov-mesh", vec![k.author.clone()], WritePolicy::default())
+        };
+        ids.push(hex::encode(publish_manifest(&store, k, &m, 0, None).id().unwrap()));
+    }
+
+    let st = status(&store, "gov-mesh", &[founder.author.clone()]).unwrap();
+    assert_eq!(st.freshness, Freshness::Conflicted);
+    assert_eq!(st.conflicts.len(), 2, "{:?}", st.conflicts);
+    let claimed: Vec<String> = st.conflicts.iter().map(|(id, _)| id.clone()).collect();
+    for id in ids {
+        assert!(claimed.contains(&id), "both continuations must be named");
+    }
 }

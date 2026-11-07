@@ -85,6 +85,31 @@ impl SubmitLimiter {
     }
 }
 
+/// What this node can say about its own governance (design §H), computed once
+/// at startup and attached to every admission decision the node reports.
+#[derive(Clone, Debug)]
+pub(crate) struct Governance {
+    pub freshness: String,
+    pub reason: String,
+    pub manifest_id: Option<String>,
+}
+
+fn governance(data_dir: &Path) -> Result<Option<Governance>, String> {
+    let Some(net) = crate::read_network(data_dir)? else {
+        return Ok(None);
+    };
+    let Some(root) = net.manifest_root.clone() else {
+        return Ok(None);
+    };
+    let store = Store::open(&data_dir.join("node.db")).map_err(|e| e.to_string())?;
+    let st = datu_store::manifest::status(&store, &net.network_id, std::slice::from_ref(&root))?;
+    Ok(Some(Governance {
+        freshness: st.freshness.as_str().to_string(),
+        reason: st.reason,
+        manifest_id: st.manifest_id,
+    }))
+}
+
 pub fn serve(
     data_dir: &Path,
     addr: &str,
@@ -96,6 +121,7 @@ pub fn serve(
         .map_err(|e| e.to_string())?;
     drop(store);
     let network = crate::read_network(data_dir)?;
+    let governance = Arc::new(governance(data_dir)?);
     let listener = TcpListener::bind(addr).map_err(|e| format!("cannot bind {addr}: {e}"))?;
     println!("datu node serving http://{addr}");
     match &network {
@@ -123,6 +149,15 @@ pub fn serve(
             p.gated.join(", ")
         ),
     }
+    match governance.as_ref() {
+        None => {}
+        Some(g) => println!(
+            "  governance: manifest {} - {}{}",
+            g.manifest_id.as_deref().map(crate::short).unwrap_or("(none)"),
+            g.freshness,
+            if g.freshness == "current" { String::new() } else { format!(" ({})", g.reason) }
+        ),
+    }
     println!("  explorer:  http://{addr}/");
     println!("  submit:    POST http://{addr}/v1/entries   (signed entry JSON)");
     if submit_per_min > 0 {
@@ -141,8 +176,9 @@ pub fn serve(
         let policy = policy.clone();
         let network = network.clone();
         let limiter = limiter.clone();
+        let governance = governance.clone();
         std::thread::spawn(move || {
-            let _ = handle(stream, &dir, policy, network, limiter);
+            let _ = handle(stream, &dir, policy, network, limiter, governance);
         });
     }
     Ok(())
@@ -154,9 +190,10 @@ fn handle(
     policy: Option<WritePolicy>,
     network: Option<NetworkPolicy>,
     limiter: Option<Arc<SubmitLimiter>>,
+    governance: Arc<Option<Governance>>,
 ) -> Result<(), String> {
     let mut stream = stream;
-    if let Err(e) = handle_inner(&mut stream, data_dir, policy, network, limiter) {
+    if let Err(e) = handle_inner(&mut stream, data_dir, policy, network, limiter, governance) {
         let _ = respond_json(&mut stream, "400 Bad Request", &serde_json::json!({ "error": e }));
     }
     Ok(())
@@ -168,6 +205,7 @@ fn handle_inner(
     policy: Option<WritePolicy>,
     network: Option<NetworkPolicy>,
     limiter: Option<Arc<SubmitLimiter>>,
+    governance: Arc<Option<Governance>>,
 ) -> Result<(), String> {
     let request = match read_request(stream) {
         Some(r) => r,
@@ -219,6 +257,14 @@ fn handle_inner(
                 "conflicts": report.conflicts,
                 "policy": policy,
                 "network": network,
+                "manifest": match governance.as_ref() {
+                    None => serde_json::Value::Null,
+                    Some(g) => serde_json::json!({
+                        "freshness": g.freshness,
+                        "reason": g.reason,
+                        "manifest_id": g.manifest_id,
+                    }),
+                },
             });
             respond_json(stream, "200 OK", &json)
         }
@@ -394,10 +440,12 @@ fn handle_inner(
                     let id = entry.id().map_err(|e| e.to_string())?;
                     respond_json(stream, "201 Created", &serde_json::json!({
                         "ok": true, "id": hex::encode(id), "seq": entry.body.seq,
+                        "policy_freshness": governance.as_ref().as_ref().map(|g| &g.freshness),
                     }))
                 }
                 Ok(false) => respond_json(stream, "200 OK", &serde_json::json!({
                     "ok": true, "duplicate": true,
+                    "policy_freshness": governance.as_ref().as_ref().map(|g| &g.freshness),
                 })),
                 Err(StoreError::Denied(m)) => respond_json(
                     stream,
@@ -654,11 +702,13 @@ const EXPLORER_HTML: &str = r##"<!doctype html>
  button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:.4rem 1rem;border-radius:6px;cursor:pointer}
  .tag{background:#1f6feb33;color:#79c0ff;border-radius:4px;padding:0 .35rem;font-size:.7rem}
  #disputes{display:none;background:#f8514922;border:1px solid #f8514966;color:#ffa198;border-radius:6px;padding:.6rem 1rem;margin-top:1rem;font-size:.8rem}
+ #governance{display:none;background:#d2992222;border:1px solid #d2992266;color:#e3b341;border-radius:6px;padding:.6rem 1rem;margin-top:1rem;font-size:.8rem}
 </style></head><body>
 <h1>DATU Ledger Explorer <span class="tag">self-verifying mirror</span></h1>
 <div><input id="q" placeholder="entry id (64 hex) or author (64 hex)"><button onclick="search()">load</button>
 <button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button> <button onclick="loadConflicts()">disputes</button></div>
 <div id="disputes"></div>
+<div id="governance"></div>
 <table id="rows"><tr><th>id</th><th>author</th><th>namespace</th><th>seq</th><th>payload</th></tr></table>
 <div id="detail"></div>
 <script>
@@ -710,8 +760,13 @@ async function loadConflicts(){const d=await j('/v1/conflicts');
  (d.conflicts||[]).forEach(c=>{(c.resolutions||[]).forEach(r=>{const tr=document.createElement('tr');
   tr.innerHTML=`<td colspan="4" class="muted">↳ resolved by <a href="#" onclick="show('${r.id}');return false">${short(r.id)}</a> in ${esc(r.namespace)}</td><td>${esc(r.resolution_preview)}</td>`;
   rows.appendChild(tr)})})}
+async function checkGovernance(){const s=await j('/v1/status');const g=s.manifest;const el=document.getElementById('governance');
+ if(!g||g.freshness==='current'){el.style.display='none';return}
+ el.style.display='block';
+ el.textContent='⚠ governance '+g.freshness+' - '+g.reason}
 loadEntries();
 checkDisputes();
+checkGovernance();
 </script></body></html>
 "##;
 

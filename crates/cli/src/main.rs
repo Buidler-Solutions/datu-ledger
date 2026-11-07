@@ -363,9 +363,28 @@ enum ManifestCmd {
     Publish {
         #[arg(long)]
         file: PathBuf,
+        /// Publish despite stale governance evidence (roots changed while this
+        /// node could not establish that its manifest is the newest one)
+        #[arg(long)]
+        accept_stale: bool,
     },
     /// Show the compiled policy + chain provenance this node enforces
     Show,
+    /// Verify the chain this node holds (signatures, lineage, authorship,
+    /// policy versions) without needing any publishing authority
+    Verify {
+        /// Also verify a manifest file: would publishing it extend the chain,
+        /// and is this node's key allowed to sign it?
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Print the verified manifest chain, oldest first
+    History,
+    /// Print whether this node's governance is current, stale, unverified or
+    /// conflicted - and why
+    Status,
+    /// Show competing manifest claims (a split), if any
+    Conflicts,
 }
 
 #[derive(Subcommand)]
@@ -2209,7 +2228,7 @@ fn cmd_manifest_init(data_dir: &Path, network_id: String, out: PathBuf) -> Resul
     Ok(())
 }
 
-fn cmd_manifest_publish(data_dir: &Path, file: PathBuf) -> Result<(), String> {
+fn cmd_manifest_publish(data_dir: &Path, file: PathBuf, accept_stale: bool) -> Result<(), String> {
     let node = load_node_bootstrap(data_dir)?;
     let text =
         std::fs::read_to_string(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
@@ -2252,6 +2271,28 @@ fn cmd_manifest_publish(data_dir: &Path, file: PathBuf) -> Result<(), String> {
                     "this node's key {} is not a root of the current manifest - the current authority authorizes the next",
                     short(&node.identity)
                 ));
+            }
+            // Changing who may speak for the mesh is the one governance act
+            // where staleness can do real damage: from a view this node cannot
+            // show is current, a rotation may resurrect a retired root or bury
+            // one it never learned about. Everything else proceeds under stale
+            // policy by design (offline recording is the point).
+            let mut current = roots.clone();
+            let mut next = doc.roots.clone();
+            current.sort();
+            next.sort();
+            if current != next && !accept_stale {
+                let st = datu_store::manifest::status_unpinned(&node.store, &doc.network_id)?;
+                if st.freshness != datu_store::Freshness::Current {
+                    return Err(format!(
+                        "refusing a root change on {} governance evidence: {}.
+  Every observer would carry the same doubt, and a rotation taken from a stale view can resurrect a retired root.
+  Re-run with --accept-stale only to deliberately repair a partition; the result stays reported as {} until independent checkpoints exist.",
+                        st.freshness.as_str(),
+                        st.reason,
+                        st.freshness.as_str()
+                    ));
+                }
             }
             Some(head_id)
         }
@@ -2336,6 +2377,276 @@ fn cmd_manifest_show(data_dir: &Path) -> Result<(), String> {
             "no manifest pinned - writer policy comes from policy.json; pin one with `datu network init --manifest-root KEY`"
         ),
     }
+    Ok(())
+}
+
+/// (network id, pinned root) if this node pins a governance manifest.
+fn manifest_pin(data_dir: &Path) -> Result<Option<(String, String)>, String> {
+    match read_network(data_dir)? {
+        None => Ok(None),
+        Some(net) => match net.manifest_root {
+            Some(root) => Ok(Some((net.network_id, root))),
+            None => Ok(None),
+        },
+    }
+}
+
+fn print_manifest_status(st: &datu_store::ManifestStatus, network_id: &str, root: &str) {
+    println!(
+        "governance: {} (pinned root {})",
+        datu_store::manifest_namespace(network_id),
+        short(root)
+    );
+    println!("  freshness:  {}", st.freshness.as_str());
+    println!("  reason:     {}", st.reason);
+    match (&st.manifest_id, &st.author) {
+        (Some(id), Some(author)) => println!(
+            "  manifest:   {} by {}{}",
+            short(id),
+            short(author),
+            st.published_ms.map(|t| format!(" (published {t})")).unwrap_or_default()
+        ),
+        _ => println!("  manifest:   none verified"),
+    }
+    if !st.roots.is_empty() {
+        println!(
+            "  roots:      {} (they may sign the next manifest)",
+            st.roots.iter().map(|k| short(k).to_string()).collect::<Vec<_>>().join(", ")
+        );
+    }
+    if !st.chain_ids.is_empty() {
+        println!("  chain:      {} verified manifest(s)", st.chain_ids.len());
+    }
+    match &st.corroborated_by {
+        Some(signer) => println!("  evidence:   independent checkpoint by {}", short(signer)),
+        None => println!("  evidence:   none - no independent checkpoint at or after this manifest"),
+    }
+    for id in &st.missing_predecessors {
+        println!("  missing:    {id} - a manifest this node holds supersedes it (this view is behind)");
+    }
+    for (id, author) in &st.conflicts {
+        println!("  claim:      {} by {}", short(id), short(author));
+    }
+}
+
+fn no_pin_hint() -> Result<(), String> {
+    println!("no governance manifest pinned on this node");
+    println!("  the writer policy comes from policy.json; pin one with:");
+    println!("    datu network init --manifest-root <root-key-hex> --network-id <mesh-id>");
+    Ok(())
+}
+
+/// Read-only: what this node can establish about its own governance.
+fn cmd_manifest_status(data_dir: &Path) -> Result<(), String> {
+    let node = load_node_reader(data_dir)?;
+    let Some((network_id, root)) = manifest_pin(data_dir)? else {
+        return no_pin_hint();
+    };
+    let st = datu_store::manifest::status(&node.store, &network_id, std::slice::from_ref(&root))?;
+    print_manifest_status(&st, &network_id, &root);
+    Ok(())
+}
+
+/// Read-only: the verified chain, oldest first.
+fn cmd_manifest_history(data_dir: &Path) -> Result<(), String> {
+    let node = load_node_reader(data_dir)?;
+    let Some((network_id, root)) = manifest_pin(data_dir)? else {
+        return no_pin_hint();
+    };
+    let Some(compiled) = datu_store::manifest::compile(
+        &node.store,
+        &network_id,
+        std::slice::from_ref(&root),
+    )?
+    else {
+        return Err(format!(
+            "no verified manifest chain for {network_id} - `datu manifest status` says why"
+        ));
+    };
+    println!(
+        "manifest history: {} ({} entr{}, oldest first)",
+        datu_store::manifest_namespace(&network_id),
+        compiled.chain.len(),
+        if compiled.chain.len() == 1 { "y" } else { "ies" }
+    );
+    for (i, (id, author, note)) in compiled.chain.iter().enumerate() {
+        let published = parse_id(id)
+            .ok()
+            .and_then(|arr| node.store.get_entry(&arr).ok().flatten())
+            .map(|e| e.body.timestamp_ms);
+        println!(
+            "  #{i} {} by {}{}{}",
+            short(id),
+            short(author),
+            published.map(|t| format!(" at {t}")).unwrap_or_default(),
+            note.as_ref().map(|n| format!(" - {n}")).unwrap_or_default()
+        );
+    }
+    println!(
+        "  head roots: {}",
+        compiled.doc.roots.iter().map(|k| short(k).to_string()).collect::<Vec<_>>().join(", ")
+    );
+    Ok(())
+}
+
+/// Read-only: competing claims, if any. Exits 0 either way - this is a query.
+fn cmd_manifest_conflicts(data_dir: &Path) -> Result<(), String> {
+    let node = load_node_reader(data_dir)?;
+    let Some((network_id, root)) = manifest_pin(data_dir)? else {
+        return no_pin_hint();
+    };
+    let st = datu_store::manifest::status(&node.store, &network_id, std::slice::from_ref(&root))?;
+    if st.conflicts.is_empty() && st.missing_predecessors.is_empty() {
+        println!("no competing manifest claims on this node ({})", st.freshness.as_str());
+        return Ok(());
+    }
+    println!(
+        "governance {}: {} - {}",
+        datu_store::manifest_namespace(&network_id),
+        st.freshness.as_str(),
+        st.reason
+    );
+    for (id, author) in &st.conflicts {
+        println!("  competing claim: {} by {} ({})", id, author, short(author));
+    }
+    for id in &st.missing_predecessors {
+        println!("  unlinked: a held manifest supersedes {id}, which this node does not have");
+    }
+    if !st.conflicts.is_empty() {
+        println!("  no side is chosen here: replay the chain, hold both, and let each institution decide");
+    }
+    Ok(())
+}
+
+/// Read-only verification (design §I): signatures, lineage, authorship and
+/// policy versions, with no publishing authority required - an observer with
+/// a browsed bundle can run exactly this.
+fn cmd_manifest_verify(data_dir: &Path, file: Option<PathBuf>) -> Result<(), String> {
+    let node = load_node_reader(data_dir)?;
+    match file {
+        None => {
+            let Some((network_id, root)) = manifest_pin(data_dir)? else {
+                return no_pin_hint();
+            };
+            let st = datu_store::manifest::status(
+                &node.store,
+                &network_id,
+                std::slice::from_ref(&root),
+            )?;
+            print_manifest_status(&st, &network_id, &root);
+            if matches!(
+                st.freshness,
+                datu_store::Freshness::Unverified | datu_store::Freshness::Conflicted
+            ) {
+                return Err(format!("governance does not verify: {}", st.reason));
+            }
+            println!("chain verification (offline, no authority needed):");
+            for (i, id) in st.chain_ids.iter().enumerate() {
+                let arr = parse_id(id)?;
+                let entry = node
+                    .store
+                    .get_entry(&arr)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("manifest entry {id} is missing from this store"))?;
+                s(entry.verify())?;
+                if hex::encode(s(entry.id())?) != *id {
+                    return Err(format!("manifest entry {id} does not match its content address"));
+                }
+                println!(
+                    "  #{i} {} ok - signatures valid, content-addressed, by {}",
+                    short(id),
+                    short(&entry.body.author)
+                );
+            }
+            println!("  result: chain verifies; freshness is {}", st.freshness.as_str());
+            Ok(())
+        }
+        Some(path) => cmd_manifest_verify_file(&node, data_dir, &path),
+    }
+}
+
+fn cmd_manifest_verify_file(
+    node: &Node,
+    data_dir: &Path,
+    path: &Path,
+) -> Result<(), String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let doc: datu_store::ManifestDoc =
+        serde_json::from_str(&text).map_err(|e| format!("bad manifest JSON: {e}"))?;
+    println!("manifest file: {}", path.display());
+    if doc.version != 1 {
+        return Err(format!("unsupported manifest version {} (expected 1)", doc.version));
+    }
+    if doc.network_id.is_empty()
+        || !doc.network_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err("manifest network_id must be 1+ chars of [a-z0-9-]".into());
+    }
+    if doc.roots.is_empty() {
+        return Err("a manifest must name at least one root".into());
+    }
+    for key in &doc.roots {
+        parse_id(key).map_err(|_| format!("root '{key}' is not a 32-byte Ed25519 key (hex)"))?;
+    }
+    if doc.policy.readonly {
+        return Err("a manifest cannot be read-only".into());
+    }
+    if doc.policy.version > datu_store::POLICY_VERSION {
+        println!(
+            "  warning:     policy version {} is newer than this build ({}) - publishing it would make it unreadable here",
+            doc.policy.version,
+            datu_store::POLICY_VERSION
+        );
+    }
+    println!("  network:     {}", doc.network_id);
+    println!(
+        "  roots:       {}",
+        doc.roots.iter().map(|k| short(k).to_string()).collect::<Vec<_>>().join(", ")
+    );
+    if let Some((pinned_net, _)) = manifest_pin(data_dir)? {
+        if pinned_net != doc.network_id {
+            return Err(format!(
+                "this node is pinned to mesh '{pinned_net}', not '{}'",
+                doc.network_id
+            ));
+        }
+    }
+
+    let head = datu_store::manifest::head(&node.store, &doc.network_id)?;
+    let authorized = match &head {
+        None => {
+            println!("  position:    founding manifest (would be entry #0 - pinning is the separate trust act)");
+            true
+        }
+        Some((head_id, head_roots)) => {
+            match &doc.supersedes {
+                None => println!(
+                    "  position:    a SECOND founding manifest for this mesh - publishing it would claim a competing genesis"
+                ),
+                Some(prev) if prev == head_id => println!(
+                    "  position:    extends the current head {}",
+                    short(head_id)
+                ),
+                Some(prev) => println!(
+                    "  position:    supersedes {} but the head is {} - the chain rule would not link it",
+                    short(prev),
+                    short(head_id)
+                ),
+            }
+            let allowed = head_roots.contains(&node.identity);
+            println!(
+                "  authorizes:  this node's key {} - {} of the current head's roots",
+                short(&node.identity),
+                if allowed { "one" } else { "NOT one" }
+            );
+            allowed && doc.supersedes.as_deref() == Some(head_id.as_str())
+        }
+    };
+    if !authorized {
+        return Err("this node cannot publish this manifest as it stands".into());
+    }
+    println!("  result:      publishable from here (`datu manifest publish --file {}`)", path.display());
     Ok(())
 }
 
@@ -2613,20 +2924,24 @@ fn run(cli: Cli) -> Result<(), String> {
                 cmd_wallet_cosign_doc(&cli.data_dir, name, &pass, role, kind.clone(), input, out)
             }
         },
-        Commands::Attest { cmd } => {
-            let node = load_node(&cli.data_dir)?;
-            match cmd {
-                AttestCmd::Create {
-                    subject,
-                    claims,
-                    label,
-                } => cmd_attest_create(&node, subject.clone(), claims.clone(), label.clone()),
-                AttestCmd::Cosign { id } => cmd_attest_cosign(&node, id.clone()),
-                AttestCmd::Status { subject, id } => {
-                    cmd_attest_status(&node, subject.clone(), id.clone())
-                }
+        Commands::Attest { cmd } => match cmd {
+            // Creating/cosigning writes an entry, so it carries write
+            // authority; looking at one never does.
+            AttestCmd::Create {
+                subject,
+                claims,
+                label,
+            } => cmd_attest_create(
+                &load_node(&cli.data_dir)?,
+                subject.clone(),
+                claims.clone(),
+                label.clone(),
+            ),
+            AttestCmd::Cosign { id } => cmd_attest_cosign(&load_node(&cli.data_dir)?, id.clone()),
+            AttestCmd::Status { subject, id } => {
+                cmd_attest_status(&load_node_reader(&cli.data_dir)?, subject.clone(), id.clone())
             }
-        }
+        },
         Commands::Policy { cmd } => match cmd {
             PolicyCmd::Init {
                 attestors,
@@ -2675,8 +2990,14 @@ fn run(cli: Cli) -> Result<(), String> {
             ManifestCmd::Init { network_id, out } => {
                 cmd_manifest_init(&cli.data_dir, network_id.clone(), out.clone())
             }
-            ManifestCmd::Publish { file } => cmd_manifest_publish(&cli.data_dir, file.clone()),
+            ManifestCmd::Publish { file, accept_stale } => {
+                cmd_manifest_publish(&cli.data_dir, file.clone(), *accept_stale)
+            }
             ManifestCmd::Show => cmd_manifest_show(&cli.data_dir),
+            ManifestCmd::Verify { file } => cmd_manifest_verify(&cli.data_dir, file.clone()),
+            ManifestCmd::History => cmd_manifest_history(&cli.data_dir),
+            ManifestCmd::Status => cmd_manifest_status(&cli.data_dir),
+            ManifestCmd::Conflicts => cmd_manifest_conflicts(&cli.data_dir),
         },
         Commands::Disputes => cmd_disputes(&cli.data_dir),
         Commands::Parties { cmd } => {
@@ -2821,15 +3142,50 @@ mod tests {
             err.contains("fail-closed") && err.contains("manifest"),
             "a pin without a verifiable chain must refuse CLI writes: {err}"
         );
-        run(cli(
-            d,
+
+        // …while every read-only path keeps working without publishing
+        // authority: a chainless pinned observer must still be able to look.
+        for read_only in [
             Commands::Log {
                 ns: None,
                 author: None,
                 limit: 5,
             },
+            Commands::Manifest {
+                cmd: ManifestCmd::Status,
+            },
+            Commands::Manifest {
+                cmd: ManifestCmd::Conflicts,
+            },
+            Commands::Attest {
+                cmd: AttestCmd::Status {
+                    subject: Some(root.clone()),
+                    id: None,
+                },
+            },
+            Commands::Disputes,
+            Commands::Status,
+        ] {
+            run(cli(d, read_only)).unwrap_or_else(|e| panic!("read-only command failed: {e}"));
+        }
+        // `history` and `verify` have nothing to report yet; they explain why
+        // rather than demanding authority they do not need.
+        let err = run(cli(
+            d,
+            Commands::Manifest {
+                cmd: ManifestCmd::History,
+            },
         ))
-        .unwrap();
+        .unwrap_err();
+        assert!(err.contains("no verified manifest chain"), "{err}");
+        let err = run(cli(
+            d,
+            Commands::Manifest {
+                cmd: ManifestCmd::Verify { file: None },
+            },
+        ))
+        .unwrap_err();
+        assert!(err.contains("does not verify"), "{err}");
 
         let template = d.join("mesh.json");
         run(cli(
@@ -2847,13 +3203,54 @@ mod tests {
             Commands::Manifest {
                 cmd: ManifestCmd::Publish {
                     file: template.clone(),
+                    accept_stale: false,
                 },
             },
         ))
         .unwrap();
 
         publish(d, "gov.records").expect("the manifest admits its own root");
+
+        // Verification is read-only and needs no publishing rights, and it
+        // reports the honest truth: nothing independent has corroborated this
+        // manifest yet, so the governance is stale even though it verifies.
+        run(cli(
+            d,
+            Commands::Manifest {
+                cmd: ManifestCmd::Verify { file: None },
+            },
+        ))
+        .expect("a verified chain must verify");
         let store = Store::open(&d.join("node.db")).unwrap();
+        let st = datu_store::manifest::status(&store, "gov-mesh", &[root.clone()]).unwrap();
+        assert_eq!(
+            st.freshness,
+            datu_store::Freshness::Stale,
+            "one node cannot corroborate itself: {}",
+            st.reason
+        );
+
+        // A root change taken from that stale view is refused unless the
+        // operator says so explicitly.
+        let mut rotated: datu_store::ManifestDoc =
+            serde_json::from_str(&std::fs::read_to_string(&template).unwrap()).unwrap();
+        rotated.roots = vec!["11".repeat(32)];
+        std::fs::write(&template, serde_json::to_string_pretty(&rotated).unwrap()).unwrap();
+        let err = run(cli(
+            d,
+            Commands::Manifest {
+                cmd: ManifestCmd::Publish {
+                    file: template.clone(),
+                    accept_stale: false,
+                },
+            },
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("refusing a root change") && err.contains("--accept-stale"),
+            "{err}"
+        );
+
         assert!(
             store
                 .list(Some("gov.mesh.gov-mesh.policy"), None, 10)

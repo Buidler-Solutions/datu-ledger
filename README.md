@@ -200,7 +200,8 @@ DATU_WALLET_PASS=... datu wallet open --name ministry --input sealed.json
 `datu serve --addr 127.0.0.1:7474` exposes a std-only HTTP API plus a dark-theme
 ledger explorer at `/` (entries, search, witnesses - read-only mirror-node view):
 
-- `GET /v1/status` - node counters
+- `GET /v1/status` - node counters, the enforced policy, and (when a manifest
+  is pinned) a `manifest` block with `freshness` + the reason for it
 - `GET /v1/entries?limit&ns&author` - recent entries
 - `GET /v1/entry/{id}` - full entry (payload base64, both signatures)
 - `GET /v1/feed/{author}` - head **plus `next`** ({seq, prev}) so dApps build
@@ -211,7 +212,9 @@ ledger explorer at `/` (entries, search, witnesses - read-only mirror-node view)
   `200` duplicate (idempotent), `403` denied by this node's writer policy,
   `409` rejected as fork evidence (the losing side is preserved and listed at
   `/v1/conflicts`), `429` over the per-peer submission budget
-  (`--submit-per-min`, default 60/min, 0 = off; `Retry-After` header)
+  (`--submit-per-min`, default 60/min, 0 = off; `Retry-After` header);
+  `201`/`200` replies carry `policy_freshness` so a non-current gate is never
+  silent
 - `GET /v1/conflicts` - recorded feed disputes: both signed sides of every
   `(author, seq)` collision this node has seen (evidence, never resolution);
   each conflict carries `resolutions[]` - any `gov.dispute.*` entry whose
@@ -424,6 +427,42 @@ inspectable - and `manifest init/publish` plus `network init` may run
 *before* a chain exists, so a mesh can be founded at all. Keep `gov.mesh.*`
 inside the gated set (the default template's `gov.*` already covers it): the
 governance namespace is the one namespace that must not be spammable.
+
+### Is it *current*? Freshness, and verifying without authority
+
+A chain can verify perfectly and still be an old one. So verification and
+freshness are reported separately, and neither needs publishing rights:
+
+```sh
+datu manifest verify                 # signatures, lineage, authorship, policy version
+datu manifest verify --file next.json  # would publishing this extend the chain, and may I sign it?
+datu manifest history                # the verified chain, oldest first
+datu manifest status                 # freshness + the reason for it
+datu manifest conflicts              # competing claims, both sides named
+```
+
+| State | Means | Established by |
+|---|---|---|
+| `current` | this view is corroborated | a verified chain **and** a checkpoint signed by a key *other than* the head manifest's author, dated at or after it |
+| `stale` | freshness cannot be established, or this node is provably behind | no such checkpoint; a held manifest naming a predecessor this node lacks; or a manifest with a policy version this build cannot read |
+| `unverified` | nothing verifies here | no genesis from the pinned root, or an unreadable namespace |
+| `conflicted` | two *authorized* claims to the same succession | reported, never resolved |
+
+`stale` and `unverified` are **absence of evidence**, stated as such - an
+offline node cannot know about a revocation it never received, so it says
+*stale*, not *safe*. What that changes:
+
+- recording, syncing, witnessing and publishing all continue under a stale
+  policy (offline operation is the point), and every admission says which
+  era it happened in (`policy_freshness` in `POST /v1/entries`, `/v1/status`,
+  the explorer banner, `datu manifest status`);
+- **changing `roots`** - rotation/revocation - is the one act refused on stale
+  evidence, because a rotation taken from a stale view can resurrect a retired
+  root or bury one this node never learned about. `--accept-stale` overrides it
+  deliberately for partition repair, and the result stays reported as stale;
+- reads never wait on governance: `log`, `get`, `verify`, `status`, `disputes`,
+  `manifest verify/history/status/conflicts` and `attest status` carry no write
+  authority. A chainless pinned observer can still read and verify everything.
 
 ### Who can read what: reader enclaves
 

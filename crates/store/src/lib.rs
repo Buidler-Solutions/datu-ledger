@@ -15,7 +15,7 @@ use std::path::Path;
 mod policy;
 pub mod manifest;
 
-pub use manifest::{manifest_namespace, CompiledManifest, ManifestDoc};
+pub use manifest::{manifest_namespace, CompiledManifest, Freshness, ManifestDoc, ManifestStatus};
 pub use policy::{NamespaceRule, RoleRule, POLICY_VERSION, WritePolicy};
 
 #[derive(Debug)]
