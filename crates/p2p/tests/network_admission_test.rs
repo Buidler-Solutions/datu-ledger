@@ -71,11 +71,35 @@ fn attestation(attestor: &Keys, subject: &str) -> Entry {
     Entry::sign(body, &attestor.ed, &attestor.pq).unwrap()
 }
 
+/// A key-level revoke naming `subject` directly (the ejection path for
+/// explicit members), authored by `revoker` as their first statement.
+fn key_revocation(revoker: &Keys, subject: &str) -> Entry {
+    let doc = datu_core::attest::RevokeDoc {
+        attestation: None,
+        subject: Some(subject.to_string()),
+        reason: Some("ejected by the root".into()),
+    };
+    let body = EntryBody {
+        version: 1,
+        author: String::new(),
+        author_pq: String::new(),
+        pq_alg: String::new(),
+        namespace: datu_core::attest::NS_REVOKE.into(),
+        seq: 0,
+        prev: None,
+        refs: vec![],
+        timestamp_ms: 2,
+        payload: doc.payload_bytes().unwrap(),
+    };
+    Entry::sign(body, &revoker.ed, &revoker.pq).unwrap()
+}
+
 /// A revoke statement naming `attestation_id`, authored by `revoker`.
 /// Seq 1 / prev = the attestation, since the same root authored both.
 fn revocation(revoker: &Keys, attestation_id: [u8; 32]) -> Entry {
     let doc = datu_core::attest::RevokeDoc {
-        attestation: hex::encode(attestation_id),
+        attestation: Some(hex::encode(attestation_id)),
+        subject: None,
         reason: Some("membership ended".into()),
     };
     let body = EntryBody {
@@ -363,4 +387,52 @@ fn mesh_client_against_open_server_hits_the_wall() {
     let err = pull_and_merge(&addr.to_string(), &client, 500, Some(&hello)).unwrap_err();
     assert!(err.contains("network mismatch"), "{err}");
     assert_eq!(client.entry_count().unwrap(), 1); // only the genesis
+}
+
+#[test]
+fn a_key_revocation_ejects_an_explicit_member() {
+    let server_keys = keys();
+    let root = keys();
+    let client_keys = keys();
+    let store = store_with(&server_keys, 3);
+    // The client IS an explicit member, and a root revokes its key anyway.
+    store
+        .insert_entry(&key_revocation(&root, &hex_key(&client_keys.ed)))
+        .unwrap();
+    let network = permissioned(
+        "gov-mesh",
+        vec![hex_key(&client_keys.ed)],
+        vec![hex_key(&root.ed)],
+    );
+    let addr = spawn(store, Some(network));
+
+    let client = Store::open_in_memory().unwrap();
+    let hello = sign_hello(&client_keys.ed, "gov-mesh");
+    let err = pull_and_merge(&addr.to_string(), &client, 500, Some(&hello)).unwrap_err();
+    assert!(
+        err.contains("revoked"),
+        "the ledger outranks the membership list: {err}"
+    );
+}
+
+#[test]
+fn a_key_revocation_from_a_non_root_does_not_eject() {
+    let server_keys = keys();
+    let root = keys();
+    let stranger = keys();
+    let client_keys = keys();
+    let store = store_with(&server_keys, 3);
+    store
+        .insert_entry(&key_revocation(&stranger, &hex_key(&client_keys.ed)))
+        .unwrap();
+    let network = permissioned(
+        "gov-mesh",
+        vec![hex_key(&client_keys.ed)],
+        vec![hex_key(&root.ed)],
+    );
+    let addr = spawn(store, Some(network));
+
+    let client = Store::open_in_memory().unwrap();
+    let hello = sign_hello(&client_keys.ed, "gov-mesh");
+    pull_and_merge(&addr.to_string(), &client, 500, Some(&hello)).unwrap();
 }

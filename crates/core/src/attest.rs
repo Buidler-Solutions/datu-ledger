@@ -72,7 +72,12 @@ pub fn parse_cosign(entry: &Entry) -> Option<CosignDoc> {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RevokeDoc {
     /// Hex id of the attestation being revoked.
-    pub attestation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<String>,
+    /// Hex subject key revoked directly: the ejection path for explicit
+    /// `members`/`writers` keys that hold no attestation to name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
     /// Optional human-readable reason (shows in `attest status`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -146,7 +151,7 @@ where
     let mut out = Vec::new();
     for entry in entries {
         if let Some(doc) = parse_revoke(entry) {
-            if doc.attestation == id_hex {
+            if doc.attestation.as_deref() == Some(id_hex.as_str()) {
                 out.push((entry, doc));
             }
         }
@@ -170,10 +175,34 @@ where
             continue;
         }
         if let Some(doc) = parse_revoke(entry) {
-            if let Ok(bytes) = hex::decode(&doc.attestation) {
-                if let Ok(id) = <[u8; 32]>::try_from(bytes.as_slice()) {
-                    revoked.insert(id);
+            if let Some(attestation) = &doc.attestation {
+                if let Ok(bytes) = hex::decode(attestation) {
+                    if let Ok(id) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                        revoked.insert(id);
+                    }
                 }
+            }
+        }
+    }
+    revoked
+}
+
+/// Subject keys (lowercase hex) revoked directly by trusted revokers: the
+/// ejection path for explicit `members`/`writers` keys, which hold no
+/// attestation for [`revoked_by`] to name. Same trust stance - only
+/// revocations authored by a configured root count.
+pub fn revoked_keys_by<'a, I>(entries: I, attestors: &[String]) -> std::collections::BTreeSet<String>
+where
+    I: IntoIterator<Item = &'a Entry>,
+{
+    let mut revoked = std::collections::BTreeSet::new();
+    for entry in entries {
+        if !attestors.contains(&entry.body.author) {
+            continue;
+        }
+        if let Some(doc) = parse_revoke(entry) {
+            if let Some(subject) = &doc.subject {
+                revoked.insert(subject.to_lowercase());
             }
         }
     }
@@ -213,19 +242,22 @@ mod tests {
         let revoked_id = [7u8; 32];
         let other_id = [9u8; 32];
         let good = RevokeDoc {
-            attestation: hex::encode(revoked_id),
+            attestation: Some(hex::encode(revoked_id)),
+            subject: None,
             reason: None,
         }
         .payload_bytes()
         .unwrap();
         let untrusted = RevokeDoc {
-            attestation: hex::encode(other_id),
+            attestation: Some(hex::encode(other_id)),
+            subject: None,
             reason: None,
         }
         .payload_bytes()
         .unwrap();
         let malformed = RevokeDoc {
-            attestation: "not hex".into(),
+            attestation: Some("not hex".into()),
+            subject: None,
             reason: None,
         }
         .payload_bytes()
@@ -243,9 +275,38 @@ mod tests {
     }
 
     #[test]
+    fn revoked_keys_count_only_trusted_revokers() {
+        let root = SigningKey::generate(&mut OsRng);
+        let root_pq = crate::pq::keypair().unwrap().1;
+        let stranger = SigningKey::generate(&mut OsRng);
+        let stranger_pq = crate::pq::keypair().unwrap().1;
+        let trusted = vec![hex::encode(root.verifying_key().as_bytes())];
+        let subject = hex::encode([3u8; 32]).to_uppercase(); // case-insensitive
+
+        let make = |subject: &str| {
+            RevokeDoc {
+                attestation: None,
+                subject: Some(subject.to_string()),
+                reason: Some("ejected".into()),
+            }
+            .payload_bytes()
+            .unwrap()
+        };
+        let entries = vec![
+            signed(NS_REVOKE, &make(&subject), &root, &root_pq, 0),
+            signed(NS_REVOKE, &make(&hex::encode([4u8; 32])), &stranger, &stranger_pq, 0),
+        ];
+        let revoked = revoked_keys_by(entries.iter(), &trusted);
+        assert!(revoked.contains(&hex::encode([3u8; 32])));
+        assert!(!revoked.contains(&hex::encode([4u8; 32])), "untrusted revokers do not count");
+        assert_eq!(revoked.len(), 1);
+    }
+
+    #[test]
     fn revoke_doc_roundtrips() {
         let doc = RevokeDoc {
-            attestation: "ab".repeat(32),
+            attestation: Some("ab".repeat(32)),
+            subject: None,
             reason: Some("rotated".into()),
         };
         let parsed: RevokeDoc = serde_json::from_slice(&doc.payload_bytes().unwrap()).unwrap();

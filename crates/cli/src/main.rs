@@ -342,12 +342,16 @@ enum AttestCmd {
         #[arg(long)]
         id: String,
     },
-    /// Revoke an attestation you (or a trusted root) issued: a new
-    /// `identity.revoke` statement, never an edit
+    /// Revoke an attestation, or a subject key directly (the ejection path
+    /// for explicit members/writers): a new `identity.revoke` statement,
+    /// never an edit
     Revoke {
         /// Attestation entry id (hex) to revoke
-        #[arg(long)]
-        id: String,
+        #[arg(long, group = "target")]
+        id: Option<String>,
+        /// Subject key (hex) to revoke without an attestation to name
+        #[arg(long, group = "target")]
+        key: Option<String>,
         /// Optional reason, kept on the ledger for the audit trail
         #[arg(long)]
         reason: Option<String>,
@@ -2368,27 +2372,56 @@ fn cmd_attest_cosign(node: &Node, id_hex: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Revoke an attestation: publish an `identity.revoke` statement naming it.
-/// Append-only means revocation is a new entry, never an edit - the
-/// attestation and its revocations remain forever, and verifiers apply the
-/// statement only where the author is a configured trust root.
-fn cmd_attest_revoke(node: &Node, id_hex: String, reason: Option<String>) -> Result<(), String> {
-    let id = parse_id(&id_hex)?;
-    // Typo protection when the target is local: only revoke real
-    // attestations. When it is not local yet, the statement still stands -
-    // it takes effect wherever the attestation lands.
-    let known_locally = match s(node.store.get_entry(&id))? {
-        Some(target) => {
-            if attest::parse_attestation(&target).is_none() {
-                return Err(format!("{id_hex} is not an identity.attest entry"));
+/// Revoke an attestation (by id) or a subject key (directly): publish an
+/// `identity.revoke` statement. Append-only means revocation is a new entry,
+/// never an edit - the attestation and its revocations remain forever, and
+/// verifiers apply the statement only where the author is a configured trust
+/// root. A key-level revoke is the ejection path for explicit members/writers
+/// entries, which have no attestation to name.
+fn cmd_attest_revoke(
+    node: &Node,
+    id_hex: Option<String>,
+    subject_hex: Option<String>,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let (doc, refs, target_short) = match (id_hex, subject_hex) {
+        (Some(id_hex), None) => {
+            let id = parse_id(&id_hex)?;
+            // Typo protection when the target is local: only revoke real
+            // attestations. When it is not local yet, the statement stands -
+            // it takes effect wherever the attestation lands.
+            match s(node.store.get_entry(&id))? {
+                Some(target) if attest::parse_attestation(&target).is_none() => {
+                    return Err(format!("{id_hex} is not an identity.attest entry"));
+                }
+                Some(_) => {}
+                None => println!(
+                    "  note: the attestation is not on this node yet; the statement stands"
+                ),
             }
-            true
+            (
+                attest::RevokeDoc {
+                    attestation: Some(id_hex.clone()),
+                    subject: None,
+                    reason,
+                },
+                vec![id],
+                format!("attestation {}", short(&id_hex)),
+            )
         }
-        None => false,
-    };
-    let doc = attest::RevokeDoc {
-        attestation: id_hex.clone(),
-        reason: reason.clone(),
+        (None, Some(subject_hex)) => {
+            let subject = parse_id(&subject_hex)?;
+            (
+                attest::RevokeDoc {
+                    attestation: None,
+                    subject: Some(subject_hex.clone()),
+                    reason,
+                },
+                vec![],
+                format!("key {}", hex::encode(subject)),
+            )
+        }
+        _ => return Err("pass exactly one of --id or --key".into()),
     };
     let payload = doc.payload_bytes()?;
     let latest = s(node.store.latest(&node.identity))?;
@@ -2404,7 +2437,7 @@ fn cmd_attest_revoke(node: &Node, id_hex: String, reason: Option<String>) -> Res
         namespace: attest::NS_REVOKE.to_string(),
         seq,
         prev,
-        refs: vec![id],
+        refs,
         timestamp_ms: now_ms(),
         payload,
     };
@@ -2415,18 +2448,15 @@ fn cmd_attest_revoke(node: &Node, id_hex: String, reason: Option<String>) -> Res
     }
     println!("revocation {} published", hex::encode(revoke_id));
     println!(
-        "  attestation {} is revoked where {} is a configured trust root",
-        short(&id_hex),
+        "  {target_short} is revoked where {} is a configured trust root",
         short(&node.identity)
     );
-    if !known_locally {
-        println!("  note: the attestation is not on this node yet; the statement stands");
-    }
-    if let Some(reason) = reason {
+    if let Some(reason) = doc.reason {
         println!("  reason: {reason}");
     }
     Ok(())
 }
+
 
 fn cmd_attest_status(node: &Node, subject: Option<String>, id: Option<String>) -> Result<(), String> {
     let entries = s(node.store.all_entries())?;
@@ -3809,9 +3839,12 @@ fn run(cli: Cli) -> Result<(), String> {
                 label.clone(),
             ),
             AttestCmd::Cosign { id } => cmd_attest_cosign(&load_node(&cli.data_dir)?, id.clone()),
-            AttestCmd::Revoke { id, reason } => {
-                cmd_attest_revoke(&load_node(&cli.data_dir)?, id.clone(), reason.clone())
-            }
+            AttestCmd::Revoke { id, key, reason } => cmd_attest_revoke(
+                &load_node(&cli.data_dir)?,
+                id.clone(),
+                key.clone(),
+                reason.clone(),
+            ),
             AttestCmd::Status { subject, id } => {
                 cmd_attest_status(&load_node_reader(&cli.data_dir)?, subject.clone(), id.clone())
             }
@@ -4205,7 +4238,8 @@ mod tests {
             d,
             Commands::Attest {
                 cmd: AttestCmd::Revoke {
-                    id: hex::encode(attestation_id),
+                    id: Some(hex::encode(attestation_id)),
+                    key: None,
                     reason: Some("rotated".into()),
                 },
             },

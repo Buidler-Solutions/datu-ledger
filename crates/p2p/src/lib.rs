@@ -337,6 +337,19 @@ fn admit_peer(
         ));
     }
     if let Some(net) = network {
+        if net.is_permissioned() {
+            // The ledger outranks the membership list: a root's key-level
+            // revocation ejects even an explicit member.
+            let revoked = store
+                .key_revoked_by(&hello.node_key, &net.roots)
+                .map_err(|e| format!("cannot check revocations: {e}"))?;
+            if revoked {
+                return Err(format!(
+                    "not admitted: key {} was revoked by a configured root (identity.revoke) - membership lists do not override the ledger",
+                    &hello.node_key[..8.min(hello.node_key.len())]
+                ));
+            }
+        }
         if net.is_permissioned() && !net.members.iter().any(|k| k == &hello.node_key) {
             let attested = store
                 .key_attested_by(&hello.node_key, &net.roots)

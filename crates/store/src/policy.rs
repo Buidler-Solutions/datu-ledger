@@ -206,6 +206,15 @@ impl Store {
         if !policy.namespace_gated(&entry.body.namespace) {
             return Ok(());
         }
+        // A key-level revocation binds even explicit `writers` entries: the
+        // ledger's ejection does not need a membership list's permission.
+        if self.key_revoked_by(&entry.body.author, &policy.attestors)? {
+            return Err(StoreError::Denied(format!(
+                "namespace '{}' is gated: author {} was revoked by a configured trust root (identity.revoke names the key) - a revocation is a ledger fact, not a membership-list opinion",
+                entry.body.namespace,
+                &entry.body.author[..16.min(entry.body.author.len())]
+            )));
+        }
         if !policy.attestors.contains(&entry.body.author)
             && !policy.writers.contains(&entry.body.author)
             && !self.attested_by_root(entry, policy)?
@@ -347,6 +356,19 @@ impl Store {
         // observers mirror everything and can re-run the same predicate
         // via `datu contract check`.
         self.enforce_contract(entry)
+    }
+
+    /// Has a configured trust root published a key-level revocation naming
+    /// `subject` (`identity.revoke.subject`)? Attested membership revokes by
+    /// naming the attestation; explicit `members`/`writers` keys have no
+    /// attestation to name, so this is their ejection path.
+    pub fn key_revoked_by(&self, subject: &str, attestors: &[String]) -> StoreResult<bool> {
+        if attestors.is_empty() {
+            return Ok(false);
+        }
+        let entries = self.all_entries()?;
+        Ok(datu_core::attest::revoked_keys_by(entries.iter(), attestors)
+            .contains(&subject.to_lowercase()))
     }
 
     /// Is `subject` (a node or writer key) vouched for by any of `attestors`

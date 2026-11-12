@@ -87,6 +87,27 @@ impl Keys {
         Entry::sign(body, &self.ed, &self.pq).unwrap()
     }
 
+    fn revoke_key(&self, subject: &str, seq: u64, prev: Option<[u8; 32]>) -> Entry {
+        let doc = datu_core::attest::RevokeDoc {
+            attestation: None,
+            subject: Some(subject.to_string()),
+            reason: Some("ejected".into()),
+        };
+        let body = EntryBody {
+            version: datu_core::ENTRY_VERSION,
+            author: String::new(),
+            author_pq: String::new(),
+            pq_alg: String::new(),
+            namespace: "identity.revoke".to_string(),
+            seq,
+            prev,
+            refs: vec![],
+            timestamp_ms: 2,
+            payload: doc.payload_bytes().unwrap(),
+        };
+        Entry::sign(body, &self.ed, &self.pq).unwrap()
+    }
+
     fn revoke(
         &self,
         attestation_id: [u8; 32],
@@ -95,7 +116,8 @@ impl Keys {
         reason: Option<&str>,
     ) -> Entry {
         let doc = datu_core::attest::RevokeDoc {
-            attestation: hex::encode(attestation_id),
+            attestation: Some(hex::encode(attestation_id)),
+            subject: None,
             reason: reason.map(|r| r.to_string()),
         };
         let body = EntryBody {
@@ -854,4 +876,30 @@ fn bootstrap_policy_admits_only_the_governance_namespace() {
     let parsed = WritePolicy::from_json(&json).unwrap();
     assert_eq!(parsed.allow, vec![chain_ns.to_string()]);
     assert_eq!(parsed.gated, vec!["*".to_string()]);
+}
+
+#[test]
+fn a_key_revocation_binds_even_an_explicit_writer() {
+    let registry = Keys::new();
+    let writer = Keys::new();
+    let mut policy = gated_policy(vec![registry.hex()], &["gov.*"]);
+    policy.writers = vec![writer.hex()];
+    let store = gated_store(policy);
+
+    // Admitted while the explicit listing stands.
+    let first = writer.entry("gov.bids", 0, b"bid");
+    let first_id = first.id().unwrap();
+    assert!(store.insert_entry(&first).unwrap());
+
+    // The root ejects the key on-ledger; the writers list cannot veto it.
+    assert!(store
+        .insert_entry(&registry.revoke_key(&writer.hex(), 0, None))
+        .unwrap());
+    let denied = store.insert_entry(&writer.entry_with_prev("gov.bids", 1, Some(first_id), b"bid again"));
+    match denied {
+        Err(StoreError::Denied(message)) => {
+            assert!(message.contains("revoked"), "{message}");
+        }
+        other => panic!("expected Denied, got {other:?}"),
+    }
 }

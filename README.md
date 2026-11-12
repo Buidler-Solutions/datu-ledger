@@ -816,11 +816,13 @@ manifest to re-issue, no operator round-trip to add a peer.
 **Leaving = the same ledger.** Ejection is server-side too: `datu attest
 revoke --id <attestation-id>` publishes an `identity.revoke` statement by
 a trust root, and every node whose `roots` name that root stops admitting
-the key the moment the revoke syncs. Membership revocation therefore rides
-the exact transport that carried the admission, and works offline, over
-HTTP pull, and across the mesh alike. An explicit `members` key baked into
-someone's `network.json` is still theirs to remove; the propagating path is
-the ledger.
+the key the moment the revoke syncs. A key with no attestation to name -
+an explicit `members` or `writers` entry - is ejected with `datu attest
+revoke --key <subject-key>`, and the ledger outranks the membership list:
+the revoked key is refused even while a `network.json` still lists it, and
+the writer gate denies it too. Membership revocation therefore rides the
+exact transport that carried the admission, and works offline, over HTTP
+pull, and across the mesh alike.
 
 **The mesh wall is mutual and everywhere.** Bundles, witness streams, haves
 requests and delta responses carry the mesh id; a node refuses foreign ones
