@@ -24,10 +24,11 @@ const readQueue = async () => {
   return o[QUEUE_KEY] || [];
 };
 const writeQueue = async (q) => chrome.storage.session.set({ [QUEUE_KEY]: q });
-const setBadge = async (n) => {
+const setBadge = async (n, tabId) => {
+  const scoped = tabId != null ? { tabId } : {};
   try {
-    await chrome.action.setBadgeText({ text: n ? String(n) : '' });
-    if (n) await chrome.action.setBadgeBackgroundColor({ color: '#d29922' });
+    await chrome.action.setBadgeText({ ...scoped, text: n ? String(n) : '' });
+    if (n) await chrome.action.setBadgeBackgroundColor({ ...scoped, color: '#d29922' });
   } catch {}
 };
 
@@ -55,6 +56,33 @@ function broadcast(state) {
       } catch {}
     }
   });
+}
+
+// A dApp request needs the user's attention: slide the side panel open.
+// Chrome only permits sidePanel.open() from a service worker in response to an
+// extension event (Chrome 116+). If every avenue fails we log the real error
+// and flash a tab-scoped badge so the failure is diagnosable, not silent.
+async function tryOpenSidePanel(tab, queueLength) {
+  if (!chrome.sidePanel || !chrome.sidePanel.open) return;
+  const tabId = tab.id;
+  try {
+    if (chrome.sidePanel.setOptions) {
+      await chrome.sidePanel.setOptions({ tabId, enabled: true, path: 'panel.html' });
+    }
+    await chrome.sidePanel.open({ tabId });
+    return;
+  } catch (e) {
+    console.warn('sidePanel.open failed (tabId):', e?.message || e);
+  }
+  if (tab.windowId != null) {
+    try {
+      await chrome.sidePanel.open({ windowId: tab.windowId });
+      return;
+    } catch (e) {
+      console.warn('sidePanel.open failed (windowId):', e?.message || e);
+    }
+  }
+  await setBadge(queueLength, tabId);
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -94,8 +122,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       await writeQueue(queue);
       await setBadge(queue.length);
       sendResponse({ queued: true });
-      if (sender.tab && chrome.sidePanel.open) {
-        chrome.sidePanel.open({ tabId: sender.tab.id }).catch(() => {});
+      if (sender.tab) {
+        await tryOpenSidePanel(sender.tab, queue.length);
       }
     })();
     return true;
@@ -108,6 +136,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const rest = queue.filter((r) => r.id !== msg.id);
       await writeQueue(rest);
       await setBadge(rest.length);
+      if (req && req.tabId != null) await setBadge(rest.length, req.tabId);
       if (req && req.tabId != null) {
         try {
           await chrome.tabs.sendMessage(req.tabId, {

@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "DATU Records Wallet",
-  "version": "1.2.0",
-  "description": "Wallet side panel for any namespace \u2014 land titles, driver licences, procurement bids, permits. Sign consent in any role, verify records from any node, and read only the fields sealed to you. Keys stay in your local datu wallet bridge (paired with a token).",
-  "minimum_chrome_version": "114",
+  "name": "DATU Signet Personal Vault",
+  "version": "1.3.2",
+  "description": "Signet Personal Vault (SPV) for any namespace \u2014 land titles, driver licences, procurement bids, permits. Sign consent in any role, verify records from any node, and read only the fields sealed to you. Keys stay in your local Signet service (paired with a token).",
+  "minimum_chrome_version": "116",
   "action": {
-    "default_title": "Open DATU Records Wallet",
+    "default_title": "Open DATU Signet",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",

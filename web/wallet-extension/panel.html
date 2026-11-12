@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>DATU Records Wallet</title>
+    <title>DATU Signet</title>
     <link rel="stylesheet" href="panel.css" />
   </head>
   <body>
@@ -10,7 +10,7 @@
       <div class="brand">
         <div class="logo"></div>
         <div>
-          <b>DATU Records Wallet</b><br />
+          <b>DATU Signet</b><br />
           <span id="brandSub">records · consent · sealed data</span>
         </div>
       </div>
@@ -34,7 +34,7 @@
     <section id="requestsCard" style="display:none; margin: .6rem 1rem 0; border:1px solid #d29922; border-radius:8px; padding:.6rem .8rem;">
       <b>Sign requests from dApps</b>
       <p class="muted small">
-        Confirm each request with your wallet passphrase - remembered for this session until you
+        Confirm each request with your vault passphrase - remembered for this session until you
         close the panel. The dApp never sees your keys or the passphrase.
       </p>
       <div id="requests"></div>
@@ -70,7 +70,7 @@
           <option value="procurement.bid"></option>
           <option value="permit.application"></option>
         </datalist>
-        <label>Wallet passphrase (the one you chose when creating this identity)<input id="pass" type="password" /></label>
+        <label>Vault passphrase (the one you chose when creating this identity)<input id="pass" type="password" /></label>
         <button class="primary" id="sign">Review consent request</button>
         <div class="confirm" id="confirmBox" style="display:none">
           <div class="muted small">Review before signing</div>
@@ -109,27 +109,27 @@
         <button class="primary" id="create">Create identity</button>
         <p class="muted" id="createHint" style="display:none"></p>
 
-        <h2>Wallets on this device</h2>
+        <h2>Signets on this device</h2>
         <p class="muted small">
-          One wallet per person, several identities inside for context
-          (<b>alice-home</b>, <b>alice-business</b>). A wallet is one
+          One Signet per person, several identities inside for context
+          (<b>alice-home</b>, <b>alice-business</b>). A Signet is one
           <b>datu wallet serve</b> process: its own directory, passphrases and token.
           The panel never holds keys - it asks the bridge to sign and decrypt.
         </p>
-        <label>Active wallet<select id="walletSelect"></select></label>
+        <label>Active Signet<select id="walletSelect"></select></label>
         <div class="row">
           <button class="ghost" id="switchWallet">Switch</button>
           <button class="ghost" id="removeWallet">Remove</button>
         </div>
         <label>Label<input id="walletLabel" placeholder="alice" /></label>
-        <label>Bridge URL<input id="walletUrl" value="http://127.0.0.1:7482" /></label>
+        <label>Bridge URL<input id="walletUrl" value="http://127.0.0.1:7488" /></label>
         <label>Pairing token (from <code>wallet/bridge.token</code>)<input id="token" type="password" placeholder="64 hex characters" /></label>
         <div class="row">
-          <button class="primary" id="addWallet">Save wallet &amp; pair</button>
+          <button class="primary" id="addWallet">Save &amp; pair</button>
           <button class="ghost" id="forget">Forget token</button>
         </div>
         <div class="row">
-          <button class="ghost" id="findWallet">Find my wallet automatically</button>
+          <button class="ghost" id="findWallet">Find my Signet automatically</button>
         </div>
         <p class="muted small" id="pairHint"></p>
 

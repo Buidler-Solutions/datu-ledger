@@ -1,4 +1,6 @@
 const $ = (id) => document.getElementById(id);
+const esc = (s) =>
+  String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 let identities = [];
 let myRecords = [];
 let pendingSign = null; // { document, role, kind }
@@ -9,7 +11,7 @@ let wallets = []; // [{ label, url }]
 let activeUrl = '';
 let tokens = {}; // bridge url -> pairing token (session only)
 
-const DEFAULT_WALLET = { label: 'default', url: 'http://127.0.0.1:7482' };
+const DEFAULT_WALLET = { label: 'default', url: 'http://127.0.0.1:7488' };
 
 // ---------- status ----------
 const status = (msg, kind = 'muted') => {
@@ -44,7 +46,7 @@ async function call(url, { method = 'GET', body, auth = false, token } = {}) {
     if (body) headers['Content-Type'] = 'application/json';
     if (auth) {
       const bearer = token ?? tokens[bridgeUrl()];
-      if (!bearer) throw new Error('not paired with this wallet - paste its token in Settings');
+      if (!bearer) throw new Error('not paired with this Signet - paste its token in Settings');
       headers['Authorization'] = `Bearer ${bearer}`;
     }
     const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined, signal });
@@ -87,7 +89,7 @@ function renderWallets() {
     $('walletLabel').value = active.label;
     $('walletUrl').value = active.url;
   } else {
-    $('brandSub').textContent = 'no wallet paired';
+    $('brandSub').textContent = 'no Signet paired';
   }
 }
 
@@ -124,22 +126,32 @@ async function pairWallet(url, token, label) {
   showSeal();
   notifyState();
   $('pairHint').textContent = `paired · ${identities.length} identities · token kept for this browser session`;
-  status(`wallet ready - ${identities.length} identities`, 'ok');
+  status(`Signet ready - ${identities.length} identities`, 'ok');
   checkNode(true);
 }
 
-const PROBE_PORTS = ['7482', '7483', '7480', '7481', '7484', '7485', '7488', '7489', '7490'];
+// 7488 first: the canonical desktop bridge (LaunchAgent / DATU Wallet.app).
+const PROBE_PORTS = ['7488', '7482', '7483', '7480', '7481', '7484', '7485', '7489', '7490'];
 async function autoPair() {
   for (const port of PROBE_PORTS) {
     const url = `http://127.0.0.1:${port}`;
-    if (wallets.some((w) => w.url === url && tokens[w.url])) continue;
+    if (tokens[url]) {
+      try {
+        await pairWallet(url, tokens[url]);
+        status(`re-paired with the Signet service at ${url}`, 'ok');
+        return true;
+      } catch {
+        delete tokens[url]; // stale token (bridge restarted) - mint a fresh one
+        await sessionSet({ tokens });
+      }
+    }
     try {
       const res = await fetch(`${url}/v1/pair`);
       if (!res.ok) continue;
       const data = await res.json();
       if (!data || !data.token) continue;
       await pairWallet(url, data.token, `datu · ${port}`);
-      status(`auto-paired with the wallet service at ${url}`, 'ok');
+      status(`auto-paired with the Signet service at ${url}`, 'ok');
       return true;
     } catch {}
   }
@@ -149,11 +161,28 @@ async function autoPair() {
 async function addWallet() {
   try {
     const label = $('walletLabel').value.trim() || 'wallet';
-    const url = $('walletUrl').value.trim().replace(/\/+$/, '');
+    let url = $('walletUrl').value.trim().replace(/\/+$/, '');
     const token = $('token').value.trim();
     if (!url) throw new Error('enter the bridge URL');
     if (!token) throw new Error('paste the pairing token from wallet/bridge.token');
-    await pairWallet(url, token, label);
+    if (!/^https?:\/\//.test(url)) url = `http://${url}`;
+    try {
+      await pairWallet(url, token, label);
+    } catch (e) {
+      const unreachable = /failed to fetch|networkerror|timed out|load failed/i.test(e.message);
+      if (!unreachable) throw e;
+      const fallback = 'http://127.0.0.1:7488';
+      if (url === fallback) throw new Error(`cannot reach ${url} - is DATU Signet running?`);
+      const res = await fetch(`${fallback}/v1/pair`).catch(() => null);
+      if (!res || !res.ok) throw new Error(`cannot reach ${url} - is DATU Signet running?`);
+      wallets = wallets.filter((w) => w.url !== url);
+      delete tokens[url];
+      await pairWallet(fallback, (await res.json()).token, label);
+      $('walletUrl').value = fallback;
+      status(`could not reach ${url} - paired with the desktop Signet service at ${fallback} instead`, 'ok');
+      $('token').value = '';
+      return;
+    }
     $('token').value = '';
   } catch (e) {
     status(e.message, 'err');
@@ -163,14 +192,14 @@ async function addWallet() {
 async function switchWallet() {
   try {
     const url = $('walletSelect').value;
-    if (!url) throw new Error('no wallet to switch to');
+    if (!url) throw new Error('no Signet to switch to');
     activeUrl = url;
     const wallet = wallets.find((w) => w.url === url);
     $('walletLabel').value = wallet ? wallet.label : '';
     $('walletUrl').value = url;
     if (!tokens[url]) {
       await persistWallets();
-      $('pairHint').textContent = 'this wallet needs its token - paste it and press “Save wallet & pair”';
+      $('pairHint').textContent = 'this Signet needs its token - paste it and press “Save & pair”';
       status(`switched to ${url} - paste its pairing token`, 'muted');
       return;
     }
@@ -192,7 +221,7 @@ async function removeWallet() {
   if (activeUrl && tokens[activeUrl]) {
     await pairWallet(activeUrl, tokens[activeUrl]);
   } else {
-    status('wallet removed', 'muted');
+    status('Signet removed', 'muted');
   }
 }
 
@@ -202,7 +231,7 @@ async function forgetToken() {
   $('identity').innerHTML = '';
   $('token').value = '';
   await sessionSet({ tokens });
-  $('pairHint').textContent = 'token forgotten for this wallet - pair again to use it';
+  $('pairHint').textContent = 'token forgotten for this Signet - pair again to use it';
   status('pairing token forgotten', 'muted');
 }
 
@@ -361,7 +390,7 @@ async function decryptRecord(index) {
   try {
     const identity = selected();
     const rec = myRecords[index];
-    if (!$('pass').value) throw new Error('enter your wallet passphrase (Sign tab)');
+    if (!$('pass').value) throw new Error('enter your vault passphrase (Sign tab)');
     const data = await bridge('/v1/wallet/open', {
       name: identity.name,
       passphrase: $('pass').value,
@@ -384,7 +413,7 @@ function reviewConsent() {
   try {
     const identity = selected();
     const document = JSON.parse($('doc').value);
-    if (!$('pass').value) throw new Error('enter your wallet passphrase');
+    if (!$('pass').value) throw new Error('enter your vault passphrase');
     const role = $('role').value.trim() || 'holder';
     const kind = document.kind || $('kind').value.trim();
     if (!kind) throw new Error('enter the document kind (e.g. land.title.application, procurement.bid)');
@@ -419,7 +448,7 @@ async function confirmSign() {
   try {
     if (!pendingSign) throw new Error('nothing to sign');
     const identity = selected();
-    status('unlocking wallet and signing…');
+    status('unlocking your Signet and signing…');
     const data = await bridge('/v1/wallet/party-sign', {
       name: identity.name,
       passphrase: $('pass').value,
@@ -447,7 +476,7 @@ async function openPasted() {
   try {
     const identity = selected();
     const passphrase = $('pass').value;
-    if (!passphrase) throw new Error('enter your wallet passphrase');
+    if (!passphrase) throw new Error('enter your vault passphrase');
     const raw = $('openDoc').value.trim();
     if (!raw) throw new Error('paste a record first');
     const parsed = JSON.parse(raw);
@@ -596,7 +625,7 @@ async function processRequest(req, passphrase) {
   const url = (payload.bridgeUrl || '').replace(/\/+$/, '');
   const token = tokens[url];
   try {
-    if (!token) throw new Error('this wallet is not paired - paste its bridge token in Settings');
+    if (!token) throw new Error('this Signet is not paired - paste its bridge token in Settings');
     if (passphrase) {
       body.passphrase = passphrase;
       passCache[body.name] = passphrase;
@@ -641,10 +670,10 @@ async function pollRequests() {
     card.style.display = 'block';
     const fingerprint = remaining.map((r) => r.id).join(',');
     if (fingerprint === requestsFingerprint) return;
-    requestsFingerprint = fingerprint;
     const holder = $('requests');
     holder.innerHTML = '';
     for (const req of remaining) holder.appendChild(renderRequest(req));
+    requestsFingerprint = fingerprint; // only mark rendered once every box is on screen
   } catch {}
 }
 
@@ -665,7 +694,7 @@ function renderRequest(req) {
 
   const pass = document.createElement('input');
   pass.type = 'password';
-  pass.placeholder = passCache[body.name] ? 'passphrase remembered for this session' : 'wallet passphrase';
+  pass.placeholder = passCache[body.name] ? 'passphrase remembered for this session' : 'vault passphrase';
   pass.value = passCache[body.name] || '';
   pass.style.marginTop = '.3rem';
   box.appendChild(pass);
@@ -692,7 +721,7 @@ function renderRequest(req) {
     }
   });
   reject.addEventListener('click', () => {
-    chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: false, error: 'rejected in the wallet' });
+    chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: false, error: 'rejected in the Signet' });
   });
 
   return box;
@@ -704,8 +733,8 @@ pollRequests();
 // ---------- wiring ----------
 $('addWallet').addEventListener('click', addWallet);
 $('findWallet').addEventListener('click', async () => {
-  status('looking for a local wallet service…', 'muted');
-  if (!(await autoPair())) status('nothing found on 127.0.0.1:7480-7485 - paste a token instead', 'err');
+  status('looking for a local Signet service…', 'muted');
+  if (!(await autoPair())) status('nothing found on 127.0.0.1:7480-7490 - is DATU Wallet running? - or paste a token', 'err');
 });
 $('switchWallet').addEventListener('click', switchWallet);
 $('removeWallet').addEventListener('click', removeWallet);
@@ -742,13 +771,16 @@ $('node').addEventListener('change', () => {
   if (tokens[activeUrl]) {
     try {
       await pairWallet(activeUrl, tokens[activeUrl]);
-    } catch (e) {
-      status(e.message, 'err');
+    } catch {
+      // token went stale or the bridge was down - drop it and try a fresh auto-pair
+      delete tokens[activeUrl];
+      await sessionSet({ tokens });
     }
-  } else if (await autoPair()) {
+  }
+  if (!identities.length && (await autoPair())) {
     // paired itself - nothing for the user to do
-  } else {
-    status('no wallet service found on this machine - paste a bridge token in Settings', 'muted');
+  } else if (!identities.length) {
+    status('no Signet service found on this machine - paste a pairing token in Settings', 'muted');
     document.querySelector('nav button[data-tab="settings"]').click();
   }
   armIdleTimer();
