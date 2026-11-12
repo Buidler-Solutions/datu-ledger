@@ -281,8 +281,8 @@ DATU_WALLET_PASS=... datu wallet open --name ministry --input sealed.json
 ### `datu serve` - node HTTP API + explorer
 
 `datu serve --addr 127.0.0.1:7474` exposes a std-only HTTP API plus a dark-theme
-ledger explorer at `/` (entries, search, witnesses, disputes - read-only
-mirror-node view). The entry view surfaces the ledger facts alongside the
+ledger explorer at `/` (entries, search, witnesses, attestations with
+revocation tags, disputes - read-only mirror-node view). The entry view surfaces the ledger facts alongside the
 record: fresh witness coverage, verified locally (Merkle path against the
 checkpoint's signed root, Ed25519 via WebCrypto - the same verifier the
 panel uses, served from `/blake3.js` and `/coverage.js`), and any declared
@@ -849,8 +849,12 @@ anchors, no accounts:
   collects the landowner's consent, and submits the signed entry to a
   validator node. The registry workspace also carries the release step:
   load a deferred document plus its release-secrets file and the dApp
-  produces the share object a release entry publishes (no signature needed -
-  releasing is a ledger act), closing the deferred loop without the CLI.
+  produces the share object a release entry publishes plus a release-entry
+  skeleton carrying it (no signature needed - releasing is a ledger act),
+  closing the deferred loop without the CLI. After recording a title the
+  registry workspace also reports how many fresh witness checkpoints cover
+  the new entry, and says plainly that it is the node's report: re-verify
+  with `datu witness verify-proof` or the panel's Witnessed view.
 - **`web/wallet-extension`** - the citizen's wallet as a **Chrome side panel**
   (MetaMask-style: click the toolbar icon, the panel slides in on the right).
   It is **namespace-agnostic**: land titles, driver licences, procurement

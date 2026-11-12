@@ -673,7 +673,17 @@ export default function App() {
       }
       say(submit.status === 201 ? 'accepted into the ledger' : 'already present (idempotent)');
       const entry = await nodeGet(nodeUrl, `/v1/entry/${signed.body.id}`);
-      setResult({ id: signed.body.id, status: submit.status, entry: entry.body });
+      // Who has witnessed it so far: informational here (the node relays
+      // witnesses; re-verify the served proofs with `datu witness
+      // verify-proof` or the panel's Witnessed view).
+      let coverage = null;
+      try {
+        const cov = await nodeGet(nodeUrl, `/v1/coverage/${signed.body.id}`);
+        coverage = { witnesses: cov.body.witnesses || [], error: cov.body.error || null };
+      } catch {
+        /* coverage is a bonus; recording already succeeded */
+      }
+      setResult({ id: signed.body.id, status: submit.status, entry: entry.body, coverage });
       const st = await nodeGet(nodeUrl, '/v1/status');
       setNodeStatus(st.body);
     } catch (e) {
@@ -1104,6 +1114,13 @@ export default function App() {
                   {result.status === 201 ? 'Accepted' : 'Already present'} · entry{' '}
                   <code>{result.id}</code>
                 </p>
+                {result.coverage && (
+                  <p className="muted small">
+                    {result.coverage.witnesses.length
+                      ? `covered by ${result.coverage.witnesses.length} fresh witness checkpoint(s) on this node (as reported; re-verify with datu witness verify-proof or the panel's Witnessed view)`
+                      : 'no fresh witness covers it yet - coverage follows the next checkpoint a witness signs (as reported by this node)'}
+                  </p>
+                )}
                 <details>
                   <summary>stored entry (ciphertext fields visible)</summary>
                   <pre>{JSON.stringify(result.entry, null, 2)}</pre>
@@ -1158,6 +1175,22 @@ export default function App() {
                 >
                   Download the share object
                 </button>
+                <label>
+                  Release entry skeleton (kind + doc carrying the share - edit to match your
+                  contract, then sign it through the usual consent flow)
+                  <textarea
+                    rows={6}
+                    value={JSON.stringify(
+                      {
+                        kind: 'datu.cert.release',
+                        doc: { released_field: releaseField || 'field', released_share: releaseShare },
+                      },
+                      null,
+                      2,
+                    )}
+                    readOnly
+                  />
+                </label>
               </>
             )}
           </div>

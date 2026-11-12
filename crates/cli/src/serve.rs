@@ -939,7 +939,7 @@ const EXPLORER_HTML: &str = r##"<!doctype html>
 </style></head><body>
 <h1>DATU Ledger Explorer <span class="tag">self-verifying mirror</span></h1>
 <div><input id="q" placeholder="entry id (64 hex) or author (64 hex)"><button onclick="search()">load</button>
-<button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button> <button onclick="loadConflicts()">disputes</button></div>
+<button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button> <button onclick="loadAttestations()">attestations</button> <button onclick="loadConflicts()">disputes</button></div>
 <div id="disputes"></div>
 <div id="governance"></div>
 <table id="rows"><tr><th>id</th><th>author</th><th>namespace</th><th>seq</th><th>payload</th></tr></table>
@@ -999,6 +999,29 @@ async function showFeed(d){
  (d.entries||[]).forEach(e=>{const tr=document.createElement('tr');
   tr.innerHTML=`<td>${e.seq}</td><td><a href="#" onclick="show('${e.id}');return false">${short(e.id)}</a></td><td>${esc(e.namespace)}</td><td>${esc(e.payload_preview.slice(0,80))}</td>`;
   rows.appendChild(tr)})}
+async function loadAttestations(){
+ const rows=document.getElementById('rows');
+ rows.innerHTML='<tr><th>attestation</th><th>attestor</th><th>subject</th><th>label</th><th>status</th></tr>';
+ // Revocations first: a trusted statement names the attestation it kills.
+ const revokes=await j('/v1/entries?ns=identity.revoke&limit=200');
+ const revoked={};
+ for(const item of revokes.entries||[]){
+  try{
+   const full=await j('/v1/entry/'+item.id);
+   const body=JSON.parse(atob(full.payload_base64||''));
+   if(typeof body.attestation==='string') revoked[body.attestation]=full.author||item.author;
+  }catch(_){}
+ }
+ const list=await j('/v1/entries?ns=identity.attest&limit=100');
+ for(const item of list.entries||[]){
+  let body={};
+  try{const full=await j('/v1/entry/'+item.id); body=JSON.parse(atob(full.payload_base64||''));}catch(_){}
+  const by=revoked[item.id];
+  const tr=document.createElement('tr');
+  tr.innerHTML=`<td><a href="#" onclick="show('${item.id}');return false">${short(item.id)}</a></td><td>${short(item.author)}</td><td>${short(body.subject||'')}</td><td>${esc(body.label||'')}</td><td>${by?'<span class="tag" style="background:#f8514933;color:#ffa198">REVOKED by '+short(by)+'</span>':'<span class="tag">standing</span>'}</td>`;
+  rows.appendChild(tr);
+ }
+}
 async function loadWitnesses(){const d=await j('/v1/checkpoints');
  const rows=document.getElementById('rows');
  rows.innerHTML='<tr><th>witness</th><th>height</th><th>entries</th><th>merkle root</th></tr>';
@@ -1225,6 +1248,9 @@ mod tests {
         // The entry view verifies served witnesses locally, not just display.
         assert!(EXPLORER_HTML.contains("/blake3.js"));
         assert!(EXPLORER_HTML.contains("datuCoverage.verifyWitness"));
+        // Attestations view marks revoked statements.
+        assert!(EXPLORER_HTML.contains("loadAttestations"));
+        assert!(EXPLORER_HTML.contains("identity.attest"));
     }
 
     /// The coverage-proof endpoint serves the same offline-verifiable
