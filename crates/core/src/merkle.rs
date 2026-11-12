@@ -168,6 +168,50 @@ mod tests {
         );
     }
 
+    /// Deterministic pseudo-random sets: proofs roundtrip for every member,
+    /// and a proof for one member never verifies for a different leaf at the
+    /// same position.
+    #[test]
+    fn random_sets_roundtrip_and_do_not_cross_verify() {
+        let mut state = 0x9e3779b97f4a7c15u64;
+        let mut next = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        for _ in 0..64 {
+            let n = 1 + (next() % 48) as usize;
+            let set: Vec<[u8; 32]> = (0..n)
+                .map(|_| {
+                    let mut id = [0u8; 32];
+                    for chunk in id.chunks_mut(4) {
+                        chunk.copy_from_slice(&next().to_le_bytes());
+                    }
+                    id
+                })
+                .collect();
+            let root = merkle_root(&set);
+            let mut sorted = set.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            for (index, id) in sorted.iter().enumerate() {
+                let proof = merkle_proof(&set, id).expect("member has a proof");
+                assert_eq!(
+                    merkle_root_from_proof(id, index, sorted.len(), &proof),
+                    Some(root),
+                    "n={} index={index}",
+                    sorted.len()
+                );
+                let mut swapped = *id;
+                swapped[0] ^= 0xFF;
+                assert_ne!(
+                    merkle_root_from_proof(&swapped, index, sorted.len(), &proof),
+                    Some(root),
+                    "a different leaf cannot ride the same path"
+                );
+            }
+        }
+    }
+
     #[test]
     fn absent_ids_have_no_proof() {
         assert!(merkle_proof(&ids(3), &[99u8; 32]).is_none());

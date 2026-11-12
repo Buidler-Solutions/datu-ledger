@@ -685,12 +685,14 @@ and can evaluate the same predicate on demand:
 
 ```sh
 datu contract new --admits land.title.grant --wasm-file rule.wasm --out spec.json
-                                                       # spec with the wasm body
-                                                       # base64-encoded for you
+                                                       # parse-checks the module,
+                                                       # base64-encodes it, warns on
+                                                       # missing memory/alloc/evaluate
 datu publish --ns gov.contracts --file contract.json   # the rule itself
 datu contract show --id <contract-entry-id>            # inspect the rule
 datu contract show --id <contract-entry-id> --wasm-out rule.wasm
-                                                       # extract the module, hash printed
+                                                       # extract the module, print its
+                                                       # BLAKE3 and export list
 datu contract check --id <governed-entry-id>           # condition-by-condition verdict
 datu contract status --id <anchor-entry-id>           # pending view (below)
 ```

@@ -94,6 +94,17 @@ fn input_json(
     })
 }
 
+/// Parse-check a module and report its export names. Not a verdict -
+/// evaluation still type-checks the ABI and runs under fuel - but authoring
+/// tools can catch typos before the signing steps, and auditors can confirm
+/// what a module advertises before trusting it.
+pub fn check_module(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let engine = wasmi::Engine::new(&wasmi::Config::default());
+    let module = wasmi::Module::new(&engine, bytes)
+        .map_err(|e| format!("contract wasm does not parse: {e}"))?;
+    Ok(module.exports().map(|export| export.name().to_string()).collect())
+}
+
 /// Run a WASM contract body over the governed document.
 ///
 /// `Ok(None)` means the module admitted the document. `Ok(Some(reason))`
@@ -416,6 +427,25 @@ mod tests {
         assert!(!report.admitted);
         assert_eq!(report.conditions.len(), 1);
         assert_eq!(report.conditions[0].kind, ConditionKind::Kind);
+    }
+
+    #[test]
+    fn check_module_reports_exports_and_rejects_garbage() {
+        let empty = wat::parse_str(r#"(module)"#).unwrap();
+        assert_eq!(check_module(&empty).unwrap(), Vec::<String>::new());
+        let with_abi = wat::parse_str(
+            r#"(module
+                 (memory (export "memory") 1)
+                 (func (export "alloc") (param i32) (result i32) (i32.const 0))
+                 (func (export "evaluate")
+                   (param i32 i32 i32 i32) (result i32) (i32.const 0)))"#,
+        )
+        .unwrap();
+        let exports = check_module(&with_abi).unwrap();
+        for required in ["memory", "alloc", "evaluate"] {
+            assert!(exports.iter().any(|name| name == required), "{required}");
+        }
+        assert!(check_module(b" not wasm").is_err());
     }
 
     #[test]

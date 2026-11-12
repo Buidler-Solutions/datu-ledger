@@ -1653,6 +1653,17 @@ fn cmd_contract_show(node: &Node, id: String, wasm_out: Option<PathBuf>) -> Resu
             bytes.len(),
             hex::encode(blake3::hash(&bytes).as_bytes())
         );
+        match contract::wasm::check_module(&bytes) {
+            Ok(exports) => println!(
+                "module parses; exports: {}",
+                if exports.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    exports.join(", ")
+                }
+            ),
+            Err(e) => println!("warning: {e} - evaluation denies every document"),
+        }
     }
     let mut json = serde_json::to_value(&spec).map_err(|e| e.to_string())?;
     // Elide the wasm body: it can be hundreds of KB of base64. `check`
@@ -1686,6 +1697,19 @@ fn cmd_contract_new(
         (Some(path), None) => {
             let bytes = std::fs::read(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let exports = contract::wasm::check_module(&bytes)?;
+            let missing: Vec<&str> = ["memory", "alloc", "evaluate"]
+                .into_iter()
+                .filter(|required| !exports.iter().any(|name| name == required))
+                .collect();
+            if missing.is_empty() {
+                println!("module parses; exports memory/alloc/evaluate");
+            } else {
+                println!(
+                    "warning: module exports no {} - evaluation will fail closed until it does",
+                    missing.join(", ")
+                );
+            }
             Some(base64::engine::general_purpose::STANDARD.encode(&bytes))
         }
         (None, Some(b64)) => Some(b64),
@@ -4412,6 +4436,23 @@ mod tests {
             .decode(spec["wasm"].as_str().unwrap())
             .unwrap();
         assert_eq!(decoded, b" asm   ");
+
+        // A module that does not parse fails before the signing steps.
+        let bad = d.join("bad.wasm");
+        std::fs::write(&bad, b"not wasm").unwrap();
+        let err = run(cli(
+            d,
+            Commands::Contract {
+                cmd: ContractCmd::New {
+                    admits: "x".into(),
+                    wasm_file: Some(bad),
+                    wasm_b64: None,
+                    out: None,
+                },
+            },
+        ))
+        .unwrap_err();
+        assert!(err.contains("does not parse"), "typo caught early: {err}");
     }
 }
 
