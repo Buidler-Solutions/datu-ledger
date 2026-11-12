@@ -266,6 +266,10 @@ export default function App() {
   const [registrarEnvelope, setRegistrarEnvelope] = useState(null);
   const [deferRelease, setDeferRelease] = useState(false);
   const [releaseSecrets, setReleaseSecrets] = useState(null);
+  const [releaseDoc, setReleaseDoc] = useState('');
+  const [releaseSecretsText, setReleaseSecretsText] = useState('');
+  const [releaseField, setReleaseField] = useState('');
+  const [releaseShare, setReleaseShare] = useState(null);
 
   const [holderIn, setHolderIn] = useState('');
   const [holderEnvelope, setHolderEnvelope] = useState(null);
@@ -680,6 +684,39 @@ export default function App() {
   }
 
   // ---- document contracts: pending agreements (conditions outstanding) ----
+  // ---- registry: release a deferred field ----
+  async function makeRelease() {
+    setBusy(true);
+    try {
+      if (!releaseDoc.trim()) throw new Error('paste or load the document that carries the deferred field');
+      if (!releaseSecretsText.trim()) throw new Error('paste the release-secrets file from the seal step');
+      const document = JSON.parse(releaseDoc);
+      let secrets;
+      try {
+        secrets = JSON.parse(releaseSecretsText);
+      } catch {
+        throw new Error('release secrets must be JSON');
+      }
+      if (!secrets.fields || typeof secrets.fields !== 'object') {
+        throw new Error('release secrets carry no "fields" map');
+      }
+      const field = releaseField.trim() || Object.keys(secrets.fields)[0] || '';
+      if (!field) throw new Error('the secrets file names no fields');
+      const res = await walletSign({
+        bridgeUrl,
+        path: '/v1/wallet/release-deferred',
+        summary: `Release '${field}': publish the key half sealed to the nominated holder (no signature needed)`,
+        body: { document, field, release: secrets },
+      });
+      setReleaseShare(res.body.share);
+      say(`release key half for '${field}' generated - attach it to the release entry`, 'ok');
+    } catch (e) {
+      say(e.message, 'err');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function listContractAnchors() {
     setContractView(null);
     try {
@@ -1074,6 +1111,57 @@ export default function App() {
               </div>
             )}
           </div>
+          <div className="card">
+            <h2>Release a deferred field</h2>
+            <p className="muted small">
+              A title whose fields were sealed for deferred delivery opens only when a release
+              publishes the key half. Load the document and the release-secrets file; the share
+              object goes into the release entry, sealed to the nominated holder.
+            </p>
+            <label>
+              Document carrying the deferred field
+              <textarea
+                rows={4}
+                value={releaseDoc}
+                onChange={(e) => setReleaseDoc(e.target.value)}
+                placeholder='{"cert_id":"...","owner_name":{"sealed":"datu-sealed-deferred-v2", ...}}'
+              />
+            </label>
+            <FileLoader label="...or load the document" onText={setReleaseDoc} />
+            <label>
+              Release secrets (written by the seal step)
+              <textarea
+                rows={4}
+                value={releaseSecretsText}
+                onChange={(e) => setReleaseSecretsText(e.target.value)}
+                placeholder='{"version":1,"fields":{"owner_name":"<hex>"}}'
+              />
+            </label>
+            <label>
+              Field to release
+              <input
+                value={releaseField}
+                onChange={(e) => setReleaseField(e.target.value)}
+                placeholder="owner_name (defaults to the first field in the secrets)"
+              />
+            </label>
+            <button onClick={makeRelease} disabled={busy}>
+              Generate the release key half
+            </button>
+            {releaseShare && (
+              <>
+                <p className="ok small">release half sealed to the nominated holder</p>
+                <button
+                  onClick={() =>
+                    downloadJson(`${releaseField || 'field'}-release-share.json`, releaseShare)
+                  }
+                >
+                  Download the share object
+                </button>
+              </>
+            )}
+          </div>
+
           <div className="card">
             <h2>Contract status · pending agreements</h2>
             <p className="muted small">

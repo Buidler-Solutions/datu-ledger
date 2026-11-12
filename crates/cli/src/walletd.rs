@@ -31,7 +31,13 @@
 //!   POST /v1/wallet/create      {name, passphrase}
 //!   POST /v1/wallet/party-sign  {name, passphrase, role, document, kind?}
 //!   POST /v1/wallet/seal        {name, passphrase, document, fields, to[], to_fields[]}
+//!   POST /v1/wallet/seal-deferred    {name, passphrase, document, fields, to/to_fields}
+//!   POST /v1/wallet/release-deferred {document, field, release}
 //!   POST /v1/wallet/open        {name, passphrase, document}
+//!   POST /v1/wallet/deferred-open (alias: open-deferred)
+//!                               {name, passphrase, document, field, release}
+//!   POST /v1/wallet/export      {name, passphrase, backup_passphrase}
+//!   POST /v1/wallet/import      {input, backup_passphrase, rename?}
 //!   POST /v1/wallet/verify-entry{entry}
 //!   POST /v1/wallet/sign-entry  {name, passphrase, request}
 
@@ -332,6 +338,36 @@ fn handle_inner(
                 }),
             )
         }
+        // Deferred delivery, issuer side: turn a release secret into the
+        // key half a release entry carries. Public keys only - releasing is
+        // a ledger act, not a seal-key act. Same action as the desktop FFI.
+        ("POST", "/v1/wallet/release-deferred") => {
+            let body_json = parse_body(&body)?;
+            let field = str_field(&body_json, "field")?;
+            let document = body_json.get("document").cloned().ok_or("missing 'document'")?;
+            let field_value = document
+                .get(field.as_str())
+                .cloned()
+                .ok_or_else(|| format!("document has no field '{field}'"))?;
+            let deferred: datu_wallet::DeferredField = serde_json::from_value(field_value)
+                .map_err(|e| format!("'{field}' is not a deferred-delivery field: {e}"))?;
+            let release = body_json.get("release").cloned().ok_or("missing 'release'")?;
+            let secret_hex = release
+                .get("fields")
+                .and_then(|fields| fields.get(&field))
+                .and_then(|secret| secret.as_str())
+                .ok_or_else(|| format!("release secrets have no entry for '{field}'"))?;
+            let secret: [u8; 32] = hex::decode(secret_hex)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or("release secret is not a 32-byte hex value")?;
+            let share = datu_wallet::attach_release(&deferred, &secret)?;
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({ "ok": true, "field": field, "share": share }),
+            )
+        }
         ("POST", "/v1/wallet/open") => {
             let body_json = parse_body(&body)?;
             let name = str_field(&body_json, "name")?;
@@ -365,7 +401,7 @@ fn handle_inner(
         // Deferred delivery: open a field whose release share the release
         // entry has published. The holder - and only the holder - recomposes
         // the content key; the BLAKE3 commitment checks the reveal.
-        ("POST", "/v1/wallet/deferred-open") => {
+        ("POST", "/v1/wallet/deferred-open") | ("POST", "/v1/wallet/open-deferred") => {
             let body_json = parse_body(&body)?;
             let name = str_field(&body_json, "name")?;
             let passphrase = str_field(&body_json, "passphrase")?;
@@ -855,16 +891,24 @@ mod tests {
         assert_eq!(sealed["document"]["owner_name"]["sealed"], "datu-sealed-deferred-v2");
         assert!(sealed["releases"]["owner_name"].as_str().is_some());
 
-        // The issuer-side act (CLI/FFI) turns the release secret into the
-        // key half the release entry carries; the bridge only opens.
-        let deferred: datu_wallet::DeferredField =
-            serde_json::from_value(sealed["document"]["owner_name"].clone()).unwrap();
-        let secret: [u8; 32] = hex::decode(sealed["releases"]["owner_name"].as_str().unwrap())
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let share = datu_wallet::attach_release(&deferred, &secret).unwrap();
-        let release = serde_json::to_value(&share).unwrap();
+        // The issuer-side release: the bridge turns the secret into the key
+        // half a release entry carries (public keys only, no passphrase).
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/release-deferred",
+            Some(&token),
+            &json!({
+                "document": sealed["document"],
+                "field": "owner_name",
+                "release": {"version": 1, "fields": sealed["releases"]},
+            })
+            .to_string(),
+        );
+        assert!(status.contains("200"), "release-deferred failed: {status} {body}");
+        let released: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(released["share"]["sealed"], "datu-share-v2");
+        let release = released["share"].clone();
 
         let (status, body) = http(
             port,
@@ -883,10 +927,11 @@ mod tests {
         assert!(status.contains("400"), "non-holder refused: {status} {body}");
         assert!(body.contains("another holder"), "{body}");
 
+        // The FFI action name works as a route alias.
         let (status, body) = http(
             port,
             "POST",
-            "/v1/wallet/deferred-open",
+            "/v1/wallet/open-deferred",
             Some(&token),
             &json!({
                 "name": "holder",

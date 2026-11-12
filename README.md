@@ -828,7 +828,10 @@ anchors, no accounts:
   release* option, which hands the registrar a release-secrets download
   instead of readable ciphertext), gets the registrar's consent signature,
   collects the landowner's consent, and submits the signed entry to a
-  validator node.
+  validator node. The registry workspace also carries the release step:
+  load a deferred document plus its release-secrets file and the dApp
+  produces the share object a release entry publishes (no signature needed -
+  releasing is a ledger act), closing the deferred loop without the CLI.
 - **`web/wallet-extension`** - the citizen's wallet as a **Chrome side panel**
   (MetaMask-style: click the toolbar icon, the panel slides in on the right).
   It is **namespace-agnostic**: land titles, driver licences, procurement
@@ -858,15 +861,23 @@ Both talk to **`datu wallet serve`**, a local bridge (default
 `127.0.0.1:7482`) that owns the keystore and performs all signing and sealing:
 
 ```
-GET  /v1/wallet/identities     public identities (ed + seal keys)
-POST /v1/wallet/party-sign     {name, passphrase, role, document, kind?}
-POST /v1/wallet/seal           {name, passphrase, document, fields, to[], to_fields[]}
-POST /v1/wallet/seal-deferred  {name, passphrase, document, fields, to/to_fields}
-POST /v1/wallet/open           {name, passphrase, document}
-POST /v1/wallet/deferred-open  {name, passphrase, document, field, release}
-POST /v1/wallet/verify-entry   {entry}  → verify both hybrid signatures locally
-POST /v1/wallet/sign-entry     {name, passphrase, request}
+POST /v1/wallet/create             {name, passphrase}
+GET  /v1/wallet/identities         public identities (ed + seal keys)
+POST /v1/wallet/party-sign         {name, passphrase, role, document, kind?}
+POST /v1/wallet/seal               {name, passphrase, document, fields, to[], to_fields[]}
+POST /v1/wallet/seal-deferred      {name, passphrase, document, fields, to/to_fields}
+POST /v1/wallet/release-deferred   {document, field, release}   → the share object
+POST /v1/wallet/open               {name, passphrase, document}
+POST /v1/wallet/deferred-open      {name, passphrase, document, field, release}
+                                   (alias: open-deferred)
+POST /v1/wallet/export             {name, passphrase, backup_passphrase}
+POST /v1/wallet/import             {input, backup_passphrase, rename?}
+POST /v1/wallet/verify-entry       {entry}  → verify both hybrid signatures locally
+POST /v1/wallet/sign-entry         {name, passphrase, request}
 ```
+
+The route names and response shapes mirror the desktop FFI's action grammar,
+so a front end can swap transports without changing screens.
 
 The wallet reads from **any** node - a validator or a free observer - and
 verifies each record itself with `verify-entry`, so the serving node is never
