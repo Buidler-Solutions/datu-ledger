@@ -14,6 +14,8 @@ jobs:
       # Pinned so a fresh stable release cannot turn CI red through a new
       # lint alone; bump deliberately, after running the gates locally.
       - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: format
         run: cargo fmt --check
