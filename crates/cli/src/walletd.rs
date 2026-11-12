@@ -1,4 +1,5 @@
-//! `datu wallet serve`: the local wallet bridge (production mode).
+//! `datu signet serve`: the local Signet Personal Vault bridge (production
+//! mode). The old spelling `datu wallet serve` still works as an alias.
 //!
 //! A browser wallet extension and a dApp cannot safely hold ML-DSA-65 keys
 //! in JavaScript, and they should not try: this process owns the keystore,
@@ -615,8 +616,14 @@ fn read_request(
 }
 
 fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) -> Result<(), String> {
+    // Access-Control-Allow-Private-Network: modern Chrome (Private Network
+    // Access / Local Network Access) sends an OPTIONS preflight carrying
+    // `Access-Control-Request-Private-Network: true` before letting an
+    // extension page fetch http://127.0.0.1 - without this header on the
+    // preflight (and the actual responses) the wallet extension sees every
+    // request fail as "no wallet service found".
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, Access-Control-Request-Private-Network\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Private-Network: true\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream

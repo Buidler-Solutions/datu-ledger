@@ -93,8 +93,9 @@ enum Commands {
         #[arg(long = "submit-per-min", default_value_t = 60)]
         submit_per_min: u32,
     },
-    /// Keychain wallet: identities, signing, field-level encryption
-    Wallet {
+    /// Signet Personal Vault: identities, signing, field-level encryption
+    #[command(alias = "wallet")]
+    Signet {
         #[command(subcommand)]
         cmd: WalletCmd,
     },
@@ -490,8 +491,8 @@ enum WalletCmd {
         #[arg(long)]
         rename: Option<String>,
     },
-    /// Run the local wallet bridge: a browser wallet / dApp talks to this
-    /// process instead of holding keys in JS (paired with a token, loopback only)
+    /// Run the local Signet service: a browser Signet extension / dApp talks
+    /// to this process instead of holding keys in JS (paired with a token, loopback only)
     Serve {
         #[arg(long, default_value = "127.0.0.1:7482")]
         addr: String,
@@ -2879,7 +2880,7 @@ fn run(cli: Cli) -> Result<(), String> {
             effective_policy(&cli.data_dir, *read_only, false)?,
             *submit_per_min as usize,
         ),
-        Commands::Wallet { cmd } => match cmd {
+        Commands::Signet { cmd } => match cmd {
             WalletCmd::Create {
                 name,
                 passphrase,
