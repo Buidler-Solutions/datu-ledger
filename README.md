@@ -283,7 +283,9 @@ DATU_WALLET_PASS=... datu wallet open --name ministry --input sealed.json
 `datu serve --addr 127.0.0.1:7474` exposes a std-only HTTP API plus a dark-theme
 ledger explorer at `/` (entries, search, witnesses, disputes - read-only
 mirror-node view). The entry view surfaces the ledger facts alongside the
-record: fresh witness coverage with claimed times, and any declared
+record: fresh witness coverage, verified locally (Merkle path against the
+checkpoint's signed root, Ed25519 via WebCrypto - the same verifier the
+panel uses, served from `/blake3.js` and `/coverage.js`), and any declared
 contract's pending/ready verdict with its reasons:
 
 - `GET /v1/status` - node counters, the enforced policy, and (when a manifest
@@ -856,7 +858,10 @@ anchors, no accounts:
   with an *Open deferred* action that takes the release object and opens
   the field in place through the bridge, and every record gets a
   *Witnessed* view that lists the fresh witness checkpoints covering it
-  (signer, claimed time, served proof), backed by `/v1/coverage`.
+  (signer, claimed time, served proof), backed by `/v1/coverage` - and
+  verifies them locally: the panel re-computes the Merkle path with its own
+  BLAKE3 and re-checks the checkpoint's Ed25519 signature via WebCrypto, so
+  the node only relays witnesses, it cannot misattribute one.
 - **One wallet per person, several identities per wallet** for context
   (`alice-home`, `alice-business`). The panel keeps a **wallet profile list**
   (label + bridge URL) and switches between local bridges; pairing tokens

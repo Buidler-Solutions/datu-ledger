@@ -254,6 +254,14 @@ fn handle_inner(
 
     match (method.as_str(), route.as_str()) {
         ("GET", "/") => respond(stream, "200 OK", "text/html; charset=utf-8", EXPLORER_HTML),
+        // Locally-verifying pages share one implementation of BLAKE3 and the
+        // coverage-path check with the wallet extension.
+        ("GET", "/blake3.js") => {
+            respond(stream, "200 OK", "application/javascript", BLAKE3_JS)
+        }
+        ("GET", "/coverage.js") => {
+            respond(stream, "200 OK", "application/javascript", COVERAGE_JS)
+        }
         ("GET", "/v1/status") => {
             let report = store.verify_all().map_err(|e| e.to_string())?;
             let policy = match store.policy() {
@@ -494,11 +502,23 @@ fn handle_inner(
                     Ok(proof) => {
                         let checkpoint_b64 = B64
                             .encode(borsh::to_vec(&cp).map_err(|e| e.to_string())?);
+                        // The pieces a browser needs to verify locally: the
+                        // exact signed body bytes (Ed25519 via WebCrypto), the
+                        // root and set size the Merkle path must reach, and the
+                        // signature over those bytes. ML-DSA-65 stays a CLI
+                        // check (no browser verifier).
+                        let body_b64 = B64.encode(
+                            Checkpoint::body_bytes(&cp.body).map_err(|e| e.to_string())?,
+                        );
                         witnesses.push(serde_json::json!({
                             "signer": cp.body.signer,
                             "checkpoint_id": hex::encode(cp.id().map_err(|e| e.to_string())?),
                             "height": cp.body.height,
                             "timestamp_ms": cp.body.timestamp_ms,
+                            "entries_count": cp.body.entries_count,
+                            "entry_ids_root": hex::encode(cp.body.entry_ids_root),
+                            "signature": hex::encode(cp.signature),
+                            "body_b64": body_b64,
                             "checkpoint_b64": checkpoint_b64,
                             "proof": proof,
                         }));
@@ -899,6 +919,9 @@ fn respond_json_retry(
         .map_err(|e| e.to_string())
 }
 
+const BLAKE3_JS: &str = include_str!("../../../web/wallet-extension/blake3.js");
+const COVERAGE_JS: &str = include_str!("../../../web/wallet-extension/coverage.js");
+
 const EXPLORER_HTML: &str = r##"<!doctype html>
 <html><head><meta charset="utf-8"><title>DATU Ledger Explorer</title>
 <style>
@@ -921,6 +944,8 @@ const EXPLORER_HTML: &str = r##"<!doctype html>
 <div id="governance"></div>
 <table id="rows"><tr><th>id</th><th>author</th><th>namespace</th><th>seq</th><th>payload</th></tr></table>
 <div id="detail"></div>
+<script src="/blake3.js"></script>
+<script src="/coverage.js"></script>
 <script>
 async function j(u){const r=await fetch(u);return r.json()}
 function short(h){return h?h.slice(0,8)+'…':''}
@@ -941,7 +966,17 @@ async function show(id){let e=await j('/v1/entry/'+id);if(e.error)e=await j('/v1
  try{
   const c=await j('/v1/coverage/'+id);
   if(c.witnesses&&c.witnesses.length){
-   facts.push('witnessed by '+c.witnesses.length+' node(s): '+c.witnesses.map(w=>short(w.signer)+' as of '+new Date(w.timestamp_ms).toISOString()+' (height '+w.height+')').join('; '));
+   facts.push('witnessed by '+c.witnesses.length+' node(s):');
+   for(const w of c.witnesses){
+    let verdict='NOT CHECKED';
+    try{
+     const check=await datuCoverage.verifyWitness(id,w);
+     verdict=check.ok
+      ?(check.signature==='ok'?'verified locally (merkle path + Ed25519)':'path verified locally; signature checked by the node (no WebCrypto Ed25519 here)')
+      :('NOT VERIFIED: '+check.reason);
+    }catch(e){verdict='NOT VERIFIED: '+e.message}
+    facts.push('  '+short(w.signer)+' as of '+new Date(w.timestamp_ms).toISOString()+' (height '+w.height+') - '+verdict);
+   }
   }else{
    facts.push('witness coverage: none fresh on this node yet');
   }
@@ -1187,6 +1222,9 @@ mod tests {
         assert!(EXPLORER_HTML.contains("/v1/coverage/"));
         assert!(EXPLORER_HTML.contains("/v1/contract/status/"));
         assert!(EXPLORER_HTML.contains("/v1/checkpoints"));
+        // The entry view verifies served witnesses locally, not just display.
+        assert!(EXPLORER_HTML.contains("/blake3.js"));
+        assert!(EXPLORER_HTML.contains("datuCoverage.verifyWitness"));
     }
 
     /// The coverage-proof endpoint serves the same offline-verifiable
@@ -1245,6 +1283,11 @@ mod tests {
         assert_eq!(witnesses.len(), 1);
         let witness = &witnesses[0];
         assert_eq!(witness["timestamp_ms"].as_u64(), Some(777));
+        // The locally-verifiable fields a browser needs.
+        assert_eq!(witness["entries_count"], witness["proof"]["count"]);
+        assert_eq!(witness["entry_ids_root"].as_str().map(str::len), Some(64));
+        assert!(witness["body_b64"].as_str().is_some_and(|b| !b.is_empty()));
+        assert_eq!(witness["signature"].as_str().map(str::len), Some(128));
 
         // Verify the served artifact offline, exactly like a browser would:
         // decode the checkpoint, verify both signatures, walk the path.
@@ -1268,6 +1311,14 @@ mod tests {
             "",
         );
         assert!(status.contains("200"), "{status} {body}");
+
+        // The browser verifiers are served by the node itself.
+        let (status, js) = http(port, "GET", "/blake3.js", "");
+        assert!(status.contains("200"), "{status}");
+        assert!(js.contains("datuBlake3"), "blake3 served");
+        let (status, js) = http(port, "GET", "/coverage.js", "");
+        assert!(status.contains("200"), "{status}");
+        assert!(js.contains("datuCoverage"), "coverage verifier served");
 
         // An id no fresh witness covered is explained, not fabricated.
         let (status, body) = http(

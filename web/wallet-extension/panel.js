@@ -518,12 +518,24 @@ async function showWitnesses(index) {
     } else {
       lines.push(`witnessed by ${witnesses.length} node(s):`);
       for (const w of witnesses) {
+        let verdict = 'NOT CHECKED';
+        try {
+          const check = await window.datuCoverage.verifyWitness(rec.id, w);
+          verdict = check.ok
+            ? check.signature === 'ok'
+              ? 'verified locally (merkle path + Ed25519)'
+              : 'path verified locally; signature checked by your node (no WebCrypto Ed25519 here)'
+            : `NOT VERIFIED: ${check.reason}`;
+        } catch (e) {
+          verdict = `NOT VERIFIED: ${e.message}`;
+        }
         lines.push(
-          `  ${String(w.signer).slice(0, 16)}…  as of ${new Date(w.timestamp_ms).toISOString()}  (checkpoint height ${w.height})`,
+          `  ${String(w.signer).slice(0, 16)}…  as of ${new Date(w.timestamp_ms).toISOString()}  (checkpoint height ${w.height})
+    ${verdict}`,
         );
       }
       lines.push('');
-      lines.push('Each witness signed a Merkle root over its entry id set; the served proof pins this entry into that root and verifies with zero other context.');
+      lines.push('The Merkle path and the checkpoint signature are re-checked in this panel; the node only relays witnesses.');
     }
     for (const behind of data.stale || []) {
       lines.push(`  behind: ${String(behind.signer).slice(0, 16)}… (${behind.reason})`);

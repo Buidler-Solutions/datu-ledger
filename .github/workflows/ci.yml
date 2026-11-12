@@ -29,6 +29,8 @@ jobs:
           node --check web/wallet-extension/panel.js
           node --check web/wallet-extension/background.js
           node --check web/wallet-extension/inject.js
+      - name: extension pure-logic tests
+        run: node --test web/wallet-extension/test/blake3.test.mjs web/wallet-extension/test/coverage.test.mjs
       - name: registrar build
         working-directory: web/registrar
         run: npm ci && npm run build
