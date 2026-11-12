@@ -31,6 +31,67 @@ quantum-resistant accountability ledger: a distributed system for
 | Writer gate | Local policy per node: gated namespaces admit only trust roots, explicit writers, or authors attested by a trust root (`--min-cosigners` optional) |
 | Citizen consent | Gated documents can require party signatures (`--require-role holder`): the affected person's own hybrid signature over the exact document bytes |
 
+## Why a DAG, and why no consensus
+
+A typical blockchain and DATU answer different questions. A blockchain is a
+**settlement machine**: many writers compete for one canonical chain, so the
+network must continuously run consensus - agree on which block sits at each
+height, in which order transactions count, and which of two competing forks is
+the real one. Consensus is the price of claiming a single, totally ordered
+history.
+
+DATU is an **accountability machine**: a provable record of who said, signed,
+witnessed, or agreed to what. An entry's validity never depends on its order
+relative to other entries, so there is nothing to vote on. DATU needs
+**verification, not consensus** - and that difference is structural, not a
+missing feature:
+
+1. **Every author is their own chain.** Ordering is per-author and
+   deterministic: `seq` + `prev` + a database-level `UNIQUE(author, seq)`
+   constraint. There is no shared sequence space, no mempool, no block
+   production - nothing to compete over, so nothing to agree on.
+2. **Validity is a pure local function.** Each node independently verifies
+   both hybrid signatures, the feed chain, and its admission policy. Two
+   honest nodes handed the same entries always reach the same verdict; that
+   is determinism, not agreement-seeking.
+3. **Sync converges on a set, not an order.** Merging DAG histories is set
+   union: commutative, order-independent, resumable, and possible over any
+   transport. No reorgs, no fork choice, no finality cliff.
+4. **Disagreement is evidence, not a fork.** When one author signs two
+   different histories at the same `seq`, no vote picks a winner: both sides
+   are preserved immutably and surfaced at read time. Misbehavior is made
+   cryptographically provable instead of adjudicated by majority.
+
+### What replaces consensus's jobs
+
+| Consensus job in a blockchain | DATU equivalent |
+|---|---|
+| Finality (block depth) | **Checkpoint coverage**: independent witnesses sign Merkle roots over all entry ids; an entry is progressively settled as more independent checkpoints cover it |
+| Rewrite prevention (majority cost) | Append-only stores (immutability triggers), hybrid signatures, and content-addressed ids: rewriting an entry breaks its id, both signatures, and orphans the rest of the feed |
+| Misbehavior handling (slashing) | **Fork proof**: contradictory checkpoints by the same signer, or a spliced checkpoint chain, are evidence packages anyone can re-verify with zero other context |
+| Validator admission (stake) | Local policy plus on-ledger governance manifests with rotation and revocation: the current authority authorizes the next |
+
+### The honest trade-off
+
+Skipping consensus buys tokenless, permissionless, offline-capable operation,
+and it costs three things, stated plainly:
+
+- **No total global order.** There is no answer to "which of two concurrent
+  entries by different authors happened first" unless a causal `ref` or a
+  witness checkpoint relates them. Timestamps are author claims; provable
+  ordering exists only along causal paths.
+- **Gradual finality.** Settlement is the widening coverage of independent
+  checkpoints, not an instant quorum event.
+- **No shared executable state.** DATU is a records and accountability
+  ledger, not a smart-contract platform: there is no single agreed world
+  state to run logic against.
+
+The closest mental model is **Git plus notarization**, not Bitcoin: Git also
+has no consensus, and nobody trusts it less for it. DATU adds per-entry
+hybrid signatures, admission policy, cross-author causal links, and witness
+checkpoints on top. The governing principle throughout: **records may be
+corrected, but history is never silently rewritten.**
+
 ## Protocol
 
 ### Entry (the DAG node)
