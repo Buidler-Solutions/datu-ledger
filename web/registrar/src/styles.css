@@ -69,3 +69,20 @@ code { color: #79c0ff; }
 .navtabs .tab { background: #21262d; border-color: #30363d; color: #c9d1d9; margin-top: 0; }
 .navtabs .tab.active { background: #238636; border-color: #2ea043; color: #fff; }
 .login { border-color: #2ea043; }
+.roles { display: grid; gap: .5rem; margin: .6rem 0 .9rem; }
+.role {
+  display: flex; flex-direction: column; gap: .25rem; text-align: left;
+  background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+  border-radius: 8px; padding: .6rem .8rem;
+}
+.role.active { background: #1f6feb33; border-color: #2f81f7; }
+.role b { color: #79c0ff; }
+.rolebar {
+  display: flex; justify-content: space-between; align-items: center; gap: .8rem; flex-wrap: wrap;
+  background: #161b22; border: 1px solid #2ea043; border-radius: 8px;
+  padding: .55rem .9rem; margin-top: 1rem; font-size: .8rem;
+}
+.rolebar-actions { display: flex; gap: .4rem; }
+.rolebar-actions button { margin-top: 0; }
+.card.slim { padding: .5rem .9rem .6rem; }
+.card.slim summary { cursor: pointer; }

@@ -6,17 +6,53 @@ const NS = 'gov.titles.application';
 const KIND = 'land.title.application';
 const CLAIM_KIND = 'land.ownership.registration';
 
-const defaultName = (page) =>
-  page === 'register'
-    ? 'amina'
-    : page === 'registrar'
-      ? 'registrar'
-      : page === 'landowner'
-        ? 'amina'
-        : 'registry-signer';
+// ---- roles: one wallet, one workspace ----
+// The first login registers the wallet's key under the chosen role; every
+// later visit restores the session and lands straight in that workspace.
+const ROLES = {
+  landowner: {
+    label: 'Landowner',
+    page: 'landowner',
+    defaultName: 'amina',
+    hint: 'Register an ownership claim, then consent as the holder when the registrar certifies the title.',
+  },
+  registrar: {
+    label: 'Registrar',
+    page: 'registrar',
+    defaultName: 'registrar',
+    hint: 'Verify landowner claims, seal the personal fields, and certify the title application.',
+  },
+  registry: {
+    label: 'Registry signer',
+    page: 'registry',
+    defaultName: 'registry-signer',
+    hint: 'Verify the fully signed envelope and record the title into the DATU ledger.',
+  },
+};
+const ROLE_PAGES = Object.values(ROLES).map((r) => r.page);
+const roleForPage = (p) => Object.entries(ROLES).find(([, r]) => r.page === p)?.[0] || null;
+
+const SESSION_KEY = 'datu.landreg.session';
+const ROLES_KEY = 'datu.landreg.roles';
+const loadStored = (key, fallback) => {
+  try {
+    return JSON.parse(localStorage.getItem(key)) ?? fallback;
+  } catch {
+    return fallback;
+  }
+};
+const saveSession = (s) => localStorage.setItem(SESSION_KEY, JSON.stringify(s));
+const clearSession = () => localStorage.removeItem(SESSION_KEY);
+const walletRoles = () => loadStored(ROLES_KEY, {});
+const roleOfKey = (ed) => walletRoles()[ed] || null;
+const rememberRole = (ed, role) => {
+  const map = walletRoles();
+  map[ed] = role;
+  localStorage.setItem(ROLES_KEY, JSON.stringify(map));
+};
 
 function useHashPage() {
-  const read = () => window.location.hash.replace(/^#\/?/, '') || 'register';
+  const read = () => window.location.hash.replace(/^#\/?/, '') || 'welcome';
   const [page, setPage] = useState(read);
   useEffect(() => {
     const on = () => setPage(read());
@@ -34,17 +70,6 @@ function randomHex(bytes = 16) {
   crypto.getRandomValues(a);
   return Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
 }
-
-const sessionKey = (page) => `datu.session.${page}`;
-const loadSession = (page) => {
-  try {
-    return JSON.parse(localStorage.getItem(sessionKey(page)) || 'null');
-  } catch {
-    return null;
-  }
-};
-const saveSession = (page, s) => localStorage.setItem(sessionKey(page), JSON.stringify(s));
-const clearSession = (page) => localStorage.removeItem(sessionKey(page));
 
 function downloadJson(name, data) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -85,84 +110,129 @@ function parseEnvelope(text) {
 
 const partyOf = (doc, role) => (doc.parties || []).find((p) => p.role === role);
 
-function WalletLogin({ page, bridgeUrl, nodeUrl, session, onLogin, onLogout, say }) {
-  const [name, setName] = useState(defaultName(page));
-  const [busy, setBusy] = useState(false);
+const loginParty = (res) =>
+  (((res.body || {}).document || {}).parties || []).find((p) => p.role === 'login');
+
+// ---- landing page: not logged in (or wallet not yet registered here) ----
+function Welcome({ wallet, identities, bridgeUrl, nodeUrl, nodeStatus, busy, onLogin, onRefresh, say }) {
+  const [role, setRole] = useState('landowner');
+  const [name, setName] = useState(ROLES.landowner.defaultName);
+  const registered = Object.entries(walletRoles());
 
   useEffect(() => {
-    setName(defaultName(page));
-  }, [page]);
-
-  if (session) {
-    return (
-      <div className="card login">
-        <p className="ok small">
-          Signed in through the wallet as <b>{session.name}</b> · {session.ed.slice(0, 16)}…
-        </p>
-        <p className="muted small">
-          challenge {session.challenge.nonce.slice(0, 12)}… signed {session.at} at the wallet ·
-          signature {session.sig.slice(0, 24)}…
-        </p>
-        <button className="ghost" onClick={onLogout}>
-          Log out
-        </button>
-      </div>
-    );
-  }
+    setName(ROLES[role].defaultName);
+  }, [role]);
 
   async function login() {
-    setBusy(true);
-    try {
-      if (!(await walletPing())) {
-        throw new Error(
-          'wallet extension not detected - load it from chrome://extensions and reload this page'
-        );
-      }
-      const challenge = { page, node: nodeUrl, nonce: randomHex(16), ts: Date.now() };
-      const res = await walletSign({
-        bridgeUrl,
-        path: '/v1/wallet/party-sign',
-        summary: `Login - page "${page}" signs a one-time challenge as ${name.trim()}`,
-        body: {
-          name: name.trim(),
-          role: 'login',
-          kind: 'datu.login',
-          document: challenge,
-        },
-      });
-      const party = ((res.body || {}).parties || []).find((p) => p.role === 'login');
-      if (!party) throw new Error('wallet returned no login signature');
-      onLogin({
-        name: name.trim(),
-        ed: party.key,
-        sig: party.signature || '',
-        at: new Date().toLocaleTimeString(),
-        challenge,
-      });
-      say(`${page} logged in via the wallet as ${name.trim()} (${party.key.slice(0, 16)}…)`, 'ok');
-    } catch (e) {
-      say(e.message, 'err');
-    } finally {
-      setBusy(false);
-    }
+    onLogin(role, name.trim());
   }
 
   return (
-    <div className="card login">
-      <h2>Login through the wallet</h2>
-      <p className="muted small">
-        No passphrase here - the wallet signs a one-time challenge and asks you to confirm it in the
-        side panel. The dApp only receives the signed challenge.
-      </p>
-      <div className="row">
-        <label>
-          Identity on the bridge
-          <input value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <button onClick={login} disabled={busy} style={{ marginTop: '1.4rem' }}>
-          {busy ? 'signing challenge…' : 'Login with wallet'}
+    <>
+      <section className="grid hero">
+        <div className="card">
+          <h2>What this registry does</h2>
+          <p className="muted small">
+            Ownership registration → registrar certification → landowner consent → ledger record. The
+            envelope travels by file; every signature is confirmed in the browser Signet extension.
+            Nothing is trusted - each party signs with its own keys.
+          </p>
+          <p className={wallet.detected ? 'ok small' : 'err small'}>
+            Signet extension:{' '}
+            {wallet.detected
+              ? `active · ${wallet.wallets.length} wallet(s) paired`
+              : 'not detected - load/reload it in chrome://extensions, then reload this page'}
+          </p>
+          {nodeStatus && (
+            <p className="muted small">
+              registry node: mode <b>{nodeStatus.policy?.mode}</b> · {nodeStatus.entries} entries ·{' '}
+              {identities.length} identities on this bridge
+            </p>
+          )}
+        </div>
+
+        <div className="card login">
+          <h2>Log in with your Signet</h2>
+          <p className="muted small">
+            Pick the role this Signet acts as. Your vault signs a one-time challenge - the passphrase
+            never leaves it. First login registers the vault's key under this role; next visits go
+            straight to its workspace.
+          </p>
+          <div className="roles">
+            {Object.entries(ROLES).map(([key, r]) => (
+              <button
+                key={key}
+                className={role === key ? 'role active' : 'role'}
+                onClick={() => setRole(key)}
+              >
+                <b>{r.label}</b>
+                <span className="muted small">{r.hint}</span>
+              </button>
+            ))}
+          </div>
+          <div className="row">
+            <label>
+              Identity on the bridge
+              <input value={name} onChange={(e) => setName(e.target.value)} />
+            </label>
+            <button onClick={login} disabled={busy || !wallet.detected} style={{ marginTop: '1.4rem' }}>
+              {busy ? 'signing challenge…' : `Login as ${ROLES[role].label}`}
+            </button>
+          </div>
+          {!wallet.detected && (
+            <p className="err small">the Signet extension is not answering - see the Services card below</p>
+          )}
+        </div>
+      </section>
+
+      {registered.length > 0 && (
+        <section className="card">
+          <h2>Signets registered on this browser</h2>
+          <ul className="ids">
+            {registered.map(([ed, r]) => (
+              <li key={ed}>
+                <span>
+                  <b>{ROLES[r]?.label || r}</b> · {ed.slice(0, 24)}…
+                </span>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setRole(r);
+                    say(`role set to ${ROLES[r]?.label || r} - now log in with that Signet`);
+                  }}
+                >
+                  use this role
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="muted small">
+            A Signet already has a role when its key is listed above - after login the registry routes
+            it to its own workspace automatically.
+          </p>
+        </section>
+      )}
+    </>
+  );
+}
+
+// ---- signed-in strip shown on every workspace ----
+function RoleBar({ session, onLogout, onSwitchRole }) {
+  const r = ROLES[session.role] || { label: session.role };
+  return (
+    <div className="rolebar">
+      <span>
+        <b>{r.label} workspace</b> · signed in as <b>{session.name}</b> · key{' '}
+        <code>{session.ed.slice(0, 16)}…</code> · since {session.at}
+      </span>
+      <span className="rolebar-actions">
+        <button className="ghost" onClick={onSwitchRole}>
+          Switch role
         </button>
-      </div>
+        <button className="ghost" onClick={onLogout}>
+          Log out
+        </button>
+      </span>
     </div>
   );
 }
@@ -171,15 +241,15 @@ export default function App() {
   const [page, go] = useHashPage();
 
   const [nodeUrl, setNodeUrl] = useState('http://127.0.0.1:7474');
-  const [bridgeUrl, setBridgeUrl] = useState('http://127.0.0.1:7482');
+  const [bridgeUrl, setBridgeUrl] = useState('http://127.0.0.1:7488');
   const [identities, setIdentities] = useState([]);
   const [nodeStatus, setNodeStatus] = useState(null);
   const [log, setLog] = useState([]);
   const [busy, setBusy] = useState(false);
 
-  const [sessions, setSessions] = useState({});
+  const [session, setSession] = useState(() => loadStored(SESSION_KEY, null));
   const [wallet, setWallet] = useState({ detected: false, wallets: [], unlocked: [] });
-  const autoTried = React.useRef({});
+  const autoTried = React.useRef(false);
 
   const [claimForm, setClaimForm] = useState({ parcel: 'TIT-0101-25', district: 'Westfield' });
   const [claim, setClaim] = useState(null);
@@ -214,7 +284,7 @@ export default function App() {
       say(`cannot reach the node at ${nodeUrl}: ${e.message}`, 'err');
     }
     if (!getToken()) {
-      say('bridge: paste the pairing token above to list wallet identities', 'muted');
+      say('bridge: paste the pairing token above to list Signet identities', 'muted');
       return;
     }
     try {
@@ -258,69 +328,133 @@ export default function App() {
     };
   }, []);
 
-  function onLogin(p, session) {
-    setSessions((s) => ({ ...s, [p]: session }));
-    saveSession(p, { name: session.name, ed: session.ed, at: session.at });
-  }
-  function onLogout(p) {
-    setSessions((s) => {
-      const next = { ...s };
-      delete next[p];
-      return next;
-    });
-    clearSession(p);
-    say(`${p} logged out`);
+  // ---- routing: a workspace is only reachable by its own role ----
+  useEffect(() => {
+    if (page !== 'welcome' && (!session || session.role !== roleForPage(page))) {
+      const needed = roleForPage(page);
+      say(
+        needed
+          ? `that workspace needs a signed-in ${needed} Signet - log in first`
+          : 'unknown workspace - back to the landing page'
+      );
+      go('welcome');
+    }
+    if (page === 'welcome' && session) {
+      go(ROLES[session.role]?.page || 'welcome');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, session]);
+
+  // ---- login / logout ----
+  async function login(roleKey, name) {
+    setBusy(true);
+    try {
+      if (!(await walletPing())) {
+        throw new Error(
+          'Signet extension not detected - load it from chrome://extensions and reload this page'
+        );
+      }
+      const role = ROLES[roleKey] ? roleKey : 'landowner';
+      const challenge = { role, node: nodeUrl, nonce: randomHex(16), ts: Date.now() };
+      const res = await walletSign({
+        bridgeUrl,
+        path: '/v1/wallet/party-sign',
+        summary: `Login - your Signet signs a one-time challenge as ${ROLES[role].label}${name ? ` (${name})` : ''}`,
+        body: { name, role: 'login', kind: 'datu.login', document: challenge },
+      });
+      const party = loginParty(res);
+      if (!party) throw new Error('Signet returned no login signature');
+      const known = roleOfKey(party.key);
+      const finalRole = known && ROLES[known] ? known : role;
+      if (known && known !== role) {
+        say(`this Signet is already registered as ${ROLES[known].label} - routing it there`, 'muted');
+      }
+      rememberRole(party.key, finalRole);
+      const s = {
+        name,
+        ed: party.key,
+        sig: party.ed_signature || '',
+        at: new Date().toLocaleTimeString(),
+        role: finalRole,
+      };
+      setSession(s);
+      saveSession(s);
+      say(`${name || 'Signet'} logged in as ${ROLES[finalRole].label} (${party.key.slice(0, 16)}…)`, 'ok');
+      go(ROLES[finalRole].page);
+    } catch (e) {
+      say(e.message, 'err');
+    } finally {
+      setBusy(false);
+    }
   }
 
-  // Silent session restore: when the extension is active and this page has a
-  // stored session, ask the wallet to re-sign a fresh challenge. If the panel
-  // does not hold the passphrase yet, the request simply waits there for one
-  // confirm and then completes.
+  function logout() {
+    if (session) say(`${session.name} logged out`);
+    setSession(null);
+    clearSession();
+    go('welcome');
+  }
+
+  function switchRole() {
+    say(`logged out of the ${ROLES[session.role]?.label || session.role} workspace - pick another role`);
+    setSession(null);
+    clearSession();
+    go('welcome');
+  }
+
+  // Silent session restore: when the extension is active and a stored session
+  // exists, ask the wallet to re-sign a fresh challenge. If the panel does not
+  // hold the passphrase yet, the request waits there for one confirm.
   useEffect(() => {
-    if (!wallet.detected || sessions[page]) return;
-    const stored = loadSession(page);
-    if (!stored || !stored.name) return;
-    if (autoTried.current[page]) return;
-    autoTried.current[page] = true;
+    if (!wallet.detected || !session?.name || autoTried.current) return;
+    autoTried.current = true;
     (async () => {
       try {
-        const challenge = { page, node: nodeUrl, nonce: randomHex(16), ts: Date.now() };
+        const challenge = {
+          role: session.role,
+          node: nodeUrl,
+          nonce: randomHex(16),
+          ts: Date.now(),
+        };
         const res = await walletSign({
           bridgeUrl,
           path: '/v1/wallet/party-sign',
-          summary: `Auto login - page "${page}" re-signs a challenge as ${stored.name}`,
+          summary: `Re-login - ${session.name} re-signs a challenge as ${ROLES[session.role]?.label || session.role}`,
           body: {
-            name: stored.name,
+            name: session.name,
             role: 'login',
             kind: 'datu.login',
             document: challenge,
             auto: true,
           },
         });
-        const party = ((res.body || {}).parties || []).find((p) => p.role === 'login');
-        if (!party) return;
-        setSessions((s) => ({
-          ...s,
-          [page]: {
-            name: stored.name,
-            ed: party.key,
-            sig: party.signature || '',
-            at: new Date().toLocaleTimeString(),
-            challenge,
-          },
-        }));
-        say(`${page} session restored through the wallet as ${stored.name}`, 'ok');
+        const party = loginParty(res);
+        if (!party || party.key !== session.ed) {
+          say('stored session belongs to a different key - log in again', 'err');
+          setSession(null);
+          clearSession();
+          go('welcome');
+          return;
+        }
+        const s = {
+          ...session,
+          sig: party.ed_signature || '',
+          at: new Date().toLocaleTimeString(),
+        };
+        setSession(s);
+        saveSession(s);
+        say(`session restored - ${s.name} continues as ${ROLES[s.role]?.label || s.role}`, 'ok');
+        go(ROLES[s.role]?.page || 'welcome');
       } catch {
-        // leave the manual login in place
+        // leave the manual login on the landing page in place
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wallet.detected, page, sessions]);
+  }, [wallet.detected]);
 
-  // ---- 0 · landowner registers the ownership claim ----
+  // ---- landowner: register the ownership claim ----
   async function registerOwnership() {
-    const session = sessions.register;
-    if (!session) return say('login through the wallet first', 'err');
+    if (!session || session.role !== 'landowner') return say('log in as a landowner first', 'err');
     setBusy(true);
     try {
       const me = identities.find((i) => i.name === session.name);
@@ -347,7 +481,7 @@ export default function App() {
     }
   }
 
-  // ---- 1 · registrar receives the claim, prepares and signs ----
+  // ---- registrar: receive the claim, prepare and sign ----
   function loadClaim() {
     try {
       const doc = parseEnvelope(claimIn);
@@ -371,10 +505,8 @@ export default function App() {
   }
 
   async function signAsRegistrar() {
-    const session = sessions.registrar;
-    if (!session) return say('login through the wallet first', 'err');
+    if (!session || session.role !== 'registrar') return say('log in as a registrar first', 'err');
     setBusy(true);
-    setResult(null);
     try {
       if (!form.holder_key || !form.holder_seal) {
         throw new Error('holder key and holder seal key are required (load the claim first)');
@@ -392,7 +524,7 @@ export default function App() {
           ? {
               kind: claim.kind,
               claimant: claim.parties.find((p) => p.role === 'claimant')?.key,
-              signature: claim.parties.find((p) => p.role === 'claimant')?.signature,
+              signature: claim.parties.find((p) => p.role === 'claimant')?.ed_signature,
               registered_at: claim.doc.registered_at,
             }
           : undefined,
@@ -434,10 +566,9 @@ export default function App() {
     }
   }
 
-  // ---- 2 · landowner consents ----
+  // ---- landowner: consent as holder ----
   async function signAsHolder() {
-    const session = sessions.landowner;
-    if (!session) return say('login through the wallet first', 'err');
+    if (!session || session.role !== 'landowner') return say('log in as a landowner first', 'err');
     setBusy(true);
     try {
       const doc = parseEnvelope(holderIn);
@@ -462,7 +593,7 @@ export default function App() {
     }
   }
 
-  // ---- 3 · registry-signer records ----
+  // ---- registry: verify and record ----
   function checkForRecording() {
     try {
       const doc = parseEnvelope(registryIn);
@@ -480,8 +611,7 @@ export default function App() {
   }
 
   async function recordToLedger() {
-    const session = sessions.registry;
-    if (!session) return say('login through the wallet first', 'err');
+    if (!session || session.role !== 'registry') return say('log in as a registry signer first', 'err');
     setBusy(true);
     setResult(null);
     try {
@@ -505,7 +635,7 @@ export default function App() {
           },
         },
       });
-      if (!signed.body || !signed.body.entry) throw new Error('wallet returned no signed entry');
+      if (!signed.body || !signed.body.entry) throw new Error('Signet returned no signed entry');
       say(`entry ${signed.body.id.slice(0, 16)}… signed`);
 
       const submit = await nodePost(nodeUrl, '/v1/entries', signed.body.entry);
@@ -526,126 +656,221 @@ export default function App() {
     }
   }
 
-  const pages = [
-    ['register', '0 · Landowner registers'],
-    ['registrar', '1 · Registrar'],
-    ['landowner', '2 · Landowner signs'],
-    ['registry', '3 · Registry records'],
-  ];
+  const workspace = ROLE_PAGES.includes(page) ? page : null;
 
   return (
     <div className="page">
       <header>
         <h1>DATU · Land Registry</h1>
         <p className="muted">
-          Ownership registration → registrar certification → landowner consent → ledger record. The
-          envelope travels by file; every signature is confirmed in the browser wallet extension.
+          Ownership registration → registrar certification → landowner consent → ledger record. Log in
+          with your Signet - the registry opens only the workspace that vault's role is allowed to see.
         </p>
       </header>
 
-      <nav className="navtabs">
-        {pages.map(([key, label]) => (
-          <button key={key} className={page === key ? 'tab active' : 'tab'} onClick={() => go(key)}>
-            {label}
-          </button>
-        ))}
-      </nav>
+      {workspace && session && <RoleBar session={session} onLogout={logout} onSwitchRole={switchRole} />}
 
-      <section className="card">
-        <h2>Services (node + wallet bridge)</h2>
-        <div className="row">
-          <label>
-            Registry node
-            <input value={nodeUrl} onChange={(e) => setNodeUrl(e.target.value)} />
-          </label>
-          <label>
-            Wallet bridge
-            <input value={bridgeUrl} onChange={(e) => setBridgeUrl(e.target.value)} />
-          </label>
-        </div>
-        <div className="row">
-          <label>
-            Bridge pairing token (read-only bridge calls: identities, feed)
-            <input
-              type="password"
-              defaultValue={getToken()}
-              onChange={(e) => setToken(e.target.value)}
-              onBlur={refresh}
-              onKeyDown={(e) => e.key === 'Enter' && refresh()}
-              placeholder="64 hex characters"
-            />
-          </label>
-          <button className="ghost" onClick={refresh} disabled={busy}>
-            Refresh
-          </button>
-        </div>
-        {nodeStatus && (
-          <p className="muted small">
-            mode <b>{nodeStatus.policy?.mode}</b> · entries {nodeStatus.entries} · witnesses{' '}
-            {nodeStatus.checkpoints} · identities on this bridge: {identities.length}
-          </p>
-        )}
-        <p className={wallet.detected ? 'ok small' : 'err small'}>
-          wallet extension:{' '}
-          {wallet.detected ? `active · ${wallet.wallets.length} wallet(s) paired` : 'not detected - load/reload it in chrome://extensions, then reload this page'}
-          {wallet.detected && ` · unlocked: ${wallet.unlocked.join(', ') || 'none (panel will ask once)'}`}
-        </p>
-      </section>
+      {page === 'welcome' && (
+        <Welcome
+          wallet={wallet}
+          identities={identities}
+          bridgeUrl={bridgeUrl}
+          nodeUrl={nodeUrl}
+          nodeStatus={nodeStatus}
+          busy={busy}
+          onLogin={login}
+          onRefresh={refresh}
+          say={say}
+        />
+      )}
 
-      <WalletLogin
-        key={page}
-        page={page}
-        bridgeUrl={bridgeUrl}
-        nodeUrl={nodeUrl}
-        session={sessions[page]}
-        onLogin={(s) => onLogin(page, s)}
-        onLogout={() => onLogout(page)}
-        say={say}
-      />
-
-      {page === 'register' && sessions.register && (
-        <section className="grid">
-          <div className="card">
-            <h2>Register your land ownership</h2>
-            <label>
-              Parcel
-              <input
-                value={claimForm.parcel}
-                onChange={(e) => setClaimForm({ ...claimForm, parcel: e.target.value })}
-              />
-            </label>
-            <label>
-              District
-              <input
-                value={claimForm.district}
-                onChange={(e) => setClaimForm({ ...claimForm, district: e.target.value })}
-              />
-            </label>
-            <button onClick={registerOwnership} disabled={busy}>
-              Sign ownership claim with the wallet
-            </button>
-          </div>
-
-          <div className="card">
-            <h2>Claim → registrar</h2>
-            {!claim && <p className="muted small">- sign to produce the ownership claim -</p>}
-            {claim && (
-              <>
-                <p className="ok small">claimant signed · {claim.doc.parcel}</p>
-                <button onClick={() => downloadJson(`${claim.doc.parcel}-0-claim.json`, claim)}>
-                  Download claim for the registrar
-                </button>
-                <details>
-                  <summary>claim preview</summary>
-                  <pre>{JSON.stringify(claim, null, 2)}</pre>
-                </details>
-              </>
-            )}
-          </div>
+      {workspace && (
+        <section className="card slim">
+          <details>
+            <summary className="muted small">Services (node + Signet service)</summary>
+            <div className="row">
+              <label>
+                Registry node
+                <input value={nodeUrl} onChange={(e) => setNodeUrl(e.target.value)} />
+              </label>
+              <label>
+                Signet service (bridge URL)
+                <input value={bridgeUrl} onChange={(e) => setBridgeUrl(e.target.value)} />
+              </label>
+            </div>
+            <div className="row">
+              <label>
+                Bridge pairing token (read-only bridge calls: identities, feed)
+                <input
+                  type="password"
+                  defaultValue={getToken()}
+                  onChange={(e) => setToken(e.target.value)}
+                  onBlur={refresh}
+                  onKeyDown={(e) => e.key === 'Enter' && refresh()}
+                  placeholder="64 hex characters"
+                />
+              </label>
+              <button className="ghost" onClick={refresh} disabled={busy}>
+                Refresh
+              </button>
+            </div>
+            <p className={wallet.detected ? 'ok small' : 'err small'}>
+              Signet extension:{' '}
+              {wallet.detected
+                ? `active · ${wallet.wallets.length} wallet(s) paired`
+                : 'not detected - load/reload it in chrome://extensions, then reload this page'}
+              {wallet.detected &&
+                ` · unlocked: ${wallet.unlocked.join(', ') || 'none (panel will ask once)'}`}
+            </p>
+          </details>
         </section>
       )}
 
-      {page === 'registrar' && sessions.registrar && (
+      {page === 'welcome' && (
+        <section className="card">
+          <h2>Services (node + Signet service)</h2>
+          <div className="row">
+            <label>
+              Registry node
+              <input value={nodeUrl} onChange={(e) => setNodeUrl(e.target.value)} />
+            </label>
+            <label>
+              Wallet bridge
+              <input value={bridgeUrl} onChange={(e) => setBridgeUrl(e.target.value)} />
+            </label>
+          </div>
+          <div className="row">
+            <label>
+              Bridge pairing token (read-only bridge calls: identities, feed)
+              <input
+                type="password"
+                defaultValue={getToken()}
+                onChange={(e) => setToken(e.target.value)}
+                onBlur={refresh}
+                onKeyDown={(e) => e.key === 'Enter' && refresh()}
+                placeholder="64 hex characters"
+              />
+            </label>
+            <button className="ghost" onClick={refresh} disabled={busy}>
+              Refresh
+            </button>
+          </div>
+          {nodeStatus && (
+            <p className="muted small">
+              mode <b>{nodeStatus.policy?.mode}</b> · entries {nodeStatus.entries} · witnesses{' '}
+              {nodeStatus.checkpoints} · identities on this bridge: {identities.length}
+            </p>
+          )}
+          <p className={wallet.detected ? 'ok small' : 'err small'}>
+            Signet extension:{' '}
+            {wallet.detected
+              ? `active · ${wallet.wallets.length} wallet(s) paired`
+              : 'not detected - load/reload it in chrome://extensions, then reload this page'}
+            {wallet.detected &&
+              ` · unlocked: ${wallet.unlocked.join(', ') || 'none (panel will ask once)'}`}
+          </p>
+        </section>
+      )}
+
+      {page === 'landowner' && session && (
+        <>
+          <section className="grid">
+            <div className="card">
+              <h2>Register your land ownership</h2>
+              <label>
+                Parcel
+                <input
+                  value={claimForm.parcel}
+                  onChange={(e) => setClaimForm({ ...claimForm, parcel: e.target.value })}
+                />
+              </label>
+              <label>
+                District
+                <input
+                  value={claimForm.district}
+                  onChange={(e) => setClaimForm({ ...claimForm, district: e.target.value })}
+                />
+              </label>
+              <button onClick={registerOwnership} disabled={busy}>
+                Sign ownership claim with your Signet
+              </button>
+            </div>
+
+            <div className="card">
+              <h2>Claim → registrar</h2>
+              {!claim && <p className="muted small">- sign to produce the ownership claim -</p>}
+              {claim && (
+                <>
+                  <p className="ok small">claimant signed · {claim.doc.parcel}</p>
+                  <button onClick={() => downloadJson(`${claim.doc.parcel}-0-claim.json`, claim)}>
+                    Download claim for the registrar
+                  </button>
+                  <details>
+                    <summary>claim preview</summary>
+                    <pre>{JSON.stringify(claim, null, 2)}</pre>
+                  </details>
+                </>
+              )}
+            </div>
+          </section>
+
+          <section className="grid">
+            <div className="card">
+              <h2>Receive the envelope from the registrar</h2>
+              <FileLoader label="Load the envelope file from the registrar" onText={setHolderIn} />
+              <label>
+                …or paste it
+                <textarea
+                  rows={6}
+                  value={holderIn}
+                  onChange={(e) => setHolderIn(e.target.value)}
+                  placeholder="envelope JSON"
+                />
+              </label>
+              {holderIn && (
+                <p className="muted small">
+                  {(() => {
+                    try {
+                      const doc = parseEnvelope(holderIn);
+                      return `parcel ${doc.doc?.parcel ?? '?'} · signatures: ${(doc.parties || [])
+                        .map((p) => p.role)
+                        .join(', ')}`;
+                    } catch (e) {
+                      return `unreadable: ${e.message}`;
+                    }
+                  })()}
+                </p>
+              )}
+            </div>
+
+            <div className="card">
+              <h2>Consent as holder</h2>
+              <button onClick={signAsHolder} disabled={busy || !holderIn}>
+                Sign consent with your Signet
+              </button>
+              {holderEnvelope && (
+                <>
+                  <p className="ok small">
+                    holder consented · parties: {holderEnvelope.parties.map((p) => p.role).join(', ')}
+                  </p>
+                  <button
+                    onClick={() =>
+                      downloadJson(
+                        `${holderEnvelope.doc?.parcel || 'title'}-2-consented.json`,
+                        holderEnvelope
+                      )
+                    }
+                  >
+                    Download consented envelope for the registry
+                  </button>
+                </>
+              )}
+            </div>
+          </section>
+        </>
+      )}
+
+      {page === 'registrar' && session && (
         <section className="grid">
           <div className="card">
             <h2>Process the ownership claim</h2>
@@ -673,7 +898,10 @@ export default function App() {
             </label>
             <label>
               District
-              <input value={form.district} onChange={(e) => setForm({ ...form, district: e.target.value })} />
+              <input
+                value={form.district}
+                onChange={(e) => setForm({ ...form, district: e.target.value })}
+              />
             </label>
             <label>
               Holder name <em className="tag">encrypted</em>
@@ -709,7 +937,9 @@ export default function App() {
                   {registrarEnvelope.parties.map((p) => p.role).join(', ')}
                 </p>
                 <button
-                  onClick={() => downloadJson(`${form.parcel || 'title'}-1-registrar.json`, registrarEnvelope)}
+                  onClick={() =>
+                    downloadJson(`${form.parcel || 'title'}-1-registrar.json`, registrarEnvelope)
+                  }
                 >
                   Download envelope for the landowner
                 </button>
@@ -719,60 +949,7 @@ export default function App() {
         </section>
       )}
 
-      {page === 'landowner' && (
-        <section className="grid">
-          <div className="card">
-            <h2>Receive the envelope</h2>
-            <FileLoader label="Load the envelope file from the registrar" onText={setHolderIn} />
-            <label>
-              …or paste it
-              <textarea
-                rows={6}
-                value={holderIn}
-                onChange={(e) => setHolderIn(e.target.value)}
-                placeholder="envelope JSON"
-              />
-            </label>
-            {holderIn && (
-              <p className="muted small">
-                {(() => {
-                  try {
-                    const doc = parseEnvelope(holderIn);
-                    return `parcel ${doc.doc?.parcel ?? '?'} · signatures: ${(doc.parties || [])
-                      .map((p) => p.role)
-                      .join(', ')}`;
-                  } catch (e) {
-                    return `unreadable: ${e.message}`;
-                  }
-                })()}
-              </p>
-            )}
-          </div>
-
-          <div className="card">
-            <h2>Consent as holder</h2>
-            <button onClick={signAsHolder} disabled={busy || !holderIn || !sessions.landowner}>
-              Sign consent with the wallet
-            </button>
-            {holderEnvelope && (
-              <>
-                <p className="ok small">
-                  holder consented · parties: {holderEnvelope.parties.map((p) => p.role).join(', ')}
-                </p>
-                <button
-                  onClick={() =>
-                    downloadJson(`${holderEnvelope.doc?.parcel || 'title'}-2-consented.json`, holderEnvelope)
-                  }
-                >
-                  Download consented envelope for the registry
-                </button>
-              </>
-            )}
-          </div>
-        </section>
-      )}
-
-      {page === 'registry' && (
+      {page === 'registry' && session && (
         <section className="grid">
           <div className="card">
             <h2>Receive the consented envelope</h2>
@@ -794,8 +971,8 @@ export default function App() {
 
           <div className="card">
             <h2>Record to the ledger</h2>
-            <button onClick={recordToLedger} disabled={busy || !readyDoc || !sessions.registry}>
-              Sign entry with the wallet &amp; POST to node
+            <button onClick={recordToLedger} disabled={busy || !readyDoc}>
+              Sign entry with your Signet &amp; POST to node
             </button>
             {result && (
               <div className={`result ${result.status === 201 ? 'okbox' : 'dupbox'}`}>
