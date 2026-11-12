@@ -184,12 +184,28 @@ datu witness sign                          # sign a checkpoint
  datu witness list                          # every signer's latest root
 datu witness export --out witness.cks      # checkpoint-only stream (~KBs)
 datu witness import --input witness.cks    # merge another party's stream
+datu witness prove --entry <entry-id> --out coverage.json
+                                           # time-attestation: this witness
+                                           # had seen the entry by its clock
+datu witness verify-proof --input coverage.json
+                                           # offline check, zero other context
 
 datu prove-fork --a ngo.cks --b ministry.cks --out evidence.json
 datu prove-fork --against suspect.bundle   # vs this node's stored history
 
 datu disputes                              # disputes this node holds evidence for
 ```
+
+**Time attestations.** A checkpoint proves a witness's whole set; a coverage
+proof (`witness prove`) pins one entry into it with the Merkle path from the
+entry id to the checkpoint's signed root. The pair is self-contained evidence
+that the entry existed in that witness's ledger by the checkpoint's claimed
+time - no store, no node, no other context needed to verify. That is what
+makes landing windows and deadlines *provable* rather than asserted: a
+release that claims to land before a closing bound, or an award that must
+cite completions stamped before a deadline, can be checked against the
+witness clocks that covered it. A single witness is one accountable clock
+(author-claimed, attribution permanent); independent witnesses compound.
 
 Verdicts: `NO_CONTRADICTIONS` (exit 0) or `FORK_PROVEN` (exit 2) with an
 evidence package containing both contradictory, fully-signed checkpoints -
@@ -618,7 +634,8 @@ authority-feed predicate, where one designated author sequences a feed so
 (citations stamped after it do not count), `not_before_field` /
 `not_after_field` (a landing window on the entry's own timestamp;
 validator-clock subjective at admission, violations provable later via
-witness checkpoints), and `requires_sealed` (fields that must be
+witness checkpoints: `datu witness prove` emits the offline-verifiable
+coverage proof), and `requires_sealed` (fields that must be
 `datu-sealed-*` ciphertext whenever present). The spec is published as a
 party-signed `gov.contract` document into the `gov.contracts` namespace
 through the ordinary writer policy, so the entry id *is* the contract's

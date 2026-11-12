@@ -865,6 +865,41 @@ impl Store {
             as u64)
     }
 
+    /// Build the inclusion proof that `checkpoint` covered `entry_id`: the
+    /// witness time-attestation ("this signer's ledger had seen this entry
+    /// by this claimed time") in offline-verifiable form.
+    ///
+    /// The checkpoint's claimed set must equal this node's current id set:
+    /// a historical checkpoint over a set this node has since outgrown can
+    /// no longer be recomputed, so this explains the gap instead of
+    /// guessing. Fetch the checkpoint from a node holding the same set, or
+    /// sign a fresh one.
+    pub fn coverage_proof(
+        &self,
+        entry_id: &[u8; 32],
+        checkpoint: &Checkpoint,
+    ) -> StoreResult<datu_core::checkpoint::CoverageProof> {
+        let ids = self.entry_ids()?;
+        let root = datu_core::merkle::merkle_root(&ids);
+        if ids.len() as u64 != checkpoint.body.entries_count
+            || root != checkpoint.body.entry_ids_root
+        {
+            return Err(StoreError::Denied(format!(
+                "checkpoint {} covers a set this node no longer has ({} ids now, {} at signing): sign a fresh checkpoint to attest this entry's presence",
+                hex::encode(checkpoint.id().map_err(StoreError::Core)?),
+                ids.len(),
+                checkpoint.body.entries_count
+            )));
+        }
+        datu_core::checkpoint::CoverageProof::build(&ids, entry_id).ok_or_else(|| {
+            StoreError::Denied(format!(
+                "entry {} is not in checkpoint {}'s covered set",
+                hex::encode(entry_id),
+                hex::encode(checkpoint.id().unwrap_or_default())
+            ))
+        })
+    }
+
     /// The single write path for checkpoints. Verifies the signature, rejects
     /// contradictory same-height checkpoints (fork evidence), and checks the
     /// signer's chain. Idempotent for an identical checkpoint.

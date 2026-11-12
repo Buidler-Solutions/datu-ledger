@@ -7,6 +7,7 @@ use borsh::BorshDeserialize;
 use clap::{Parser, Subcommand};
 use datu_core::attest::{self, AttestationDoc, CosignDoc};
 use datu_core::contract::{self, ContractSpec};
+use datu_core::checkpoint::CoverageProof;
 use datu_core::fork::{self, ForkEvidence};
 use datu_core::merkle::merkle_root;
 use datu_core::parties::SignedDocument;
@@ -256,6 +257,25 @@ enum WitnessCmd {
     },
     /// Verify-then-merge a checkpoint stream
     Import {
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// Prove a checkpoint covered an entry: an offline-verifiable time
+    /// attestation ("this witness's ledger had seen this entry by now")
+    Prove {
+        /// Entry id (hex) whose presence the checkpoint attests
+        #[arg(long)]
+        entry: String,
+        /// Checkpoint id (hex) on this node; default: sign a fresh one now
+        #[arg(long)]
+        checkpoint: Option<String>,
+        /// Write the proof artifact (JSON) here instead of stdout
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Verify a coverage proof offline: checkpoint signatures plus the
+    /// Merkle path to the covered entry, zero other context
+    VerifyProof {
         #[arg(long)]
         input: PathBuf,
     },
@@ -1679,6 +1699,110 @@ fn cmd_witness_import(node: &Node, mesh: &str, input: &Path) -> Result<(), Strin
     println!(
         "imported checkpoints: {} new, {} already present",
         summary.checkpoints_new, summary.checkpoints_existing
+    );
+    Ok(())
+}
+
+/// Prove that a checkpoint covered an entry id: sign (or reuse) a
+/// checkpoint over everything this node has seen, then emit the Merkle path
+/// from the entry to the checkpoint's root. The artifact is self-contained
+/// evidence - anyone can verify it offline with `witness verify-proof`.
+fn cmd_witness_prove(
+    node: &Node,
+    entry_hex: String,
+    checkpoint_hex: Option<String>,
+    out: Option<PathBuf>,
+) -> Result<(), String> {
+    let entry_id = parse_id(&entry_hex)?;
+    if s(node.store.get_entry(&entry_id))?.is_none() {
+        return Err(format!(
+            "entry {entry_hex} is not on this node - sync it first (a witness can only attest what it has seen)"
+        ));
+    }
+    let checkpoint = match checkpoint_hex {
+        Some(hex) => {
+            let id = parse_id(&hex)?;
+            s(node.store.all_checkpoints())?
+                .into_iter()
+                .find(|cp| s(cp.id()).map(|x| x == id).unwrap_or(false))
+                .ok_or_else(|| {
+                    format!("checkpoint {hex} is not on this node - sync or sign it first")
+                })?
+        }
+        None => {
+            // Fresh attestation: "as of now, this entry and everything else
+            // I hold". The claimed time is this node's clock, accountable
+            // like any witness statement.
+            let (id, height) =
+                sign_checkpoint_into(&node.store, &node.key, &node.pq_key, &node.identity)?;
+            s(node.store.all_checkpoints())?
+                .into_iter()
+                .find(|cp| s(cp.id()).map(|x| x == id).unwrap_or(false))
+                .ok_or_else(|| format!("signed checkpoint {} vanished", hex::encode(id)))
+                .map(|cp| {
+                    println!(
+                        "signed checkpoint {} (height {height}) over {} entries",
+                        hex::encode(id),
+                        cp.body.entries_count
+                    );
+                    cp
+                })?
+        }
+    };
+    let proof = s(node.store.coverage_proof(&entry_id, &checkpoint))?;
+    let checkpoint_b64 =
+        base64::engine::general_purpose::STANDARD.encode(s(borsh::to_vec(&checkpoint))?);
+    let artifact = serde_json::json!({
+        "version": 1,
+        "checkpoint_b64": checkpoint_b64,
+        "proof": proof,
+    });
+    let rendered = serde_json::to_string_pretty(&artifact).map_err(|e| e.to_string())?;
+    match &out {
+        Some(path) => {
+            std::fs::write(path, &rendered)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            println!("coverage proof written to {}", path.display());
+        }
+        None => println!("{rendered}"),
+    }
+    println!(
+        "entry {} is covered by witness {} at checkpoint height {} (claimed ts {})",
+        short(&entry_hex),
+        short(&checkpoint.body.signer),
+        checkpoint.body.height,
+        checkpoint.body.timestamp_ms
+    );
+    Ok(())
+}
+
+/// Verify a coverage-proof artifact with zero other context: decode the
+/// checkpoint, verify both signatures, then walk the Merkle path to the
+/// signed root.
+fn cmd_witness_verify_proof(input: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(input)
+        .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let artifact: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("not a coverage-proof artifact: {e}"))?;
+    let checkpoint_b64 = artifact["checkpoint_b64"]
+        .as_str()
+        .ok_or("artifact has no checkpoint_b64")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(checkpoint_b64)
+        .map_err(|_| "checkpoint_b64 is not valid base64".to_string())?;
+    let checkpoint = Checkpoint::try_from_slice(&bytes)
+        .map_err(|e| format!("checkpoint_b64 does not decode as a checkpoint: {e}"))?;
+    s(checkpoint.verify())?;
+    let proof: CoverageProof = serde_json::from_value(artifact["proof"].clone())
+        .map_err(|e| format!("artifact proof does not parse: {e}"))?;
+    s(proof.verify(&checkpoint))?;
+    println!(
+        "OK  entry {} was covered by witness {} at checkpoint {} (height {}, claimed ts {})",
+        short(&proof.entry_id),
+        short(&checkpoint.body.signer),
+        short(&hex::encode(s(checkpoint.id())?)),
+        checkpoint.body.height,
+        checkpoint.body.timestamp_ms
     );
     Ok(())
 }
@@ -3162,6 +3286,17 @@ fn run(cli: Cli) -> Result<(), String> {
                     let mesh = our_network_id(&cli.data_dir)?;
                     cmd_witness_import(&node, &mesh, input)
                 }
+                WitnessCmd::Prove {
+                    entry,
+                    checkpoint,
+                    out,
+                } => {
+                    let node = load_node_reader(&cli.data_dir)?;
+                    cmd_witness_prove(&node, entry.clone(), checkpoint.clone(), out.clone())
+                }
+                // Offline: no node, no store - the artifact carries its own
+                // evidence, which is the whole point.
+                WitnessCmd::VerifyProof { input } => cmd_witness_verify_proof(&input),
             }
         }
         Commands::ProveFork {
@@ -3689,4 +3824,77 @@ mod tests {
         ))
         .unwrap();
     }
+    /// Witness time-attestation end to end: prove a checkpoint covered an
+    /// entry, verify the artifact offline, and prove tampering is caught.
+    #[test]
+    fn witness_coverage_proof_roundtrip() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(witness_coverage_flow)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn witness_coverage_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        run(cli(d, Commands::Init)).unwrap();
+        publish(d, "general").expect("an open-namespace write lands");
+
+        let node = load_node(d).unwrap();
+        let target = node
+            .store
+            .latest(&node.identity)
+            .unwrap()
+            .expect("the publish is on this node's feed");
+        let entry_hex = hex::encode(target.id().unwrap());
+
+        let proof_path = d.join("coverage.json");
+        run(cli(
+            d,
+            Commands::Witness {
+                cmd: WitnessCmd::Prove {
+                    entry: entry_hex.clone(),
+                    checkpoint: None,
+                    out: Some(proof_path.clone()),
+                },
+            },
+        ))
+        .unwrap();
+
+        run(cli(
+            d,
+            Commands::Witness {
+                cmd: WitnessCmd::VerifyProof {
+                    input: proof_path.clone(),
+                },
+            },
+        ))
+        .unwrap();
+
+        // Tamper one sibling hash: the path must no longer reach the
+        // signed root, and verification must say so.
+        let text = std::fs::read_to_string(&proof_path).unwrap();
+        let mut artifact: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let sibling = artifact["proof"]["siblings"][0]
+            .as_str()
+            .expect("a two-entry set has one sibling")
+            .to_string();
+        let mut chars: Vec<char> = sibling.chars().collect();
+        chars[0] = if chars[0] == '0' { '1' } else { '0' };
+        artifact["proof"]["siblings"][0] =
+            serde_json::Value::String(chars.into_iter().collect());
+        let tampered = d.join("tampered.json");
+        std::fs::write(&tampered, serde_json::to_string(&artifact).unwrap()).unwrap();
+        let err = run(cli(
+            d,
+            Commands::Witness {
+                cmd: WitnessCmd::VerifyProof { input: tampered },
+            },
+        ))
+        .unwrap_err();
+        assert!(err.contains("does not reach"), "tampering is caught: {err}");
+    }
 }
+
