@@ -28,7 +28,7 @@ use datu_p2p::NetworkPolicy;
 use datu_store::{Store, StoreError, WritePolicy};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 pub use datu_wallet::wire::{entry_from_submission, entry_full_json};
@@ -225,7 +225,7 @@ pub fn serve(
 
 fn handle(
     stream: TcpStream,
-    data_dir: &PathBuf,
+    data_dir: &Path,
     policy: Option<WritePolicy>,
     network: Option<NetworkPolicy>,
     limiter: Option<Arc<PeerLimiter>>,
@@ -253,7 +253,7 @@ fn handle(
 
 fn handle_inner(
     stream: &mut TcpStream,
-    data_dir: &PathBuf,
+    data_dir: &Path,
     policy: Option<WritePolicy>,
     network: Option<NetworkPolicy>,
     limiter: Option<Arc<PeerLimiter>>,
@@ -266,7 +266,7 @@ fn handle_inner(
     };
     let (method, path, body) = request;
     let route = path.split('?').next().unwrap_or("/").to_string();
-    let query = path.splitn(2, '?').nth(1).unwrap_or("").to_string();
+    let query = path.split_once('?').map(|x| x.1).unwrap_or("").to_string();
 
     if method == "OPTIONS" {
         respond(stream, "204 No Content", "text/plain", "")?;

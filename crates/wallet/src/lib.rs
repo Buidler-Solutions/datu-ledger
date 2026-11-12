@@ -20,7 +20,6 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use blake3;
 use borsh::BorshDeserialize;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
@@ -220,7 +219,7 @@ impl Wallet {
         let ed = SigningKey::generate(&mut OsRng);
         let (pq_public, pq_secret) =
             datu_core::pq::keypair().map_err(|e| format!("keygen failed: {e}"))?;
-        let seal = StaticSecret::random_from_rng(&mut OsRng);
+        let seal = StaticSecret::random_from_rng(OsRng);
 
         let public = IdentityPublic {
             name: name.to_string(),
@@ -634,7 +633,7 @@ pub struct Recipient {
 }
 
 fn seal_to_recipient(plaintext: &[u8], reader: &XPublicKey) -> WResult<Recipient> {
-    let eph_secret = EphemeralSecret::random_from_rng(&mut OsRng);
+    let eph_secret = EphemeralSecret::random_from_rng(OsRng);
     let eph_public = XPublicKey::from(&eph_secret);
     let shared = eph_secret.diffie_hellman(reader);
     let key = derive_key(
@@ -914,7 +913,7 @@ mod tests {
         // sure load() still opens it.
         let ed = SigningKey::generate(&mut OsRng);
         let (_pq_public, pq_secret) = datu_core::pq::keypair().unwrap();
-        let seal = StaticSecret::random_from_rng(&mut OsRng);
+        let seal = StaticSecret::random_from_rng(OsRng);
         let bundle = SecretBundle {
             ed: ed.to_bytes(),
             pq_hex: datu_core::pq::sk_to_hex(&pq_secret),
@@ -960,7 +959,7 @@ mod tests {
 
     #[test]
     fn v1_sealed_field_still_opens() {
-        let reader = StaticSecret::random_from_rng(&mut OsRng);
+        let reader = StaticSecret::random_from_rng(OsRng);
         let reader_public = XPublicKey::from(&reader);
         let reader_hex = hex::encode(reader_public.as_bytes());
         let identity = LoadedIdentity {
@@ -978,7 +977,7 @@ mod tests {
 
         // Build a v1-format sealed field with the same key derivation.
         let plaintext = br#"{"secret":42}"#;
-        let eph_secret = EphemeralSecret::random_from_rng(&mut OsRng);
+        let eph_secret = EphemeralSecret::random_from_rng(OsRng);
         let eph_public = XPublicKey::from(&eph_secret);
         let shared = eph_secret.diffie_hellman(&reader_public);
         let key = derive_key(

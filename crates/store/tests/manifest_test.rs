@@ -65,10 +65,11 @@ fn writer_entry(k: &Keys, ns: &str, payload: &[u8], seq: u64, prev: Option<[u8; 
 }
 
 fn policy_admitting(writers: Vec<String>) -> WritePolicy {
-    let mut policy = WritePolicy::default();
-    policy.gated = vec!["gov.titles.*".into()];
-    policy.writers = writers;
-    policy
+    WritePolicy {
+        gated: vec!["gov.titles.*".into()],
+        writers,
+        ..WritePolicy::default()
+    }
 }
 
 #[test]
@@ -86,7 +87,7 @@ fn manifest_chain_compiles_and_gates() {
     );
     let e1 = publish_manifest(&store, &root, &m1, 0, None);
 
-    let compiled = compile(&store, "gov-mesh", &[root.author.clone()])
+    let compiled = compile(&store, "gov-mesh", std::slice::from_ref(&root.author))
         .unwrap()
         .unwrap();
     assert_eq!(compiled.manifest_id, hex::encode(e1.id().unwrap()));
@@ -134,7 +135,7 @@ fn manifest_chain_compiles_and_gates() {
     };
     let e2 = publish_manifest(&store, &successor, &m2, 0, None);
 
-    let compiled2 = compile(&store, "gov-mesh", &[root.author.clone()])
+    let compiled2 = compile(&store, "gov-mesh", std::slice::from_ref(&root.author))
         .unwrap()
         .unwrap();
     assert_eq!(compiled2.manifest_id, hex::encode(e2.id().unwrap()));
@@ -186,7 +187,7 @@ fn manifest_chain_compiles_and_gates() {
     };
     publish_manifest(&store, &root, &m3_by_retired, 1, Some(e1.id().unwrap()));
     // …so compile still ends at m2: the rogue entry is never linked.
-    let compiled3 = compile(&store, "gov-mesh", &[root.author.clone()])
+    let compiled3 = compile(&store, "gov-mesh", std::slice::from_ref(&root.author))
         .unwrap()
         .unwrap();
     assert_eq!(compiled3.manifest_id, hex::encode(e2.id().unwrap()));
@@ -225,7 +226,7 @@ fn manifest_split_is_fail_visible() {
     };
     publish_manifest(&store, &b, &m2b, 0, None);
 
-    let err = compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap_err();
+    let err = compile(&store, "gov-mesh", std::slice::from_ref(&founder.author)).unwrap_err();
     assert!(
         err.contains("split"),
         "a split must be an error, not a pick: {err}"
@@ -278,7 +279,7 @@ fn junk_and_foreign_manifests_are_ignored() {
         .unwrap();
 
     assert!(
-        compile(&store, "gov-mesh", &[root.author.clone()])
+        compile(&store, "gov-mesh", std::slice::from_ref(&root.author))
             .unwrap()
             .is_none(),
         "no pinned-root genesis exists yet"
@@ -290,13 +291,13 @@ fn junk_and_foreign_manifests_are_ignored() {
         WritePolicy::default(),
     );
     let e = publish_manifest(&store, &root, &real, 0, None);
-    let compiled = compile(&store, "gov-mesh", &[root.author.clone()])
+    let compiled = compile(&store, "gov-mesh", std::slice::from_ref(&root.author))
         .unwrap()
         .unwrap();
     assert_eq!(compiled.chain.len(), 1);
     assert_eq!(compiled.manifest_id, hex::encode(e.id().unwrap()));
     assert!(
-        compile(&store, "unknown-mesh", &[root.author.clone()])
+        compile(&store, "unknown-mesh", std::slice::from_ref(&root.author))
             .unwrap()
             .is_none(),
         "empty namespace compiles to None, not an error"
@@ -330,7 +331,7 @@ fn unauthorized_continuation_cannot_manufacture_a_split() {
     };
     publish_manifest(&store, &stranger, &rogue, 0, None);
 
-    let compiled = compile(&store, "gov-mesh", &[founder.author.clone()])
+    let compiled = compile(&store, "gov-mesh", std::slice::from_ref(&founder.author))
         .unwrap()
         .unwrap();
     assert_eq!(compiled.manifest_id, hex::encode(e1.id().unwrap()));
@@ -348,7 +349,7 @@ fn unauthorized_continuation_cannot_manufacture_a_split() {
         )
     };
     let e2 = publish_manifest(&store, &successor, &m2, 0, None);
-    let compiled2 = compile(&store, "gov-mesh", &[founder.author.clone()])
+    let compiled2 = compile(&store, "gov-mesh", std::slice::from_ref(&founder.author))
         .unwrap()
         .unwrap();
     assert_eq!(compiled2.manifest_id, hex::encode(e2.id().unwrap()));
@@ -395,13 +396,25 @@ fn freshness_requires_independent_evidence() {
 
     // A chain that verifies is still not "current": nothing but its own
     // author has ever confirmed the mesh was alive after it.
-    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
+    let st = status(
+        &store,
+        "gov-mesh",
+        std::slice::from_ref(&founder.author),
+        None,
+    )
+    .unwrap();
     assert_eq!(st.freshness, Freshness::Stale, "reason: {}", st.reason);
     assert!(st.corroborated_by.is_none());
 
     // The manifest author checkpointing about itself proves nothing.
     checkpoint(&store, &founder);
-    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
+    let st = status(
+        &store,
+        "gov-mesh",
+        std::slice::from_ref(&founder.author),
+        None,
+    )
+    .unwrap();
     assert_eq!(st.freshness, Freshness::Stale);
     assert!(st.reason.contains("independent"), "{}", st.reason);
 
@@ -410,7 +423,7 @@ fn freshness_requires_independent_evidence() {
     let st = status(
         &store,
         "gov-mesh",
-        &[founder.author.clone()],
+        std::slice::from_ref(&founder.author),
         Some(&witness.author),
     )
     .unwrap();
@@ -424,7 +437,7 @@ fn freshness_requires_independent_evidence() {
     let st = status(
         &store,
         "gov-mesh",
-        &[founder.author.clone()],
+        std::slice::from_ref(&founder.author),
         Some(&witness.author),
     )
     .unwrap();
@@ -471,7 +484,7 @@ fn revoked_writer_under_stale_policy_is_reported_not_hidden() {
     let e2 = publish_manifest(&store, &successor, &m2, 0, None);
 
     // …and it applies…
-    let compiled = compile(&store, "gov-mesh", &[founder.author.clone()])
+    let compiled = compile(&store, "gov-mesh", std::slice::from_ref(&founder.author))
         .unwrap()
         .unwrap();
     assert_eq!(compiled.manifest_id, hex::encode(e2.id().unwrap()));
@@ -489,7 +502,13 @@ fn revoked_writer_under_stale_policy_is_reported_not_hidden() {
     // …but this node cannot claim its authorization is current: nothing
     // independent has confirmed the revocation was seen by anyone else, so a
     // *further* revocation may exist that this node never received.
-    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
+    let st = status(
+        &store,
+        "gov-mesh",
+        std::slice::from_ref(&founder.author),
+        None,
+    )
+    .unwrap();
     assert_eq!(st.freshness, Freshness::Stale, "reason: {}", st.reason);
     assert_eq!(
         st.manifest_id.as_deref(),
@@ -529,12 +548,18 @@ fn rollback_leaves_evidence_and_is_stale() {
     publish_manifest(&store, &successor, &orphan, 0, None);
 
     // The chain still verifies up to m1 - old evidence stays usable…
-    let compiled = compile(&store, "gov-mesh", &[founder.author.clone()])
+    let compiled = compile(&store, "gov-mesh", std::slice::from_ref(&founder.author))
         .unwrap()
         .unwrap();
     assert_eq!(compiled.manifest_id, hex::encode(e1.id().unwrap()));
     // …and the node says out loud that it is behind.
-    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
+    let st = status(
+        &store,
+        "gov-mesh",
+        std::slice::from_ref(&founder.author),
+        None,
+    )
+    .unwrap();
     assert_eq!(st.freshness, Freshness::Stale, "reason: {}", st.reason);
     assert_eq!(st.missing_predecessors, vec![missing]);
 }
@@ -553,10 +578,18 @@ fn conflicting_policy_versions_are_never_applied() {
     publish_manifest(&store, &founder, &future, 0, None);
 
     // Not authority: this build cannot evaluate it, so nothing verifies…
-    assert!(compile(&store, "gov-mesh", &[founder.author.clone()])
-        .unwrap()
-        .is_none());
-    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
+    assert!(
+        compile(&store, "gov-mesh", std::slice::from_ref(&founder.author))
+            .unwrap()
+            .is_none()
+    );
+    let st = status(
+        &store,
+        "gov-mesh",
+        std::slice::from_ref(&founder.author),
+        None,
+    )
+    .unwrap();
     assert_eq!(st.freshness, Freshness::Unverified);
     assert!(st.reason.contains("99"), "{}", st.reason);
 }
@@ -576,14 +609,22 @@ fn invalid_genesis_claims_stay_unverified() {
     );
     publish_manifest(&store, &impostor, &fake, 0, None);
 
-    assert!(compile(&store, "gov-mesh", &[founder.author.clone()])
-        .unwrap()
-        .is_none());
+    assert!(
+        compile(&store, "gov-mesh", std::slice::from_ref(&founder.author))
+            .unwrap()
+            .is_none()
+    );
     assert!(
         head(&store, "gov-mesh").unwrap().is_some(),
         "the impostor can see its own chain"
     );
-    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
+    let st = status(
+        &store,
+        "gov-mesh",
+        std::slice::from_ref(&founder.author),
+        None,
+    )
+    .unwrap();
     assert_eq!(st.freshness, Freshness::Unverified);
     assert!(st.manifest_id.is_none());
 }
@@ -614,7 +655,13 @@ fn status_reports_a_conflict_with_both_sides() {
         ));
     }
 
-    let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
+    let st = status(
+        &store,
+        "gov-mesh",
+        std::slice::from_ref(&founder.author),
+        None,
+    )
+    .unwrap();
     assert_eq!(st.freshness, Freshness::Conflicted);
     assert_eq!(st.conflicts.len(), 2, "{:?}", st.conflicts);
     let claimed: Vec<String> = st.conflicts.iter().map(|(id, _)| id.clone()).collect();

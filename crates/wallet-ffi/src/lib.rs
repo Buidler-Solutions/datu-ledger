@@ -465,6 +465,11 @@ fn error_string(message: &str) -> *mut c_char {
 
 /// Open a wallet core bound to `data_dir` (created if missing). Returns null
 /// on a non-UTF-8 path; the keystore itself is created lazily.
+///
+/// # Safety
+///
+/// `data_dir` must be a valid, NUL-terminated C string. The returned handle
+/// must be closed exactly once with [`datu_wallet_close`].
 #[no_mangle]
 pub unsafe extern "C" fn datu_wallet_open(data_dir: *const c_char) -> *mut WalletCore {
     if data_dir.is_null() {
@@ -479,6 +484,12 @@ pub unsafe extern "C" fn datu_wallet_open(data_dir: *const c_char) -> *mut Walle
 
 /// Run one JSON request; the returned string is UTF-8 JSON the caller must
 /// free with `datu_string_free`. Never returns null for a valid handle.
+///
+/// # Safety
+///
+/// `core` must be a handle from [`datu_wallet_open`] that has not been
+/// closed, and `request` a valid NUL-terminated C string. The returned
+/// pointer must be freed with [`datu_string_free`] and never used after.
 #[no_mangle]
 pub unsafe extern "C" fn datu_wallet_request(
     core: *mut WalletCore,
@@ -518,6 +529,11 @@ fn run_on_signer_thread(core: &WalletCore, request_json: &str) -> String {
 }
 
 /// Close a core opened with `datu_wallet_open`. Null is ignored.
+///
+/// # Safety
+///
+/// `core` must be null or a handle from [`datu_wallet_open`] that has not
+/// been closed already; closing twice is undefined behaviour.
 #[no_mangle]
 pub unsafe extern "C" fn datu_wallet_close(core: *mut WalletCore) {
     if !core.is_null() {
@@ -526,6 +542,11 @@ pub unsafe extern "C" fn datu_wallet_close(core: *mut WalletCore) {
 }
 
 /// Free a string returned by `datu_wallet_request`. Null is ignored.
+///
+/// # Safety
+///
+/// `s` must be null or a pointer returned by [`datu_wallet_request`] that has
+/// not been freed already.
 #[no_mangle]
 pub unsafe extern "C" fn datu_string_free(s: *mut c_char) {
     if !s.is_null() {

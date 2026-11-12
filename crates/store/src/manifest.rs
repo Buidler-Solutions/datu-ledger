@@ -253,7 +253,7 @@ fn compile_impl(
         let nexts: Vec<&Loaded> = docs
             .iter()
             .filter(|m| m.doc.supersedes.as_deref() == Some(current_id.as_str()))
-            .filter(|m| current_doc.roots.iter().any(|r| *r == m.author))
+            .filter(|m| current_doc.roots.contains(&m.author))
             .collect();
         match nexts.len() {
             0 => break,
@@ -318,7 +318,7 @@ pub fn head(store: &Store, network_id: &str) -> Result<Option<(String, Vec<Strin
         let nexts: Vec<&Loaded> = docs
             .iter()
             .filter(|m| m.doc.supersedes.as_deref() == Some(current_id.as_str()))
-            .filter(|m| current_roots.iter().any(|r| *r == m.author))
+            .filter(|m| current_roots.contains(&m.author))
             .collect();
         match nexts.len() {
             0 => return Ok(Some((current_id, current_roots))),
@@ -464,7 +464,7 @@ fn status_impl(
         .into_iter()
         .find(|c| {
             c.body.signer != author
-                && !self_key.is_some_and(|me| me == c.body.signer)
+                && self_key.is_none_or(|me| me != c.body.signer)
                 && c.body.timestamp_ms >= published
         });
     match witness {
@@ -487,7 +487,7 @@ fn status_impl(
 
 /// Does `author` satisfy the pin? No pin means "no check to make".
 fn author_pinned(author: &str, pinned: Option<&[String]>) -> bool {
-    pinned.map_or(true, |roots| roots.iter().any(|r| r == author))
+    pinned.is_none_or(|roots| roots.iter().any(|r| r == author))
 }
 
 /// The competing claims behind a split, for reporting. Best effort: it is
@@ -510,7 +510,7 @@ fn competing_claims(docs: &[Loaded], pinned: Option<&[String]>) -> Vec<(String, 
         let mut claimants: Vec<&Loaded> = docs
             .iter()
             .filter(|n| n.doc.supersedes.as_deref() == Some(m.id.as_str()))
-            .filter(|n| m.doc.roots.iter().any(|r| *r == n.author))
+            .filter(|n| m.doc.roots.contains(&n.author))
             .collect();
         claimants.sort_by(|a, b| a.id.cmp(&b.id));
         if claimants.len() > 1 {

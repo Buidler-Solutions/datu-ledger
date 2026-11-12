@@ -1103,8 +1103,8 @@ fn cmd_wallet_list(data_dir: &Path) -> Result<(), String> {
         return Ok(());
     }
     println!(
-        "{:<12}  {:<16}  {:<8}  {}",
-        "name", "author(ed)", "created", "seal key (x25519)"
+        "{:<12}  {:<16}  {:<8}  seal key (x25519)",
+        "name", "author(ed)", "created"
     );
     for id in identities {
         println!(
@@ -1164,6 +1164,7 @@ fn cmd_wallet_sign(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_wallet_seal(
     data_dir: &Path,
     name: &str,
@@ -1259,6 +1260,7 @@ fn cmd_wallet_open(
 /// Seal selected fields for deferred delivery. The document carries
 /// unopenable ciphertext from day one; the release secrets come back as a
 /// side file the issuer keeps until the release entry publishes them.
+#[allow(clippy::too_many_arguments)]
 fn cmd_wallet_seal_deferred(
     data_dir: &Path,
     name: &str,
@@ -1638,7 +1640,7 @@ fn cmd_get(node: &Node, id_hex: String) -> Result<(), String> {
         "namespace": e.body.namespace,
         "seq": e.body.seq,
         "prev": e.body.prev.map(hex::encode),
-        "refs": e.body.refs.iter().map(|r| hex::encode(r)).collect::<Vec<_>>(),
+        "refs": e.body.refs.iter().map(hex::encode).collect::<Vec<_>>(),
         "timestamp_ms": e.body.timestamp_ms,
         "payload": String::from_utf8_lossy(&e.body.payload),
         "signature": hex::encode(e.signature),
@@ -2048,8 +2050,8 @@ fn cmd_witness_list(node: &Node) -> Result<(), String> {
         }
     }
     println!(
-        "{:<16}  {:>6}  {:>8}  {}",
-        "signer", "height", "entries", "merkle root"
+        "{:<16}  {:>6}  {:>8}  merkle root",
+        "signer", "height", "entries"
     );
     for (signer, cp) in &latest {
         println!(
@@ -2122,13 +2124,12 @@ fn cmd_witness_prove(
                 .into_iter()
                 .find(|cp| s(cp.id()).map(|x| x == id).unwrap_or(false))
                 .ok_or_else(|| format!("signed checkpoint {} vanished", hex::encode(id)))
-                .map(|cp| {
+                .inspect(|cp| {
                     println!(
                         "signed checkpoint {} (height {height}) over {} entries",
                         hex::encode(id),
                         cp.body.entries_count
                     );
-                    cp
                 })?
         }
     };
@@ -2275,7 +2276,7 @@ fn cmd_prove_fork(
     } else {
         return Err("provide --a and --b, or --against".into());
     };
-    evidence.sort_by(|x, y| y.height.cmp(&x.height));
+    evidence.sort_by_key(|entry| std::cmp::Reverse(entry.height));
 
     let verdict = if evidence.is_empty() {
         "NO_CONTRADICTIONS"
@@ -2828,7 +2829,7 @@ fn pull_peer_http(store: &Store, peer: &str, page: usize) -> Result<SyncStats, S
                         "peer serves history contradicting ours at author {} seq {}: {} - this is fork evidence, not a sync error; collect the peer's witness stream and run `datu prove-fork`",
                         short(&entry.body.author),
                         entry.body.seq,
-                        entry.id().map(|i| hex::encode(i)).unwrap_or_default()
+                        entry.id().map(hex::encode).unwrap_or_default()
                     ));
                 }
                 Err(e) => return Err(e.to_string()),
@@ -2901,6 +2902,7 @@ fn cmd_delta_merge(node: &Node, mesh: &str, input: &Path) -> Result<(), String> 
 
 // ---- writer policy (validators gated, observers free) ----
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_policy_init(
     data_dir: &Path,
     attestors: Vec<String>,
@@ -3087,10 +3089,12 @@ fn cmd_manifest_init(data_dir: &Path, network_id: String, out: PathBuf) -> Resul
                 .into(),
         );
     }
-    let mut policy = WritePolicy::default();
-    policy.version = datu_store::POLICY_VERSION;
-    policy.gated = vec!["gov.*".into()];
-    policy.attestors = vec![node.identity.clone()];
+    let policy = WritePolicy {
+        version: datu_store::POLICY_VERSION,
+        gated: vec!["gov.*".into()],
+        attestors: vec![node.identity.clone()],
+        ..WritePolicy::default()
+    };
     let mut doc = datu_store::ManifestDoc::new(&network_id, vec![node.identity.clone()], policy);
     doc.note = Some(
         "founding manifest - edit the policy, keep the roots, then `datu manifest publish`".into(),
@@ -3817,7 +3821,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 }
                 // Offline: no node, no store - the artifact carries its own
                 // evidence, which is the whole point.
-                WitnessCmd::VerifyProof { input } => cmd_witness_verify_proof(&input),
+                WitnessCmd::VerifyProof { input } => cmd_witness_verify_proof(input),
             }
         }
         Commands::ProveFork { a, b, against, out } => cmd_prove_fork(
@@ -3871,9 +3875,9 @@ fn run(cli: Cli) -> Result<(), String> {
                     &pass,
                     to,
                     to_fields,
-                    &input,
-                    &fields,
-                    &out,
+                    input,
+                    fields,
+                    out,
                 )
             }
             WalletCmd::SealDeferred {
@@ -3893,10 +3897,10 @@ fn run(cli: Cli) -> Result<(), String> {
                     &pass,
                     to,
                     to_field,
-                    &input,
-                    &fields,
-                    &out,
-                    &release_out,
+                    input,
+                    fields,
+                    out,
+                    release_out,
                 )
             }
             WalletCmd::ReleaseDeferred {
@@ -3915,13 +3919,13 @@ fn run(cli: Cli) -> Result<(), String> {
                 };
                 cmd_wallet_release_deferred(
                     &cli.data_dir,
-                    &input,
+                    input,
                     field,
                     release.as_ref(),
                     *recover,
                     name.as_deref(),
                     pass.as_deref(),
-                    &out,
+                    out,
                 )
             }
             WalletCmd::OpenDeferred {
@@ -3933,7 +3937,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 out,
             } => {
                 let pass = get_passphrase(passphrase.clone())?;
-                cmd_wallet_open_deferred(&cli.data_dir, name, &pass, &input, &field, &release, &out)
+                cmd_wallet_open_deferred(&cli.data_dir, name, &pass, input, field, release, out)
             }
             WalletCmd::Open {
                 name,
@@ -3942,7 +3946,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 out,
             } => {
                 let pass = get_passphrase(passphrase.clone())?;
-                cmd_wallet_open(&cli.data_dir, name, &pass, &input, &out)
+                cmd_wallet_open(&cli.data_dir, name, &pass, input, out)
             }
             WalletCmd::Export {
                 name,
@@ -4308,7 +4312,9 @@ mod tests {
         ))
         .expect("a verified chain must verify");
         let store = Store::open(&d.join("node.db")).unwrap();
-        let st = datu_store::manifest::status(&store, "gov-mesh", &[root.clone()], None).unwrap();
+        let st =
+            datu_store::manifest::status(&store, "gov-mesh", std::slice::from_ref(&root), None)
+                .unwrap();
         assert_eq!(
             st.freshness,
             datu_store::Freshness::Stale,
@@ -4406,7 +4412,7 @@ mod tests {
         let revokes = attest::revocations_for(entries.iter(), &attestation_id);
         assert_eq!(revokes.len(), 1, "one revocation statement on the ledger");
         assert_eq!(revokes[0].1.reason.as_deref(), Some("rotated"));
-        let revoked = attest::revoked_by(entries.iter(), &[node.identity.clone()]);
+        let revoked = attest::revoked_by(entries.iter(), std::slice::from_ref(&node.identity));
         assert!(revoked.contains(&attestation_id));
 
         // Both status views render the revocation without error.

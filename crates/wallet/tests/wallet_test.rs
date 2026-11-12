@@ -66,7 +66,7 @@ fn seal_and_open_roundtrip() {
         .seal_fields(
             &mut doc,
             &["bid_amount".to_string(), "tax_id".to_string()],
-            &[ministry.public.seal_public.clone()],
+            std::slice::from_ref(&ministry.public.seal_public),
         )
         .unwrap();
     assert_eq!(sealed_count, 2);
@@ -104,7 +104,7 @@ fn sealed_field_tamper_detected() {
     a.seal_fields(
         &mut doc,
         &["secret".to_string()],
-        &[b.public.seal_public.clone()],
+        std::slice::from_ref(&b.public.seal_public),
     )
     .unwrap();
 

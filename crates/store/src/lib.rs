@@ -309,8 +309,8 @@ pub struct VerifyReport {
     pub lineage: bool,
     /// Feed conflicts recorded as evidence: an admitted author signed two
     /// different entries at the same (author, seq). Both sides are preserved
-    /// - the stored one in `entries`, the incoming one in `conflicts` - so
-    /// the dispute is visible, not silently resolved.
+    /// (the stored one in `entries`, the incoming one in `conflicts`), so the
+    /// dispute is visible, not silently resolved.
     pub conflicts: u64,
     /// Entries declaring a document contract their document does not (or
     /// cannot) satisfy, recounted by the same pure predicate admission
@@ -1184,14 +1184,14 @@ impl Store {
             for pair in feed.windows(2) {
                 let a = &pair[0];
                 let b = &pair[1];
-                if b.body.seq == a.body.seq + 1 {
-                    if b.body.prev != Some(a.id().map_err(StoreError::Core)?) {
-                        return Err(StoreError::Chain(format!(
-                            "feed break for author {} at seq {}",
-                            &author[..8.min(author.len())],
-                            b.body.seq
-                        )));
-                    }
+                if b.body.seq == a.body.seq + 1
+                    && b.body.prev != Some(a.id().map_err(StoreError::Core)?)
+                {
+                    return Err(StoreError::Chain(format!(
+                        "feed break for author {} at seq {}",
+                        &author[..8.min(author.len())],
+                        b.body.seq
+                    )));
                 }
             }
         }

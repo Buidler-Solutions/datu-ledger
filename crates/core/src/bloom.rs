@@ -28,7 +28,7 @@ impl BloomFilter {
         let m = ((-(n * fpr.ln()) / (ln2 * ln2)).ceil() as u64).max(64);
         let k = (((m as f64 / n) * ln2).round() as u32).clamp(1, 30);
         BloomFilter {
-            bits: vec![0u64; (m as usize + 63) / 64],
+            bits: vec![0u64; (m as usize).div_ceil(64)],
             k,
             m,
         }
@@ -38,7 +38,7 @@ impl BloomFilter {
         if m == 0 || k == 0 || k > 30 {
             return None;
         }
-        let words = (m as usize + 63) / 64;
+        let words = (m as usize).div_ceil(64);
         if bit_bytes.len() != words * 8 {
             return None;
         }

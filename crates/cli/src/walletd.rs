@@ -48,7 +48,7 @@ use datu_wallet::{IdentityBackup, LoadedIdentity, Wallet};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -112,7 +112,7 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
 
 fn handle(
     stream: TcpStream,
-    data_dir: &PathBuf,
+    data_dir: &Path,
     token: &str,
     origins: &[String],
 ) -> Result<(), String> {
@@ -137,7 +137,7 @@ fn handle(
 
 fn handle_inner(
     stream: &mut TcpStream,
-    data_dir: &PathBuf,
+    data_dir: &Path,
     token: &str,
     origins: &[String],
 ) -> Result<(), String> {
@@ -714,7 +714,9 @@ fn string_list(body: &serde_json::Value, name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn read_request(stream: &TcpStream) -> Option<(String, String, Vec<u8>, HashMap<String, String>)> {
+type RawRequest = (String, String, Vec<u8>, HashMap<String, String>);
+
+fn read_request(stream: &TcpStream) -> Option<RawRequest> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;

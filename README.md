@@ -775,7 +775,8 @@ verdict on every node, forever. The sandbox rules:
 The guest ABI is three exports: `memory` (linear memory), `alloc(size)
 -> ptr`, and `evaluate(in_ptr, in_len, out_ptr, out_cap) -> written`,
 where returning `0` admits and any other value denies with the reason
-bytes written to `out_ptr`. Any wasm32 toolchain works (Rust, C,
+bytes written to `out_ptr`. `datu contract check` reports the fuel each
+verdict consumed against the cap: metering is reported, never priced. Any wasm32 toolchain works (Rust, C,
 AssemblyScript, or hand-written WAT). `datu contract show` elides the
 base64 blob instead of dumping it, `datu contract check` executes the
 rule with a per-condition `wasm` line carrying the guest's own denial
@@ -850,7 +851,8 @@ anchors, no accounts:
   validator node. The registry workspace also carries the release step:
   load a deferred document plus its release-secrets file and the dApp
   produces the share object a release entry publishes plus a release-entry
-  skeleton carrying it (no signature needed - releasing is a ledger act),
+  skeleton carrying it, and drafts contract specs (JSON DSL or a wasm
+  module read and base64-encoded in the browser) (no signature needed - releasing is a ledger act),
   closing the deferred loop without the CLI. After recording a title the
   registry workspace also reports how many fresh witness checkpoints cover
   the new entry, and says plainly that it is the node's report: re-verify

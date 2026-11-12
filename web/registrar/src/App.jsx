@@ -266,6 +266,8 @@ export default function App() {
   const [registrarEnvelope, setRegistrarEnvelope] = useState(null);
   const [deferRelease, setDeferRelease] = useState(false);
   const [releaseSecrets, setReleaseSecrets] = useState(null);
+  const [contractAdmits, setContractAdmits] = useState('');
+  const [contractWasmB64, setContractWasmB64] = useState(null);
   const [releaseDoc, setReleaseDoc] = useState('');
   const [releaseSecretsText, setReleaseSecretsText] = useState('');
   const [releaseField, setReleaseField] = useState('');
@@ -694,6 +696,33 @@ export default function App() {
   }
 
   // ---- document contracts: pending agreements (conditions outstanding) ----
+  // ---- registry: draft a contract spec ----
+  async function onContractWasm(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) {
+      setContractWasmB64(null);
+      return;
+    }
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = '';
+      for (const b of bytes) binary += String.fromCharCode(b);
+      setContractWasmB64(btoa(binary));
+      say(`wasm module loaded: ${bytes.length} bytes (base64-encoded into the spec)`);
+    } catch (err) {
+      say(`cannot read the module: ${err.message}`, 'err');
+    }
+  }
+
+  function downloadContractSpec() {
+    const admits = contractAdmits.trim();
+    if (!admits) return say('enter the document kind the contract admits', 'err');
+    const spec = { version: 1, admits };
+    if (contractWasmB64) spec.wasm = contractWasmB64;
+    downloadJson(`${admits.replace(/[^a-z0-9._-]/gi, '-')}-contract-spec.json`, spec);
+    say('contract spec drafted; sign it into a gov.contract document before publishing', 'ok');
+  }
+
   // ---- registry: release a deferred field ----
   async function makeRelease() {
     setBusy(true);
@@ -1193,6 +1222,30 @@ export default function App() {
                 </label>
               </>
             )}
+          </div>
+
+          <div className="card">
+            <h2>Draft a contract</h2>
+            <p className="muted small">
+              Build the spec JSON for a document contract: a JSON-DSL skeleton, or a deterministic
+              wasm predicate whose body is base64-encoded here. Sign it into a gov.contract
+              document and publish it (datu wallet cosign-doc, then datu publish).
+            </p>
+            <label>
+              Admits (document kind)
+              <input
+                value={contractAdmits}
+                onChange={(e) => setContractAdmits(e.target.value)}
+                placeholder="land.title.grant"
+              />
+            </label>
+            <label>
+              wasm module (.wasm), optional
+              <input type="file" accept=".wasm" onChange={onContractWasm} />
+            </label>
+            <button onClick={downloadContractSpec} disabled={!contractAdmits.trim()}>
+              Download contract spec
+            </button>
           </div>
 
           <div className="card">

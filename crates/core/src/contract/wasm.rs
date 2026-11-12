@@ -34,10 +34,10 @@
 //! * `memory` - its linear memory;
 //! * `alloc(size: i32) -> i32` - return a pointer to `size` writable
 //!   bytes (a bump allocator is fine; the host only needs fresh space);
-//! * `evaluate(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32`
-//!   - read the JSON input from `memory[in_ptr .. in_ptr+in_len]`, and
-//!   return `0` to **admit**; otherwise write a UTF-8 denial reason to
-//!   `out_ptr` (at most `out_cap` bytes) and return its length.
+//! * `evaluate(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32`:
+//!   read the JSON input from `memory[in_ptr .. in_ptr+in_len]`, and return
+//!   `0` to **admit**; otherwise write a UTF-8 denial reason to `out_ptr`
+//!   (at most `out_cap` bytes) and return its length.
 
 use super::{ClosureEntry, ConditionKind, ConditionStatus, ContractReport, ContractSpec};
 use crate::parties::SignedDocument;
@@ -119,7 +119,7 @@ fn run(
     document: &SignedDocument,
     entry_ts: u64,
     closure: &[ClosureEntry],
-) -> Result<Option<String>, String> {
+) -> Result<(Option<String>, u64), String> {
     let bytes = B64
         .decode(wasm_b64)
         .map_err(|_| "contract wasm is not valid base64".to_string())?;
@@ -197,10 +197,11 @@ fn run(
         .call(&mut store, (in_ptr, in_len, out_ptr, OUT_CAP))
         .map_err(|e| format!("contract wasm trapped (or exhausted its fuel): {e}"))?;
 
+    let fuel_used = store.fuel_consumed().unwrap_or(0);
     if written == 0 {
-        return Ok(None);
+        return Ok((None, fuel_used));
     }
-    if written < 0 || written > OUT_CAP {
+    if !(0..=OUT_CAP).contains(&written) {
         return Err(format!(
             "contract wasm returned a bad byte count {written} (0 admits; 1..={OUT_CAP} denies with a reason)"
         ));
@@ -210,11 +211,14 @@ fn run(
         .read(&store, out_ptr as usize, &mut out)
         .map_err(|_| "contract wasm memory read failed".to_string())?;
     let reason = String::from_utf8_lossy(&out).trim().to_string();
-    Ok(Some(if reason.is_empty() {
-        "the wasm predicate denied this document (no reason given)".to_string()
-    } else {
-        reason
-    }))
+    Ok((
+        Some(if reason.is_empty() {
+            "the wasm predicate denied this document (no reason given)".to_string()
+        } else {
+            reason
+        }),
+        fuel_used,
+    ))
 }
 
 /// Sandboxed evaluation surface: a single WASM-kind condition plus the
@@ -228,9 +232,12 @@ pub fn evaluate(
     entry_ts: u64,
     closure: &[ClosureEntry],
 ) -> ContractReport {
-    let (met, reason) = match run(spec, wasm_b64, document, entry_ts, closure) {
-        Ok(None) => (true, None),
-        Ok(Some(reason)) | Err(reason) => (false, Some(reason)),
+    // Fuel is reported, not priced: it tells an author how close a rule runs
+    // to the cap (metering replaces gas; there is nothing to pay).
+    let (met, reason, fuel) = match run(spec, wasm_b64, document, entry_ts, closure) {
+        Ok((None, fuel)) => (true, None, fuel),
+        Ok((Some(reason), fuel)) => (false, Some(reason), fuel),
+        Err(fault) => (false, Some(fault), 0),
     };
     ContractReport {
         admitted: met,
@@ -239,11 +246,10 @@ pub fn evaluate(
             kind: ConditionKind::Wasm,
             requirement: "the wasm predicate admits this document".into(),
             required: "admitted".into(),
-            found: if met {
-                "admitted".into()
-            } else {
-                "denied".into()
-            },
+            found: format!(
+                "{} (fuel {fuel}/{WASM_FUEL})",
+                if met { "admitted" } else { "denied" }
+            ),
             met,
         }],
     }
@@ -437,7 +443,7 @@ mod tests {
         for required in ["memory", "alloc", "evaluate"] {
             assert!(exports.iter().any(|name| name == required), "{required}");
         }
-        assert!(check_module(b" not wasm").is_err());
+        assert!(check_module(b"\x00not wasm").is_err());
     }
 
     #[test]
@@ -452,7 +458,7 @@ mod tests {
     #[test]
     fn wasm_oversize_module_is_a_denial() {
         let mut spec = wasm_spec(SCAN_WAT);
-        spec.wasm = Some(B64.encode(&vec![0u8; MAX_WASM_BYTES + 1]));
+        spec.wasm = Some(B64.encode(vec![0u8; MAX_WASM_BYTES + 1]));
         let report = spec.evaluate_report(&doc_with_parcel("PH-1"), 2000, &[]);
         assert!(!report.admitted);
         assert!(report.reasons.iter().any(|r| r.contains("size cap")));

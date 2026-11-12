@@ -59,7 +59,7 @@ fn attestation_roundtrip_and_lookup() {
     // A random signed entry is not an attestation.
     assert!(parse_attestation(&signed(&other, "general", 0, vec![], b"{}".to_vec())).is_none());
 
-    let all = vec![&a1, &unrelated];
+    let all = [&a1, &unrelated];
     let found = attestations_for(all.iter().copied(), &subject);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].0.id().unwrap(), a1_id);
@@ -97,7 +97,7 @@ fn cosigners_count_distinct_authors_only() {
     // An entry that references the attestation but is not a cosign doc.
     let bystander = signed(&press, NS_COSIGN, 1, vec![id], b"{}".to_vec());
 
-    let all = vec![&attestation, &c1, &c2, &c3, &bystander];
+    let all = [&attestation, &c1, &c2, &c3, &bystander];
     let cosigners = cosigners_for(all.iter().copied(), &id);
     assert_eq!(cosigners.len(), 2, "one entry per distinct author");
 

@@ -351,7 +351,7 @@ fn delta_request_response_offline_roundtrip() {
     for e in &entries {
         alice.insert_entry(e).unwrap();
     }
-    let cps = vec![cp(
+    let cps = [cp(
         &a,
         0,
         None,

@@ -59,6 +59,7 @@ fn make_entry(
     Entry::sign(body, &k.ed, &k.pq).unwrap()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn publish(
     store: &Store,
     k: &Keys,
@@ -146,9 +147,11 @@ fn fixture_with(spec: &ContractSpec, contract_ns: &str) -> Fixture {
     let registrar = keys();
     let inspector = keys();
     let holder = keys();
-    let mut policy = WritePolicy::default();
-    policy.gated = vec!["gov.titles.*".into(), "gov.contracts".into()];
-    policy.writers = vec![registrar.author.clone()];
+    let policy = WritePolicy {
+        gated: vec!["gov.titles.*".into(), "gov.contracts".into()],
+        writers: vec![registrar.author.clone()],
+        ..WritePolicy::default()
+    };
     let store = Store::open_in_memory_with_policy(Some(policy)).unwrap();
 
     let issuer = SigningKey::generate(&mut OsRng);
@@ -223,7 +226,11 @@ fn wasm_contract_body_admits_and_denies() {
         .find(|c| c.kind == ConditionKind::Wasm)
         .unwrap();
     assert!(!wasm_condition.met);
-    assert_eq!(wasm_condition.found, "denied");
+    assert!(
+        wasm_condition.found.starts_with("denied"),
+        "fuel is reported with the verdict: {}",
+        wasm_condition.found
+    );
 
     let message = denied_message(fx.store.insert_entry(&denied_entry));
     assert!(

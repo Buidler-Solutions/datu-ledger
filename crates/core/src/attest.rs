@@ -272,7 +272,7 @@ mod tests {
         .payload_bytes()
         .unwrap();
 
-        let entries = vec![
+        let entries = [
             signed(NS_REVOKE, &good, &root, &root_pq, 0),
             signed(NS_REVOKE, &untrusted, &stranger, &stranger_pq, 0),
             signed(NS_REVOKE, &malformed, &root, &root_pq, 1),
@@ -304,7 +304,7 @@ mod tests {
             .payload_bytes()
             .unwrap()
         };
-        let entries = vec![
+        let entries = [
             signed(NS_REVOKE, &make(&subject), &root, &root_pq, 0),
             signed(
                 NS_REVOKE,

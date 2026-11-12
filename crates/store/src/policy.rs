@@ -262,10 +262,7 @@ impl Store {
         if required.is_empty() && sealed_fields.is_empty() && cap.is_none() {
             return self.enforce_contract(entry);
         }
-        let document = match SignedDocument::from_payload(&entry.body.payload) {
-            Some(document) => Some(document),
-            None => None,
-        };
+        let document = SignedDocument::from_payload(&entry.body.payload);
         if !required.is_empty() {
             let document = match &document {
                 Some(document) => document,

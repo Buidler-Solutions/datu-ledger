@@ -5,7 +5,7 @@ fn no_false_negatives_and_low_false_positives() {
     let n = 1000;
     let mut filter = BloomFilter::new_for(n, 0.001);
     let present: Vec<[u8; 32]> = (0..n as u64)
-        .map(|i| blake3::hash(&i.to_le_bytes()).as_bytes().clone())
+        .map(|i| *blake3::hash(&i.to_le_bytes()).as_bytes())
         .collect();
     for id in &present {
         filter.insert(id);
@@ -14,7 +14,7 @@ fn no_false_negatives_and_low_false_positives() {
         assert!(filter.contains(id), "false negative - impossible by design");
     }
     let absent: Vec<[u8; 32]> = (10_000..20_000u64)
-        .map(|i| blake3::hash(&i.to_le_bytes()).as_bytes().clone())
+        .map(|i| *blake3::hash(&i.to_le_bytes()).as_bytes())
         .collect();
     let fp = absent
         .iter()

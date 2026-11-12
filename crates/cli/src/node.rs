@@ -135,6 +135,7 @@ pub fn discover(seconds: u64) -> Result<(), String> {
 }
 
 /// The `datu node` daemon.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     data_dir: &Path,
     addr: &str,
@@ -271,22 +272,19 @@ pub fn run(
     loop {
         let mut targets = peers.clone();
         if discover {
-            match discover_peers(2) {
-                Ok(found) => {
-                    for (address, identity, peer_network) in found {
-                        let same_mesh = peer_network == our_id;
-                        if !same_mesh {
-                            println!(
-                                "[discover] skipping {address}: on {}, we are on {}",
-                                mesh_name(&peer_network),
-                                mesh_name(&our_id)
-                            );
-                        } else if identity != node.identity && !targets.contains(&address) {
-                            targets.push(address);
-                        }
+            if let Ok(found) = discover_peers(2) {
+                for (address, identity, peer_network) in found {
+                    let same_mesh = peer_network == our_id;
+                    if !same_mesh {
+                        println!(
+                            "[discover] skipping {address}: on {}, we are on {}",
+                            mesh_name(&peer_network),
+                            mesh_name(&our_id)
+                        );
+                    } else if identity != node.identity && !targets.contains(&address) {
+                        targets.push(address);
                     }
                 }
-                Err(_) => {}
             }
         }
         for peer in &targets {
