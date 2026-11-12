@@ -175,6 +175,54 @@ class NativeWalletBridge implements WalletBridge {
           'payload_json': payloadJson,
         },
       });
+
+  @override
+  Future<Map<String, dynamic>> verifyEntry({
+    required Map<String, dynamic> entry,
+  }) =>
+      _call({
+        'action': 'verify-entry',
+        'entry': entry,
+      });
+
+  @override
+  Future<Map<String, dynamic>> openFields({
+    required String name,
+    required String passphrase,
+    required Map<String, dynamic> document,
+  }) =>
+      _call({
+        'action': 'open',
+        'name': name,
+        'passphrase': passphrase,
+        'document': document,
+      });
+
+  @override
+  Future<Map<String, dynamic>> exportIdentity({
+    required String name,
+    required String passphrase,
+    required String backupPassphrase,
+  }) =>
+      _call({
+        'action': 'export',
+        'name': name,
+        'passphrase': passphrase,
+        'backup_passphrase': backupPassphrase,
+      });
+
+  @override
+  Future<Map<String, dynamic>> importIdentity({
+    required Map<String, dynamic> backup,
+    required String passphrase,
+    String? rename,
+  }) =>
+      _call({
+        'action': 'import',
+        'backup': backup,
+        'passphrase': passphrase,
+        'rename': ?rename,
+      });
 }
 
 void _throwIfError(Map<String, dynamic> res) {

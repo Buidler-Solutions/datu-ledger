@@ -47,6 +47,12 @@ class BridgeLauncher {
     return token.isEmpty ? null : token;
   }
 
+  /// The bridge's pairing token, for explicit pairing (e.g. pasting into the
+  /// browser wallet extension's Settings tab). Null when no bridge has run
+  /// in this data dir yet.
+  static Future<String?> readPairingToken() async =>
+      _readToken(await dataDir());
+
   static Future<bool> _healthy(String baseUrl, String token) async {
     try {
       final dio = Dio(

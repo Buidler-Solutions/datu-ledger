@@ -47,6 +47,36 @@ abstract class WalletBridge {
     required Map<String, dynamic> payloadJson,
   });
 
+  /// Verify a ledger entry fetched from ANY node - locally, without trusting
+  /// the node that served it (Ed25519 + ML-DSA-65 + party signatures).
+  Future<Map<String, dynamic>> verifyEntry({
+    required Map<String, dynamic> entry,
+  });
+
+  /// Decrypt the fields of [document] that are sealed to this identity
+  /// (`open_fields` in the core; named `openFields` here because `open` is
+  /// taken by the native bridge's static constructor).
+  Future<Map<String, dynamic>> openFields({
+    required String name,
+    required String passphrase,
+    required Map<String, dynamic> document,
+  });
+
+  /// Export an identity as a portable backup encrypted with a separate
+  /// backup passphrase.
+  Future<Map<String, dynamic>> exportIdentity({
+    required String name,
+    required String passphrase,
+    required String backupPassphrase,
+  });
+
+  /// Restore a backup produced by [exportIdentity].
+  Future<Map<String, dynamic>> importIdentity({
+    required Map<String, dynamic> backup,
+    required String passphrase,
+    String? rename,
+  });
+
   static String pretty(Object? value) =>
       const JsonEncoder.withIndent('  ').convert(value);
 }
@@ -153,6 +183,58 @@ class HttpWalletBridge implements WalletBridge {
         'prev': prev,
         'payload_json': payloadJson,
       },
+    });
+    return (res.data as Map).cast<String, dynamic>();
+  }
+
+  @override
+  Future<Map<String, dynamic>> verifyEntry({
+    required Map<String, dynamic> entry,
+  }) async {
+    final res = await _dio.post('$baseUrl/v1/wallet/verify-entry', data: {
+      'entry': entry,
+    });
+    return (res.data as Map).cast<String, dynamic>();
+  }
+
+  @override
+  Future<Map<String, dynamic>> openFields({
+    required String name,
+    required String passphrase,
+    required Map<String, dynamic> document,
+  }) async {
+    final res = await _dio.post('$baseUrl/v1/wallet/open', data: {
+      'name': name,
+      'passphrase': passphrase,
+      'document': document,
+    });
+    return (res.data as Map).cast<String, dynamic>();
+  }
+
+  @override
+  Future<Map<String, dynamic>> exportIdentity({
+    required String name,
+    required String passphrase,
+    required String backupPassphrase,
+  }) async {
+    final res = await _dio.post('$baseUrl/v1/wallet/export', data: {
+      'name': name,
+      'passphrase': passphrase,
+      'backup_passphrase': backupPassphrase,
+    });
+    return (res.data as Map).cast<String, dynamic>();
+  }
+
+  @override
+  Future<Map<String, dynamic>> importIdentity({
+    required Map<String, dynamic> backup,
+    required String passphrase,
+    String? rename,
+  }) async {
+    final res = await _dio.post('$baseUrl/v1/wallet/import', data: {
+      'backup': backup,
+      'passphrase': passphrase,
+      'rename': ?rename,
     });
     return (res.data as Map).cast<String, dynamic>();
   }
