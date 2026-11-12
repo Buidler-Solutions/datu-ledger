@@ -87,6 +87,9 @@ jobs:
     needs: [binaries, web]
     runs-on: ubuntu-22.04
     steps:
+      # The curated release note lives in the repo; the artifacts came from
+      # other jobs, so check out to reach docs/release-notes/<tag>.md.
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v5
         with:
           path: artifacts
