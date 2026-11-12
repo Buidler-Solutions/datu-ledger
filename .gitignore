@@ -8,3 +8,8 @@ secret.key
 secret.mldsa65
 .crush/
 .DS_Store
+
+# Local-only workspace: specs, session logs, demo credentials (private keys,
+# bridge tokens, keystores). Never commit, never push - enforced by the
+# global pre-commit hook and pre-push guard.
+.dev-logs/
