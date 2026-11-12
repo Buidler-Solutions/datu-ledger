@@ -281,6 +281,57 @@ fn handle_inner(
                 }),
             )
         }
+        // Deferred delivery, issuer side: seal fields now, hand back the
+        // release secrets; the release entry publishes the key half later.
+        ("POST", "/v1/wallet/seal-deferred") => {
+            let body_json = parse_body(&body)?;
+            let name = str_field(&body_json, "name")?;
+            let passphrase = str_field(&body_json, "passphrase")?;
+            let identity = load_guarded(&wallet, &name, &passphrase)?;
+            let mut document = body_json
+                .get("document")
+                .cloned()
+                .ok_or("missing 'document'")?;
+            let fields = string_list(&body_json, "fields");
+            let mut holders = string_list(&body_json, "to");
+            for field in string_list(&body_json, "to_fields") {
+                match document.get(&field) {
+                    Some(serde_json::Value::String(key)) => holders.push(key.clone()),
+                    Some(serde_json::Value::Array(items)) => {
+                        for item in items {
+                            if let Some(key) = item.as_str() {
+                                holders.push(key.to_string());
+                            }
+                        }
+                    }
+                    _ => return Err(format!("document has no seal key in field '{field}'")),
+                }
+            }
+            holders.sort();
+            holders.dedup();
+            if holders.len() != 1 {
+                return Err(
+                    "deferred delivery addresses exactly one holder seal key (to / to_fields)"
+                        .into(),
+                );
+            }
+            let releases = identity.seal_deferred_fields(&mut document, &fields, &holders[0])?;
+            let secrets: serde_json::Map<String, serde_json::Value> = releases
+                .iter()
+                .map(|(field, secret)| (field.clone(), serde_json::json!(hex::encode(secret))))
+                .collect();
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({
+                    "ok": true,
+                    "sealed": releases.len(),
+                    "holder": holders[0],
+                    "document": document,
+                    "releases": secrets,
+                }),
+            )
+        }
         ("POST", "/v1/wallet/open") => {
             let body_json = parse_body(&body)?;
             let name = str_field(&body_json, "name")?;

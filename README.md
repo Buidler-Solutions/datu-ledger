@@ -811,8 +811,11 @@ Two browser-facing pieces sit on top of the same protocol - no new trust
 anchors, no accounts:
 
 - **`web/registrar`** - Vite + React land-title form: fills the application,
-  seals personal fields, gets the registrar's consent signature, collects the
-  landowner's consent, and submits the signed entry to a validator node.
+  seals personal fields (or defers them to the holder with the *defer until
+  release* option, which hands the registrar a release-secrets download
+  instead of readable ciphertext), gets the registrar's consent signature,
+  collects the landowner's consent, and submits the signed entry to a
+  validator node.
 - **`web/wallet-extension`** - the citizen's wallet as a **Chrome side panel**
   (MetaMask-style: click the toolbar icon, the panel slides in on the right).
   It is **namespace-agnostic**: land titles, driver licences, procurement
@@ -845,6 +848,7 @@ Both talk to **`datu wallet serve`**, a local bridge (default
 GET  /v1/wallet/identities     public identities (ed + seal keys)
 POST /v1/wallet/party-sign     {name, passphrase, role, document, kind?}
 POST /v1/wallet/seal           {name, passphrase, document, fields, to[], to_fields[]}
+POST /v1/wallet/seal-deferred  {name, passphrase, document, fields, to/to_fields}
 POST /v1/wallet/open           {name, passphrase, document}
 POST /v1/wallet/deferred-open  {name, passphrase, document, field, release}
 POST /v1/wallet/verify-entry   {entry}  → verify both hybrid signatures locally

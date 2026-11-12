@@ -264,6 +264,8 @@ export default function App() {
     holder_seal: '',
   });
   const [registrarEnvelope, setRegistrarEnvelope] = useState(null);
+  const [deferRelease, setDeferRelease] = useState(false);
+  const [releaseSecrets, setReleaseSecrets] = useState(null);
 
   const [holderIn, setHolderIn] = useState('');
   const [holderEnvelope, setHolderEnvelope] = useState(null);
@@ -533,20 +535,37 @@ export default function App() {
             }
           : undefined,
       };
-      say('sealing personal fields to registry + holder…');
+      say(deferRelease
+        ? 'sealing personal fields for deferred delivery to the holder…'
+        : 'sealing personal fields to registry + holder…');
       const sealed = await walletSign({
         bridgeUrl,
-        path: '/v1/wallet/seal',
-        summary: `Seal holder_name + birth_date for ${form.parcel} (readers: registrar + holder)`,
-        body: {
-          name: session.name,
-          document,
-          fields: ['holder_name', 'birth_date'],
-          to: [me.seal_public],
-          to_fields: ['holder_seal'],
-        },
+        path: deferRelease ? '/v1/wallet/seal-deferred' : '/v1/wallet/seal',
+        summary: deferRelease
+          ? `Defer holder_name + birth_date for ${form.parcel} (opens only when a release publishes the key half)`
+          : `Seal holder_name + birth_date for ${form.parcel} (readers: registrar + holder)`,
+        body: deferRelease
+          ? {
+              name: session.name,
+              document,
+              fields: ['holder_name', 'birth_date'],
+              to_fields: ['holder_seal'],
+            }
+          : {
+              name: session.name,
+              document,
+              fields: ['holder_name', 'birth_date'],
+              to: [me.seal_public],
+              to_fields: ['holder_seal'],
+            },
       });
-      say(`${sealed.body.sealed} field(s) sealed to ${sealed.body.readers} readers`);
+      if (deferRelease) {
+        setReleaseSecrets({ version: 1, fields: sealed.body.releases || {} });
+        say(`${sealed.body.sealed} field(s) deferred to the holder - download the release secrets and keep them until release`, 'ok');
+      } else {
+        setReleaseSecrets(null);
+        say(`${sealed.body.sealed} field(s) sealed to ${sealed.body.readers} readers`);
+      }
 
       const signed = await walletSign({
         bridgeUrl,
@@ -969,9 +988,35 @@ export default function App() {
               Holder seal key (X25519) <em className="tag pub">from the claim</em>
               <input value={form.holder_seal} onChange={(e) => setForm({ ...form, holder_seal: e.target.value })} />
             </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={deferRelease}
+                onChange={(e) => setDeferRelease(e.target.checked)}
+              />{' '}
+              Defer the encrypted fields until release: the title lands now, but the holder can
+              open their personal data only when a release publishes the key half
+            </label>
             <button onClick={signAsRegistrar} disabled={busy}>
               Seal fields &amp; sign as registrar
             </button>
+            {releaseSecrets && (
+              <>
+                <p className="muted small">
+                  deferred: {Object.keys(releaseSecrets.fields).length} release key half(s) - keep
+                  this file offline; the release entry publishes it, and only then can the holder
+                  open their data.
+                </p>
+                <button
+                  className="ghost"
+                  onClick={() =>
+                    downloadJson(`${form.parcel || 'title'}-release-secrets.json`, releaseSecrets)
+                  }
+                >
+                  Download release secrets
+                </button>
+              </>
+            )}
             {registrarEnvelope && (
               <>
                 <p className="ok small">
