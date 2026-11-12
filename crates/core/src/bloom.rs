@@ -43,8 +43,8 @@ impl BloomFilter {
             return None;
         }
         let mut bits = Vec::with_capacity(words);
-        for chunk in bit_bytes.chunks_exact(8) {
-            bits.push(u64::from_le_bytes(chunk.try_into().ok()?));
+        for chunk in bit_bytes.as_chunks::<8>().0 {
+            bits.push(u64::from_le_bytes(*chunk));
         }
         Some(BloomFilter { bits, k, m })
     }

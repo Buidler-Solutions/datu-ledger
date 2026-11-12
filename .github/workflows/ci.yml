@@ -11,7 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned so a fresh stable release cannot turn CI red through a new
+      # lint alone; bump deliberately, after running the gates locally.
+      - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
       - name: format
         run: cargo fmt --check
