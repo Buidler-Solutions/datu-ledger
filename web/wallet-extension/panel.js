@@ -561,37 +561,61 @@ async function decryptRecord(index) {
   }
 }
 
-// Open a deferred-delivery field: the user pastes the release object (the
-// 'datu-share-v2' key half the release entry published), the bridge seals
-// nothing new and only recomposes the key locally. Wrong holder, wrong
-// field, or a tampered share fail closed.
-async function openDeferred(index, field) {
-  try {
-    const identity = selected();
-    const rec = myRecords[index];
-    if (!$('pass').value) throw new Error('enter your vault passphrase (Sign tab)');
-    const raw = window.prompt(
-      `Paste the release object for '${field}' (the datu-share-v2 JSON published by the release entry)`,
-    );
-    if (!raw) return;
-    let release;
-    try { release = JSON.parse(raw); } catch { throw new Error('release object must be JSON'); }
-    const data = await bridge('/v1/wallet/deferred-open', {
-      name: identity.name,
-      passphrase: $('pass').value,
-      document: payloadDoc(rec.payload),
-      field,
-      release,
-    });
-    $('decrypted').style.display = 'block';
-    $('decrypted').textContent = `${field} (opened with the release half):
-
-${JSON.stringify(data.value, null, 2)}`;
-    document.querySelector('nav button[data-tab="data"]').click();
-    status(`'${field}' opened - the release half was sealed to you`, 'ok');
-  } catch (e) {
-    status(`cannot open deferred field: ${e.message}`, 'err');
-  }
+// Open a deferred-delivery field: the release entry publishes the key half
+// as a 'datu-share-v2' object; paste it here and the bridge recomposes the
+// key locally. Wrong holder, wrong field, or a tampered share fail closed.
+function openDeferred(index, field) {
+  const rec = myRecords[index];
+  const verdict = $('verdict');
+  verdict.style.display = 'block';
+  verdict.textContent = '';
+  const form = document.createElement('div');
+  const title = document.createElement('div');
+  title.className = 'muted';
+  title.textContent = `Paste the release object the release entry published (datu-share-v2) for '${field}':`;
+  const input = document.createElement('textarea');
+  input.rows = 5;
+  input.placeholder = '{"sealed":"datu-share-v2","recipient":{...}}';
+  const submit = document.createElement('button');
+  submit.className = 'ghost';
+  submit.textContent = 'Open field';
+  const hint = document.createElement('div');
+  hint.className = 'muted';
+  hint.textContent =
+    'The release half is sealed to you only; the field opens with zero trust in the node.';
+  submit.addEventListener('click', async () => {
+    try {
+      const identity = selected();
+      if (!$('pass').value) throw new Error('enter your vault passphrase (Sign tab)');
+      const raw = input.value.trim();
+      if (!raw) throw new Error('paste the release object first');
+      let release;
+      try {
+        release = JSON.parse(raw);
+      } catch {
+        throw new Error('release object must be JSON');
+      }
+      const data = await bridge('/v1/wallet/deferred-open', {
+        name: identity.name,
+        passphrase: $('pass').value,
+        document: payloadDoc(rec.payload),
+        field,
+        release,
+      });
+      $('decrypted').style.display = 'block';
+      $('decrypted').textContent = `${field} (opened with the release half):\n\n${JSON.stringify(
+        data.value,
+        null,
+        2,
+      )}`;
+      document.querySelector('nav button[data-tab="data"]').click();
+      status(`'${field}' opened - the release half was sealed to you`, 'ok');
+    } catch (e) {
+      status(`cannot open deferred field: ${e.message}`, 'err');
+    }
+  });
+  form.append(title, input, submit, hint);
+  verdict.append(form);
 }
 
 // ---------- consent (review, then confirm) ----------

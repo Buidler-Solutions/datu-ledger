@@ -745,3 +745,160 @@ a{color:#58a6ff}code{background:#161b22;padding:.1rem .3rem;border-radius:4px}
 Bind 127.0.0.1. If you can read this page from another machine, stop the bridge.</p>
 </body></html>
 "##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+
+    fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: &str) -> (String, String) {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let auth = token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
+        stream
+            .write_all(
+                format!(
+                    "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        let mut parts = raw.splitn(2, "\r\n");
+        let status = parts.next().unwrap_or("").to_string();
+        let rest = parts.next().unwrap_or("").to_string();
+        let body = rest.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+        (status, body)
+    }
+
+    /// Deferred delivery over the bridge HTTP surface, end to end: token
+    /// auth, the issuer-side seal, and the holder-side open with its
+    /// wrong-holder refusal.
+    #[test]
+    fn deferred_delivery_over_http() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let serve_dir = data.clone();
+        std::thread::spawn(move || {
+            let _ = serve(&serve_dir, &format!("127.0.0.1:{port}"), Vec::new());
+        });
+
+        // The bridge writes its pairing token at startup.
+        let token_path = data.join(TOKEN_FILE);
+        let started = Instant::now();
+        let token = loop {
+            if let Ok(text) = std::fs::read_to_string(&token_path) {
+                let token = text.trim().to_string();
+                if token.len() >= 32 {
+                    break token;
+                }
+            }
+            if started.elapsed() > Duration::from_secs(10) {
+                panic!("bridge did not come up");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        // No token, no service.
+        let (status, _) = http(
+            port,
+            "POST",
+            "/v1/wallet/create",
+            None,
+            &json!({"name": "issuer", "passphrase": "issuer pass"}).to_string(),
+        );
+        assert!(status.contains("401"), "unpaired calls are refused: {status}");
+
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/create",
+            Some(&token),
+            &json!({"name": "issuer", "passphrase": "issuer pass"}).to_string(),
+        );
+        assert!(status.contains("200"), "{status} {body}");
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/create",
+            Some(&token),
+            &json!({"name": "holder", "passphrase": "holder pass"}).to_string(),
+        );
+        assert!(status.contains("200"), "{status} {body}");
+        let holder_seal = serde_json::from_str::<serde_json::Value>(&body).unwrap()
+            ["identity"]["seal_public"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/seal-deferred",
+            Some(&token),
+            &json!({
+                "name": "issuer",
+                "passphrase": "issuer pass",
+                "document": {"cert_id": "C-3", "owner_name": "Amina", "holder_seal": holder_seal},
+                "fields": ["owner_name"],
+                "to_fields": ["holder_seal"],
+            })
+            .to_string(),
+        );
+        assert!(status.contains("200"), "seal-deferred failed: {status} {body}");
+        let sealed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(sealed["document"]["owner_name"]["sealed"], "datu-sealed-deferred-v2");
+        assert!(sealed["releases"]["owner_name"].as_str().is_some());
+
+        // The issuer-side act (CLI/FFI) turns the release secret into the
+        // key half the release entry carries; the bridge only opens.
+        let deferred: datu_wallet::DeferredField =
+            serde_json::from_value(sealed["document"]["owner_name"].clone()).unwrap();
+        let secret: [u8; 32] = hex::decode(sealed["releases"]["owner_name"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let share = datu_wallet::attach_release(&deferred, &secret).unwrap();
+        let release = serde_json::to_value(&share).unwrap();
+
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/deferred-open",
+            Some(&token),
+            &json!({
+                "name": "issuer",
+                "passphrase": "issuer pass",
+                "document": sealed["document"],
+                "field": "owner_name",
+                "release": release,
+            })
+            .to_string(),
+        );
+        assert!(status.contains("400"), "non-holder refused: {status} {body}");
+        assert!(body.contains("another holder"), "{body}");
+
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/deferred-open",
+            Some(&token),
+            &json!({
+                "name": "holder",
+                "passphrase": "holder pass",
+                "document": sealed["document"],
+                "field": "owner_name",
+                "release": release,
+            })
+            .to_string(),
+        );
+        assert!(status.contains("200"), "holder open failed: {status} {body}");
+        let opened: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(opened["value"], json!("Amina"));
+    }
+}
