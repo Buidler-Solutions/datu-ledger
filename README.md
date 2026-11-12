@@ -978,7 +978,17 @@ tokenless, offline-capable operation.
 2. Optional anchoring of checkpoints to Bitcoin (Open Timestamps)
 3. Compact checkpoint encoding for QR / radio broadcast
 4. HPKE sealing + post-quantum KEM (ML-KEM) for long-term field confidentiality
-5. Policy tooling depth: cosigner-only trust sets, per-namespace role rules,
-   revocation-aware admission
-6. Network admission depth: `identity.revoke` (eject an attested node without
-   editing every `network.json`), hello nonces/epoch replay hardening
+5. Browser-side ML-DSA-65 verification (today the panel and explorer verify
+   Ed25519 and the Merkle path; the CLI checks both signatures)
+6. Windows builds (the crate should compile; it is untested there)
+7. hello nonces/epoch replay hardening on the native p2p door
+
+Shipped since the last revision of this list: cosigner-aware admission and
+per-namespace role rules, ledger-carried revocation (`identity.revoke`, both
+attestation-level and key-level), deferred delivery with custody recovery,
+and witness coverage proofs with local verification in the UIs.
+
+## License
+
+MIT, see `LICENSE`. There is no warranty: this is accountability software,
+not a guarantee of any institution's behaviour.

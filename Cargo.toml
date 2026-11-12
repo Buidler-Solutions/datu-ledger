@@ -5,6 +5,7 @@ members = ["crates/core", "crates/store", "crates/cli", "crates/wallet", "crates
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [workspace.dependencies]
 blake3 = "1"
