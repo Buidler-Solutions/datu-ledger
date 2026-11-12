@@ -192,6 +192,23 @@ impl Store {
         let contract_id = declared.parse_id().unwrap_or([0u8; 32]);
         let outlook = match self.resolve_contract(&declared) {
             Err(reason) => ContractOutlook::unresolved(&document, vec![reason]),
+            // A WASM-body contract is not DSL-judgeable: its verdict is a
+            // function of the future satisfying document itself, not of
+            // citation-side evidence, so it cannot be decomposed into
+            // pending conditions. Walkers still see the anchor, the rule,
+            // and the reason; readiness arrives with the document.
+            Ok(spec) if spec.wasm.is_some() => ContractOutlook {
+                contract_id,
+                version: declared.version,
+                kind: document.kind.clone(),
+                admits: spec.admits.clone(),
+                ready: false,
+                reasons: vec![
+                    "the rule is a wasm predicate; the pending view requires the satisfying document".into(),
+                ],
+                conditions: Vec::new(),
+                citing: Vec::new(),
+            },
             Ok(spec) => {
                 // Every stored entry citing the anchor is candidate evidence
                 // for a future satisfying document.

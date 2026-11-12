@@ -1,7 +1,9 @@
 //! Document contracts: admission, evaluation, and reporting.
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use datu_core::contract::{
-    ContractSpec, PartyRequirement, RefRequirement, CONTRACT_KIND, CONTRACT_VERSION,
+    ConditionKind, ContractSpec, PartyRequirement, RefRequirement, CONTRACT_KIND, CONTRACT_VERSION,
 };
 use datu_core::parties::SignedDocument;
 use datu_core::{Entry, EntryBody};
@@ -92,8 +94,38 @@ fn default_spec() -> ContractSpec {
         not_before_field: None,
         not_after_field: None,
         requires_sealed: vec![],
+        wasm: None,
     }
 }
+
+/// A wasm32 needle scanner (the same shape the core tests use): admits
+/// when the input JSON contains "PH-1" (i32 LE 0x312D4850), otherwise
+/// returns the denial reason from its data segment. The trailing
+/// `(unreachable)` is dead code required by wasmi 0.31's validator after
+/// a br-terminated loop in a result-bearing function.
+const SCAN_WAT: &str = r#"
+    (module
+      (memory (export "memory") 1)
+      (global $heap (mut i32) (i32.const 4096))
+      (data (i32.const 1088) "the parcel PH-1 is not mentioned in the document")
+      (func (export "alloc") (param $size i32) (result i32)
+        (local $ptr i32)
+        (local.set $ptr (global.get $heap))
+        (global.set $heap (i32.add (global.get $heap) (local.get $size)))
+        (local.get $ptr))
+      (func (export "evaluate") (param $in_ptr i32) (param $in_len i32) (param $out_ptr i32) (param $out_cap i32) (result i32)
+        (local $i i32)
+        (loop $scan
+          (if (i32.gt_u (i32.add (local.get $i) (i32.const 4)) (local.get $in_len))
+            (then
+              (memory.copy (local.get $out_ptr) (i32.const 1088) (i32.const 48))
+              (return (i32.const 48))))
+          (if (i32.eq (i32.load (i32.add (local.get $in_ptr) (local.get $i))) (i32.const 0x312D4850))
+            (then (return (i32.const 0))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $scan))
+        (unreachable)))
+"#;
 
 /// A gated validator store plus the keys of the drama: the registrar
 /// (admitted writer), the inspector, and the holder. `fixture` also
@@ -150,6 +182,168 @@ fn fixture_with(spec: &ContractSpec, contract_ns: &str) -> Fixture {
 
 fn fixture() -> Fixture {
     fixture_with(&default_spec(), "gov.contracts")
+}
+
+/// A wasm-body contract end to end on a gated validator store: the
+/// module replaces the DSL requirements wholesale, admission runs it,
+/// and denials carry the guest's own words.
+#[test]
+fn wasm_contract_body_admits_and_denies() {
+    let mut spec = default_spec();
+    spec.wasm = Some(B64.encode(wat::parse_str(SCAN_WAT).unwrap()));
+    let mut fx = fixture_with(&spec, "gov.contracts");
+
+    let grant_with_parcel = |fx: &mut Fixture, parcel: &str| {
+        let payload = signed_doc(
+            "land.title.grant",
+            serde_json::json!({
+                "parcel": parcel,
+                "contract": fx.contract_ref(),
+            }),
+            &[("holder", &fx.holder.ed)],
+        );
+        let seq = fx.registrar_seq;
+        let prev = fx.registrar_prev;
+        let entry = make_entry(
+            &fx.registrar,
+            "gov.titles.grant",
+            payload,
+            seq,
+            prev,
+            vec![],
+            2000,
+        );
+        fx.registrar_seq += 1;
+        fx.registrar_prev = Some(entry.id().unwrap());
+        entry
+    };
+
+    // No DSL condition is judged: the guest alone decides.
+    let admitted_entry = grant_with_parcel(&mut fx, "PH-1");
+    assert!(fx.store.insert_entry(&admitted_entry).is_ok());
+
+    let denied_entry = grant_with_parcel(&mut fx, "PH-2");
+    let check = fx.store.check_contract(&denied_entry).unwrap().unwrap();
+    assert!(!check.admitted);
+    assert!(check.reasons.iter().any(|r| r.contains("not mentioned")));
+    let wasm_condition = check
+        .conditions
+        .iter()
+        .find(|c| c.kind == ConditionKind::Wasm)
+        .unwrap();
+    assert!(!wasm_condition.met);
+    assert_eq!(wasm_condition.found, "denied");
+
+    let message = denied_message(fx.store.insert_entry(&denied_entry));
+    assert!(
+        message.contains("not mentioned"),
+        "admission denial carries the guest's reason: {message}"
+    );
+}
+
+/// A wasm rule cannot be decomposed into pending citation-side
+/// conditions: the outlook says so instead of guessing.
+#[test]
+fn wasm_contract_outlook_requires_the_document() {
+    let mut spec = default_spec();
+    spec.admits = "datu.cert.release".into();
+    spec.requires_refs = vec![];
+    spec.requires_parties = vec![];
+    spec.deadline_from_field = None;
+    spec.wasm = Some(B64.encode(wat::parse_str(SCAN_WAT).unwrap()));
+    let mut fx = fixture_with(&spec, "gov.contracts");
+
+    let anchor = publish(
+        &fx.store,
+        &fx.registrar,
+        "records.escrow",
+        signed_doc(
+            "datu.cert.escrow",
+            serde_json::json!({"cert_id": "C-3", "contract": fx.contract_ref()}),
+            &[],
+        ),
+        fx.registrar_seq,
+        fx.registrar_prev,
+        vec![],
+        1000,
+    );
+    fx.registrar_seq += 1;
+    fx.registrar_prev = Some(anchor.id().unwrap());
+
+    let outlook = fx
+        .store
+        .contract_outlook(&anchor.id().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(!outlook.ready);
+    assert!(outlook.conditions.is_empty());
+    assert!(
+        outlook.reasons.iter().any(|r| r.contains("wasm predicate")),
+        "outlook explains why it cannot predict: {:?}",
+        outlook.reasons
+    );
+}
+
+/// An open mirror accepts everything; the verify_all recount flags wasm
+/// denials the same way it flags DSL denials.
+#[test]
+fn verify_all_counts_wasm_contract_failures() {
+    let store = Store::open_in_memory().unwrap();
+    let registrar = keys();
+    let issuer = SigningKey::generate(&mut OsRng);
+
+    let mut spec = default_spec();
+    spec.wasm = Some(B64.encode(wat::parse_str(SCAN_WAT).unwrap()));
+    let payload = signed_doc(
+        CONTRACT_KIND,
+        serde_json::to_value(&spec).unwrap(),
+        &[("issuer", &issuer)],
+    );
+    let contract = publish(&store, &registrar, "gov.contracts", payload, 0, None, vec![], 1);
+    let contract_ref = serde_json::json!({
+        "id": hex::encode(contract.id().unwrap()),
+        "version": CONTRACT_VERSION
+    });
+
+    let mut seq = 1u64;
+    let mut prev = Some(contract.id().unwrap());
+    let grant_doc = |parcel: &str| {
+        signed_doc(
+            "land.title.grant",
+            serde_json::json!({"parcel": parcel, "contract": contract_ref}),
+            &[],
+        )
+    };
+
+    let ok = publish(
+        &store,
+        &registrar,
+        "gov.titles.grant",
+        grant_doc("PH-1"),
+        seq,
+        prev,
+        vec![],
+        2000,
+    );
+    assert_eq!(store.verify_all().unwrap().contracts_failed, 0);
+
+    seq += 1;
+    prev = Some(ok.id().unwrap());
+    publish(
+        &store,
+        &registrar,
+        "gov.titles.grant",
+        grant_doc("PH-9"),
+        seq,
+        prev,
+        vec![],
+        2000,
+    );
+    assert_eq!(
+        store.verify_all().unwrap().contracts_failed,
+        1,
+        "evidence-grade recount flags the wasm denial"
+    );
 }
 
 impl Fixture {
@@ -503,7 +697,7 @@ fn landing_window_denies_late_and_early_documents() {
 
     // The grant entry lands at ts 2000 (grant_entry hardcodes it); give it
     // a window of 1500..=2500 so it lands inside, then prove the edges.
-    let mut grant_with_window = |fx: &mut Fixture, opens: u64, closes: u64| {
+    let grant_with_window = |fx: &mut Fixture, opens: u64, closes: u64| {
         let holder_key = hex::encode(fx.holder.ed.verifying_key().as_bytes());
         let doc = serde_json::json!({
             "parcel": "PH-1",
@@ -600,6 +794,7 @@ fn outlook_tracks_conditions_outstanding() {
         not_before_field: None,
         not_after_field: None,
         requires_sealed: vec![],
+        wasm: None,
     };
     let mut fx = fixture_with(&spec, "gov.contracts");
     let agent = SigningKey::generate(&mut OsRng);
@@ -705,6 +900,7 @@ fn outlook_late_compliance_stays_outstanding() {
         not_before_field: None,
         not_after_field: None,
         requires_sealed: vec![],
+        wasm: None,
     };
     let mut fx = fixture_with(&spec, "gov.contracts");
     let anchor_doc = serde_json::json!({

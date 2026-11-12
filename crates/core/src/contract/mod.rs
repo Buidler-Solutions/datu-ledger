@@ -30,6 +30,8 @@ use crate::parties::SignedDocument;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod wasm;
+
 /// Namespace (and prefix) where contract entries live.
 pub const CONTRACTS_NAMESPACE: &str = "gov.contracts";
 
@@ -131,6 +133,15 @@ pub struct ContractSpec {
     /// field is fine; a present field in plaintext is a denial.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires_sealed: Vec<String>,
+    /// Optional deterministic WASM predicate body (base64 wasm32
+    /// module). When present it replaces the DSL requirement fields:
+    /// the module's `evaluate` export receives the same inputs the DSL
+    /// would see and returns 0 to admit. Only `admits` survives, checked
+    /// outside the sandbox. Sandboxed with an empty linker (no host
+    /// calls), fuel-metered, size-capped: metering replaces gas. See
+    /// [`wasm`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<String>,
 }
 
 impl ContractSpec {
@@ -175,6 +186,30 @@ impl ContractSpec {
                 "this contract admits documents of kind '{}', not '{}'",
                 self.admits, document.kind
             ));
+            // Fail fast: a wrong-kind document is not the sandbox's
+            // problem, and skipping the module keeps the kind verdict
+            // cheap, deterministic, and identical between DSL and WASM
+            // contracts.
+            return ContractReport {
+                admitted: false,
+                reasons,
+                conditions,
+            };
+        }
+
+        // A WASM-body contract replaces the DSL requirements wholesale:
+        // the module receives exactly what the DSL would see (admits,
+        // document, entry timestamp, closure) and decides alone. Every
+        // sandbox failure is a fail-closed denial, never a panic.
+        if let Some(body) = &self.wasm {
+            let mut wasm_report = wasm::evaluate(self, body, document, entry_ts, closure);
+            conditions.append(&mut wasm_report.conditions);
+            reasons.append(&mut wasm_report.reasons);
+            return ContractReport {
+                admitted: reasons.is_empty(),
+                reasons,
+                conditions,
+            };
         }
 
         // Parties on the governed document (same semantics as the writer
@@ -489,6 +524,8 @@ pub enum ConditionKind {
     Sealed,
     /// Cited-reference requirement (counts the closure).
     Refs,
+    /// A deterministic WASM predicate body decided the document.
+    Wasm,
 }
 
 impl ConditionKind {
@@ -500,6 +537,7 @@ impl ConditionKind {
             ConditionKind::Window => "window",
             ConditionKind::Sealed => "sealed",
             ConditionKind::Refs => "refs",
+            ConditionKind::Wasm => "wasm",
         }
     }
 }
@@ -557,6 +595,7 @@ mod tests {
             not_before_field: None,
             not_after_field: None,
             requires_sealed: vec![],
+            wasm: None,
         }
     }
 

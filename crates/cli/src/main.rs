@@ -1382,7 +1382,17 @@ fn cmd_contract_show(node: &Node, id: String) -> Result<(), String> {
         short(&entry.body.author),
         entry.body.seq
     );
-    let json = serde_json::to_value(&spec).map_err(|e| e.to_string())?;
+    let mut json = serde_json::to_value(&spec).map_err(|e| e.to_string())?;
+    // Elide the wasm body: it can be hundreds of KB of base64. `check`
+    // executes the rule; `show` describes it.
+    if let (Some(size), Some(serde_json::Value::String(wasm))) = (
+        spec.wasm.as_ref().map(|b| b.len()),
+        json.get_mut("wasm"),
+    ) {
+        *wasm = format!(
+            "<{size} bytes of base64 (elided; 'datu contract check' executes it)>"
+        );
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?

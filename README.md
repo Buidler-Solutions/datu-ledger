@@ -665,6 +665,43 @@ without ever reading a certificate field. Other conventions fall out the
 same way: one-award-per-parcel rewards, conditional registries. A tool for
 whoever needs it - documents that declare no contract are untouched.
 
+### WASM contract bodies: arbitrary predicates, same safety
+
+When the JSON DSL is not expressive enough, the same contract entry can
+carry a deterministic wasm32 module instead of the requirement fields:
+`"wasm": "<base64 module>"`. The entry shape, resolution, admission
+gate, and reporting are unchanged - only the predicate engine differs.
+`admits` is still checked outside the sandbox (fast fail), then the
+module decides alone. Determinism is what makes this safe on a
+no-consensus DAG: same module bytes plus same input bytes means the same
+verdict on every node, forever. The sandbox rules:
+
+- **Empty linker.** The module is instantiated with zero host functions:
+  no clock, no disk, no network, no randomness, no node state. Its whole
+  world is the JSON written into its linear memory: `admits`, the
+  governed `document` (parties and all), `entry_ts`, and the `closure`
+  - exactly what the DSL branch sees, nothing more.
+- **Fuel metering replaces gas.** Every evaluation runs with a fixed
+  fuel budget; exhaustion traps into a fail-closed denial. There is no
+  token and no fee market: metering is a safety cap, not a price.
+- **Size caps.** 256 KiB for the module, 512 KiB for the serialized
+  input. A closure too large to judge is a denial, not an error.
+- **Fail-closed everywhere.** Bad base64, unparseable wasm, missing
+  exports, traps, out-of-range returns: every failure path is a normal
+  denial with a reason. A hostile rule can at worst deny documents; it
+  can never crash a node or admit by accident.
+
+The guest ABI is three exports: `memory` (linear memory), `alloc(size)
+-> ptr`, and `evaluate(in_ptr, in_len, out_ptr, out_cap) -> written`,
+where returning `0` admits and any other value denies with the reason
+bytes written to `out_ptr`. Any wasm32 toolchain works (Rust, C,
+AssemblyScript, or hand-written WAT). `datu contract show` elides the
+base64 blob instead of dumping it, `datu contract check` executes the
+rule with a per-condition `wasm` line carrying the guest's own denial
+words, and because a wasm rule cannot be decomposed into pending
+citation-side conditions, `datu contract status` reports the honest
+answer: readiness arrives with the satisfying document.
+
 ## Network modes: who may join and sync
 
 `policy.json` gates whose **entries land** (write admission). `network.json`
