@@ -21,7 +21,7 @@ jobs:
             target: x86_64-unknown-linux-musl
           - os: macos-13
             target: x86_64-apple-darwin
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v5
@@ -47,7 +47,7 @@ jobs:
           cp README.md LICENSE "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: datu-${{ matrix.target }}
           path: dist/*.tar.gz*
@@ -75,7 +75,7 @@ jobs:
           npm ci
           npm run build
           (cd dist && zip -q -r "../../../datu-${GITHUB_REF_NAME}-registrar-dapp.zip" .)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: web-bundles
           path: datu-*.zip
@@ -85,7 +85,7 @@ jobs:
     needs: [binaries, web]
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
           merge-multiple: true
