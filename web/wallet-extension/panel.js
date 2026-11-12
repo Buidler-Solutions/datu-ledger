@@ -320,6 +320,15 @@ async function findMyRecords() {
         ));
       } catch { continue; }
       if (!concernsMe(payload, identity)) continue;
+      const doc = payload?.doc ?? payload ?? {};
+      // An agreement anchor declares a contract for a future document
+      // (escrow, reward offer): the pending view is what a Signet holder
+      // watches go OUTSTANDING -> READY without reading a single field.
+      const contract = doc.contract && typeof doc.contract.id === 'string' ? doc.contract : null;
+      let outlook = null;
+      if (contract) {
+        try { outlook = await nodeGet(`/v1/contract/status/${item.id}`); } catch { /* best-effort */ }
+      }
       myRecords.push({
         id: item.id,
         seq: item.seq,
@@ -328,6 +337,8 @@ async function findMyRecords() {
         label: recordLabel(payload, item.id),
         entry: full,
         payload,
+        contract,
+        outlook,
       });
     }
     if (!myRecords.length) {
@@ -360,12 +371,60 @@ async function findMyRecords() {
       open.textContent = 'Decrypt';
       open.addEventListener('click', () => decryptRecord(i));
       actions.append(verify, open);
+      if (rec.contract) {
+        const conditions = document.createElement('button');
+        conditions.className = 'ghost';
+        conditions.textContent = 'Conditions';
+        conditions.addEventListener('click', () => showConditions(i));
+        actions.append(conditions);
+        if (rec.outlook) {
+          const pending = document.createElement('div');
+          pending.className = 'meta';
+          pending.textContent = rec.outlook.ready
+            ? `conditions met - a '${rec.outlook.admits}' may land (${rec.outlook.citing?.length ?? 0} evidence entries)`
+            : `conditions pending - ${rec.outlook.conditions?.filter((c) => !c.met).length ?? '?'} outstanding`;
+          card.insertBefore(pending, actions);
+        }
+      }
       card.append(head, ns, actions);
       $('records').append(card);
     });
     status(`${myRecords.length} record(s) concern you${pattern ? ` in ${pattern}` : ' (any namespace)'} - verified locally`, 'ok');
   } catch (e) {
     status(e.message, 'err');
+  }
+}
+
+// Full pending view of an agreement that declares a contract: the same
+// pure predicate admission uses, judged over the entries citing the
+// anchor. Read-only; nothing to sign, nothing to decrypt.
+async function showConditions(index) {
+  try {
+    const rec = myRecords[index];
+    const o = rec.outlook ?? await nodeGet(`/v1/contract/status/${rec.id}`);
+    const lines = [
+      `${o.ready ? 'READY' : 'OUTSTANDING'}  ${o.kind}`,
+      `awaits     a '${o.admits}' document citing this anchor`,
+      `contract   ${(o.contract_id || '').slice(0, 16)}… v${o.version}`,
+    ];
+    for (const reason of o.reasons || []) lines.push(`reason     ${reason}`);
+    if ((o.conditions || []).length) {
+      lines.push('conditions:');
+      for (const condition of o.conditions) {
+        lines.push(`  [${condition.met ? 'met    ' : 'NOT MET'}] ${condition.requirement} (required: ${condition.required}, found: ${condition.found})`);
+      }
+    }
+    if ((o.citing || []).length) {
+      lines.push(`evidence (${o.citing.length} citing entries):`);
+      for (const cited of o.citing) {
+        lines.push(`  ${cited.id.slice(0, 12)}…  ${cited.kind ?? '-'}  ${cited.namespace}  ts ${cited.timestamp_ms}`);
+      }
+    }
+    $('verdict').style.display = 'block';
+    $('verdict').textContent = lines.join('\n');
+    status(o.ready ? 'citation-side conditions are met - the satisfying document may land' : 'conditions outstanding', o.ready ? 'ok' : 'muted');
+  } catch (e) {
+    status(`cannot evaluate contract: ${e.message}`, 'err');
   }
 }
 

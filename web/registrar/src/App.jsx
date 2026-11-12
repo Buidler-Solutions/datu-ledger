@@ -272,6 +272,10 @@ export default function App() {
   const [readyDoc, setReadyDoc] = useState(null);
   const [result, setResult] = useState(null);
 
+  const [contractNs, setContractNs] = useState('records.escrow');
+  const [contractList, setContractList] = useState(null);
+  const [contractView, setContractView] = useState(null); // { id, outlook }
+
   const say = (msg, kind = 'info') =>
     setLog((l) => [...l, { msg, kind, at: new Date().toLocaleTimeString() }]);
 
@@ -656,6 +660,44 @@ export default function App() {
     }
   }
 
+  // ---- document contracts: pending agreements (conditions outstanding) ----
+  async function listContractAnchors() {
+    setContractView(null);
+    try {
+      const ns = contractNs.trim();
+      const { status, body } = await nodeGet(
+        nodeUrl,
+        `/v1/entries?ns=${encodeURIComponent(ns)}&limit=50`,
+      );
+      if (status !== 200) throw new Error(body.error || `node ${status}`);
+      setContractList(body.entries || []);
+      say(`${(body.entries || []).length} entries in ${ns}`);
+    } catch (e) {
+      say(`cannot list ${contractNs}: ${e.message}`, 'err');
+    }
+  }
+
+  async function checkContractStatus(id) {
+    try {
+      const { status, body } = await nodeGet(nodeUrl, `/v1/contract/status/${id}`);
+      if (status === 404) {
+        setContractView({ id, outlook: { ready: false, kind: body.error || 'no contract', conditions: [], reasons: [], citing: [] } });
+        say(`entry ${id.slice(0, 12)}… declares no contract`);
+        return;
+      }
+      if (status !== 200) throw new Error(body.error || `node ${status}`);
+      setContractView({ id, outlook: body });
+      say(
+        body.ready
+          ? `citation-side conditions met - a '${body.admits}' may land`
+          : `conditions outstanding on ${id.slice(0, 12)}…`,
+        body.ready ? 'ok' : 'muted',
+      );
+    } catch (e) {
+      say(`cannot evaluate contract: ${e.message}`, 'err');
+    }
+  }
+
   const workspace = ROLE_PAGES.includes(page) ? page : null;
 
   return (
@@ -984,6 +1026,84 @@ export default function App() {
                   <summary>stored entry (ciphertext fields visible)</summary>
                   <pre>{JSON.stringify(result.entry, null, 2)}</pre>
                 </details>
+              </div>
+            )}
+          </div>
+          <div className="card">
+            <h2>Contract status · pending agreements</h2>
+            <p className="muted small">
+              Anchors that declare a document contract (escrow agreements, reward offers): the node
+              judges the citation-side conditions over the evidence citing them. READY means the
+              satisfying document may land; OUTSTANDING shows what is missing.
+            </p>
+            <label>
+              namespace of agreement anchors
+              <input
+                value={contractNs}
+                onChange={(e) => setContractNs(e.target.value)}
+                placeholder="records.escrow"
+              />
+            </label>
+            <button className="ghost" onClick={listContractAnchors}>
+              List anchors
+            </button>
+            {contractList &&
+              (contractList.length === 0 ? (
+                <p className="muted small">no entries in that namespace on this node</p>
+              ) : (
+                <ul className="anchorlist">
+                  {contractList.map((entry) => (
+                    <li key={entry.id}>
+                      <code>{entry.id.slice(0, 16)}…</code>{' '}
+                      <span className="muted small">
+                        seq {entry.seq} · refs {entry.refs?.length ?? 0}
+                      </span>{' '}
+                      <button className="ghost" onClick={() => checkContractStatus(entry.id)}>
+                        Status
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ))}
+            {contractView && (
+              <div className={`result ${contractView.outlook.ready ? 'okbox' : 'dupbox'}`}>
+                <p>
+                  {contractView.outlook.ready ? 'READY' : 'OUTSTANDING'} · {contractView.outlook.kind}
+                  {contractView.outlook.admits ? (
+                    <>
+                      {' '}
+                      · awaits <code>{contractView.outlook.admits}</code>
+                    </>
+                  ) : null}
+                </p>
+                {(contractView.outlook.conditions || []).length > 0 && (
+                  <ul className="conditions">
+                    {contractView.outlook.conditions.map((c, i) => (
+                      <li key={i} className={c.met ? '' : 'err'}>
+                        [{c.met ? 'met' : 'NOT MET'}] {c.requirement} (required {c.required}, found{' '}
+                        {c.found})
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {(contractView.outlook.reasons || []).map((r) => (
+                  <p key={r} className="err small">
+                    {r}
+                  </p>
+                ))}
+                {(contractView.outlook.citing || []).length > 0 && (
+                  <details>
+                    <summary>evidence: {contractView.outlook.citing.length} citing entries</summary>
+                    <pre>
+                      {contractView.outlook.citing
+                        .map(
+                          (c) =>
+                            `${c.id.slice(0, 16)}…  ${c.kind ?? '-'}  ${c.namespace}  ts ${c.timestamp_ms}`,
+                        )
+                        .join('\n')}
+                    </pre>
+                  </details>
+                )}
               </div>
             )}
           </div>

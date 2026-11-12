@@ -86,3 +86,29 @@ code { color: #79c0ff; }
 .rolebar-actions button { margin-top: 0; }
 .card.slim { padding: .5rem .9rem .6rem; }
 .card.slim summary { cursor: pointer; }
+
+/* contract status (pending agreements) */
+.anchorlist {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.anchorlist li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.anchorlist code {
+  font-size: 0.85em;
+}
+ul.conditions {
+  margin: 8px 0;
+  padding-left: 18px;
+}
+ul.conditions li {
+  font-size: 0.9em;
+  line-height: 1.5;
+}
