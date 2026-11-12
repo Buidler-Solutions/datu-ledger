@@ -357,14 +357,21 @@ datu attest create --subject <ed-pubkey-hex> \
 datu sync --peer http://ministry-node:7475      # cosigner must see it first
                                               # (or bare host:port - native p2p)
 datu attest cosign --id <attestation-id>        # another node adds weight
+datu attest revoke --id <attestation-id>        # a root retires it (append-only)
 datu attest status --subject <ed-pubkey-hex>    # attestations + cosigner count
 datu attest status --id <attestation-id>        # one attestation in detail
 ```
 
 Every attestation and cosignature is an ordinary hybrid-signed entry - it
 inherits append-only storage, the author's feed chain, checkpoint coverage,
-and fork detection for free. Attestation revocation is publication (a later
-claim entry by the same attestor); readers decide what weight history has.
+and fork detection for free. Revocation is a new statement, never an edit:
+`datu attest revoke` publishes an `identity.revoke` entry naming the
+attestation id, with an optional reason for the audit trail. Only
+revocations authored by a configured trust root count, and only for the
+node whose policy names that root - the ledger records the statement,
+verifiers weigh it. A revoke is order-independent (present means revoked,
+whenever it syncs), so nodes converge; a later, unrevoked attestation
+admits again.
 
 ## Three roles: validators, citizens, observers (Tier 7)
 
@@ -730,8 +737,16 @@ admitted with an explicit `members` key *or* any on-ledger attestation
 (`identity.attest`) from a configured `roots` trust root - the same
 attestation graph that admits writers. A root attests a new node once; every
 member that syncs the attestation admits the node automatically. No signed
-manifest to re-issue, no operator round-trip to add a peer; eject by editing
-`network.json` (revocation is future work).
+manifest to re-issue, no operator round-trip to add a peer.
+
+**Leaving = the same ledger.** Ejection is server-side too: `datu attest
+revoke --id <attestation-id>` publishes an `identity.revoke` statement by
+a trust root, and every node whose `roots` name that root stops admitting
+the key the moment the revoke syncs. Membership revocation therefore rides
+the exact transport that carried the admission, and works offline, over
+HTTP pull, and across the mesh alike. An explicit `members` key baked into
+someone's `network.json` is still theirs to remove; the propagating path is
+the ledger.
 
 **The mesh wall is mutual and everywhere.** Bundles, witness streams, haves
 requests and delta responses carry the mesh id; a node refuses foreign ones

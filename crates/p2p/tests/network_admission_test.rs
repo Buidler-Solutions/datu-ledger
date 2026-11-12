@@ -71,6 +71,28 @@ fn attestation(attestor: &Keys, subject: &str) -> Entry {
     Entry::sign(body, &attestor.ed, &attestor.pq).unwrap()
 }
 
+/// A revoke statement naming `attestation_id`, authored by `revoker`.
+/// Seq 1 / prev = the attestation, since the same root authored both.
+fn revocation(revoker: &Keys, attestation_id: [u8; 32]) -> Entry {
+    let doc = datu_core::attest::RevokeDoc {
+        attestation: hex::encode(attestation_id),
+        reason: Some("membership ended".into()),
+    };
+    let body = EntryBody {
+        version: 1,
+        author: String::new(),
+        author_pq: String::new(),
+        pq_alg: String::new(),
+        namespace: datu_core::attest::NS_REVOKE.into(),
+        seq: 1,
+        prev: Some(attestation_id),
+        refs: vec![attestation_id],
+        timestamp_ms: 2,
+        payload: doc.payload_bytes().unwrap(),
+    };
+    Entry::sign(body, &revoker.ed, &revoker.pq).unwrap()
+}
+
 fn permissioned(network_id: &str, members: Vec<String>, roots: Vec<String>) -> NetworkPolicy {
     NetworkPolicy {
         version: 1,
@@ -211,6 +233,28 @@ fn attested_stranger_is_admitted_by_root() {
     let stats = pull_and_merge(&addr.to_string(), &client, 500, Some(&hello)).unwrap();
     assert_eq!(stats.entries_new, 4); // 3 records + the attestation itself
     client.verify_all().unwrap();
+}
+
+#[test]
+fn revoked_attestation_no_longer_admits() {
+    let server_keys = keys();
+    let root = keys();
+    let client_keys = keys();
+    let store = store_with(&server_keys, 3);
+    let attest = attestation(&root, &hex_key(&client_keys.ed));
+    let attestation_id = attest.id().unwrap();
+    store.insert_entry(&attest).unwrap();
+    store.insert_entry(&revocation(&root, attestation_id)).unwrap();
+    let network = permissioned("gov-mesh", vec![], vec![hex_key(&root.ed)]);
+    let addr = spawn(store, Some(network));
+
+    let client = Store::open_in_memory().unwrap();
+    let hello = sign_hello(&client_keys.ed, "gov-mesh");
+    let err = pull_and_merge(&addr.to_string(), &client, 500, Some(&hello)).unwrap_err();
+    assert!(
+        err.contains("not admitted"),
+        "a revoked root attestation must not admit: {err}"
+    );
 }
 
 #[test]

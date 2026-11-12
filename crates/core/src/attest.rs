@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize};
 pub const NS_ATTEST: &str = "identity.attest";
 /// Namespace for cosignatures over an attestation (entry refs the target id).
 pub const NS_COSIGN: &str = "identity.cosign";
+/// Namespace for revocations of attestations (a revoke names the attestation
+/// id it kills; entries are append-only, so revocation is a new statement,
+/// never an edit).
+pub const NS_REVOKE: &str = "identity.revoke";
 
 /// The payload document of an `identity.attest` entry.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -55,6 +59,34 @@ pub fn parse_attestation(entry: &Entry) -> Option<AttestationDoc> {
 /// Parse an entry as a cosignature; `None` if it is not one.
 pub fn parse_cosign(entry: &Entry) -> Option<CosignDoc> {
     if entry.body.namespace != NS_COSIGN {
+        return None;
+    }
+    serde_json::from_slice(&entry.body.payload).ok()
+}
+
+/// The payload document of an `identity.revoke` entry: it revokes exactly
+/// the attestation it names. Revoking is a verifier-side act: only
+/// revocations authored by a *configured* attestor count, and only for the
+/// node whose configuration names that attestor. The ledger stores the
+/// statement; trust policy decides its weight.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RevokeDoc {
+    /// Hex id of the attestation being revoked.
+    pub attestation: String,
+    /// Optional human-readable reason (shows in `attest status`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl RevokeDoc {
+    pub fn payload_bytes(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(self).map_err(|e| e.to_string())
+    }
+}
+
+/// Parse an entry as a revocation; `None` if it is not one.
+pub fn parse_revoke(entry: &Entry) -> Option<RevokeDoc> {
+    if entry.body.namespace != NS_REVOKE {
         return None;
     }
     serde_json::from_slice(&entry.body.payload).ok()
@@ -102,4 +134,121 @@ where
         }
     }
     out
+}
+
+/// Every revocation naming `attestation_id`, whatever its author (display
+/// surface for `attest status`; admission uses [`revoked_by`]).
+pub fn revocations_for<'a, I>(entries: I, attestation_id: &[u8; 32]) -> Vec<(&'a Entry, RevokeDoc)>
+where
+    I: IntoIterator<Item = &'a Entry>,
+{
+    let id_hex = hex::encode(attestation_id);
+    let mut out = Vec::new();
+    for entry in entries {
+        if let Some(doc) = parse_revoke(entry) {
+            if doc.attestation == id_hex {
+                out.push((entry, doc));
+            }
+        }
+    }
+    out
+}
+
+/// The set of attestation ids revoked by *trusted* revokers: revoke entries
+/// whose author is one of `attestors` (the verifier's configured roots).
+/// A revocation from anyone else is ledger content without effect - the
+/// same stance as attestations themselves. Malformed ids revoke nothing.
+/// Set membership is order-independent: a revoke counts whenever it is
+/// present, so every node converges on the same verdict after sync.
+pub fn revoked_by<'a, I>(entries: I, attestors: &[String]) -> std::collections::BTreeSet<[u8; 32]>
+where
+    I: IntoIterator<Item = &'a Entry>,
+{
+    let mut revoked = std::collections::BTreeSet::new();
+    for entry in entries {
+        if !attestors.contains(&entry.body.author) {
+            continue;
+        }
+        if let Some(doc) = parse_revoke(entry) {
+            if let Ok(bytes) = hex::decode(&doc.attestation) {
+                if let Ok(id) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                    revoked.insert(id);
+                }
+            }
+        }
+    }
+    revoked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    fn signed(ns: &str, payload: &[u8], key: &SigningKey, pq: &crate::pq::PqPrivateKey, seq: u64) -> Entry {
+        let body = crate::EntryBody {
+            version: crate::ENTRY_VERSION,
+            author: String::new(),
+            author_pq: String::new(),
+            pq_alg: String::new(),
+            namespace: ns.to_string(),
+            seq,
+            prev: None,
+            refs: vec![],
+            timestamp_ms: 1,
+            payload: payload.to_vec(),
+        };
+        Entry::sign(body, key, pq).unwrap()
+    }
+
+    #[test]
+    fn revoked_by_counts_only_trusted_revokers_with_valid_ids() {
+        let root = SigningKey::generate(&mut OsRng);
+        let root_pq = crate::pq::keypair().unwrap().1;
+        let stranger = SigningKey::generate(&mut OsRng);
+        let stranger_pq = crate::pq::keypair().unwrap().1;
+        let trusted = vec![hex::encode(root.verifying_key().as_bytes())];
+
+        let revoked_id = [7u8; 32];
+        let other_id = [9u8; 32];
+        let good = RevokeDoc {
+            attestation: hex::encode(revoked_id),
+            reason: None,
+        }
+        .payload_bytes()
+        .unwrap();
+        let untrusted = RevokeDoc {
+            attestation: hex::encode(other_id),
+            reason: None,
+        }
+        .payload_bytes()
+        .unwrap();
+        let malformed = RevokeDoc {
+            attestation: "not hex".into(),
+            reason: None,
+        }
+        .payload_bytes()
+        .unwrap();
+
+        let entries = vec![
+            signed(NS_REVOKE, &good, &root, &root_pq, 0),
+            signed(NS_REVOKE, &untrusted, &stranger, &stranger_pq, 0),
+            signed(NS_REVOKE, &malformed, &root, &root_pq, 1),
+        ];
+        let revoked = revoked_by(entries.iter(), &trusted);
+        assert!(revoked.contains(&revoked_id));
+        assert!(!revoked.contains(&other_id), "untrusted revokers do not count");
+        assert_eq!(revoked.len(), 1, "malformed ids revoke nothing");
+    }
+
+    #[test]
+    fn revoke_doc_roundtrips() {
+        let doc = RevokeDoc {
+            attestation: "ab".repeat(32),
+            reason: Some("rotated".into()),
+        };
+        let parsed: RevokeDoc = serde_json::from_slice(&doc.payload_bytes().unwrap()).unwrap();
+        assert_eq!(parsed, doc);
+    }
 }

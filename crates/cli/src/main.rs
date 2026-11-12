@@ -299,6 +299,16 @@ enum AttestCmd {
         #[arg(long)]
         id: String,
     },
+    /// Revoke an attestation you (or a trusted root) issued: a new
+    /// `identity.revoke` statement, never an edit
+    Revoke {
+        /// Attestation entry id (hex) to revoke
+        #[arg(long)]
+        id: String,
+        /// Optional reason, kept on the ledger for the audit trail
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Show attestations for a subject key, or one attestation with cosigners
     Status {
         #[arg(long, conflicts_with = "id")]
@@ -318,7 +328,7 @@ enum PolicyCmd {
         /// Explicitly admitted writer key (repeatable)
         #[arg(long = "writer", value_delimiter = ',')]
         writers: Vec<String>,
-        /// Gated namespace pattern, e.g. 'gov.*' (repeatable; default gov.* + identity.attest)
+        /// Gated namespace pattern, e.g. 'gov.*' (repeatable; default gov.* + identity.attest + identity.revoke)
         #[arg(long = "ns", value_delimiter = ',')]
         gated: Vec<String>,
         /// Cosigners required on an attestation for admission (0 = attestor alone suffices)
@@ -1885,6 +1895,66 @@ fn cmd_attest_cosign(node: &Node, id_hex: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Revoke an attestation: publish an `identity.revoke` statement naming it.
+/// Append-only means revocation is a new entry, never an edit - the
+/// attestation and its revocations remain forever, and verifiers apply the
+/// statement only where the author is a configured trust root.
+fn cmd_attest_revoke(node: &Node, id_hex: String, reason: Option<String>) -> Result<(), String> {
+    let id = parse_id(&id_hex)?;
+    // Typo protection when the target is local: only revoke real
+    // attestations. When it is not local yet, the statement still stands -
+    // it takes effect wherever the attestation lands.
+    let known_locally = match s(node.store.get_entry(&id))? {
+        Some(target) => {
+            if attest::parse_attestation(&target).is_none() {
+                return Err(format!("{id_hex} is not an identity.attest entry"));
+            }
+            true
+        }
+        None => false,
+    };
+    let doc = attest::RevokeDoc {
+        attestation: id_hex.clone(),
+        reason: reason.clone(),
+    };
+    let payload = doc.payload_bytes()?;
+    let latest = s(node.store.latest(&node.identity))?;
+    let (seq, prev) = match &latest {
+        Some(e) => (e.body.seq + 1, Some(s(e.id())?)),
+        None => (0, None),
+    };
+    let body = EntryBody {
+        version: datu_core::ENTRY_VERSION,
+        author: node.identity.clone(),
+        author_pq: String::new(),
+        pq_alg: String::new(),
+        namespace: attest::NS_REVOKE.to_string(),
+        seq,
+        prev,
+        refs: vec![id],
+        timestamp_ms: now_ms(),
+        payload,
+    };
+    let entry = s(Entry::sign(body, &node.key, &node.pq_key))?;
+    let revoke_id = s(entry.id())?;
+    if !s(node.store.insert_entry(&entry))? {
+        return Err("revocation unexpectedly already present".into());
+    }
+    println!("revocation {} published", hex::encode(revoke_id));
+    println!(
+        "  attestation {} is revoked where {} is a configured trust root",
+        short(&id_hex),
+        short(&node.identity)
+    );
+    if !known_locally {
+        println!("  note: the attestation is not on this node yet; the statement stands");
+    }
+    if let Some(reason) = reason {
+        println!("  reason: {reason}");
+    }
+    Ok(())
+}
+
 fn cmd_attest_status(node: &Node, subject: Option<String>, id: Option<String>) -> Result<(), String> {
     let entries = s(node.store.all_entries())?;
     if let Some(id_hex) = id {
@@ -1904,6 +1974,23 @@ fn cmd_attest_status(node: &Node, subject: Option<String>, id: Option<String>) -
         for (c, _) in &cosigners {
             println!("    {}  seq {}", c.body.author, c.body.seq);
         }
+        let revocations = attest::revocations_for(entries.iter(), &id);
+        if revocations.is_empty() {
+            println!("  revoked:  no");
+        } else {
+            println!("  revoked:  yes ({} statement(s))", revocations.len());
+            for (r, doc) in &revocations {
+                println!(
+                    "    by {}  seq {}{}",
+                    r.body.author,
+                    r.body.seq,
+                    doc.reason
+                        .as_deref()
+                        .map(|x| format!("  ({x})"))
+                        .unwrap_or_default()
+                );
+            }
+        }
         return Ok(());
     }
     let subject = subject.ok_or_else(|| "pass --subject KEY or --id ID".to_string())?;
@@ -1919,11 +2006,13 @@ fn cmd_attest_status(node: &Node, subject: Option<String>, id: Option<String>) -
     for (entry, doc) in found {
         let id = s(entry.id())?;
         let cosigners = attest::cosigners_for(entries.iter(), &id);
+        let revoked = attest::revocations_for(entries.iter(), &id);
         println!(
-            "  attestation {} by {} ({} cosigners)",
+            "  attestation {} by {} ({} cosigners){}",
             short(&hex::encode(id)),
             short(&entry.body.author),
-            cosigners.len()
+            cosigners.len(),
+            if revoked.is_empty() { "" } else { "  [REVOKED]" }
         );
         if let Some(label) = &doc.label {
             println!("    label: {label}");
@@ -2299,7 +2388,11 @@ fn cmd_policy_init(
         }
     }
     let gated = if gated.is_empty() && !readonly {
-        vec!["gov.*".to_string(), "identity.attest".to_string()]
+        vec![
+            "gov.*".to_string(),
+            "identity.attest".to_string(),
+            "identity.revoke".to_string(),
+        ]
     } else {
         gated
     };
@@ -3171,6 +3264,9 @@ fn run(cli: Cli) -> Result<(), String> {
                 label.clone(),
             ),
             AttestCmd::Cosign { id } => cmd_attest_cosign(&load_node(&cli.data_dir)?, id.clone()),
+            AttestCmd::Revoke { id, reason } => {
+                cmd_attest_revoke(&load_node(&cli.data_dir)?, id.clone(), reason.clone())
+            }
             AttestCmd::Status { subject, id } => {
                 cmd_attest_status(&load_node_reader(&cli.data_dir)?, subject.clone(), id.clone())
             }
@@ -3503,5 +3599,89 @@ mod tests {
                 == 1,
             "the chain itself is an ordinary entry in the manifest namespace"
         );
+    }
+
+    /// Revocation end to end through the CLI: create, revoke, recount.
+    /// Runs on a dedicated thread: ML-DSA key generation and signing in
+    /// debug builds are stack-hungry, and the whole flow in one frame can
+    /// outgrow the 2 MiB default test-thread stack.
+    #[test]
+    fn attest_revoke_publishes_a_statement() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(attest_revoke_flow)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn attest_revoke_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        run(cli(d, Commands::Init)).unwrap();
+
+        let subject = hex::encode([7u8; 32]);
+        run(cli(
+            d,
+            Commands::Attest {
+                cmd: AttestCmd::Create {
+                    subject: subject.clone(),
+                    claims: r#"{"role":"member"}"#.into(),
+                    label: None,
+                },
+            },
+        ))
+        .unwrap();
+
+        let node = load_node(d).unwrap();
+        let attestation = node
+            .store
+            .all_entries()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.body.namespace == attest::NS_ATTEST)
+            .expect("the attestation was stored");
+        let attestation_id = attestation.id().unwrap();
+
+        run(cli(
+            d,
+            Commands::Attest {
+                cmd: AttestCmd::Revoke {
+                    id: hex::encode(attestation_id),
+                    reason: Some("rotated".into()),
+                },
+            },
+        ))
+        .unwrap();
+
+        let node = load_node(d).unwrap();
+        let entries = node.store.all_entries().unwrap();
+        let revokes = attest::revocations_for(entries.iter(), &attestation_id);
+        assert_eq!(revokes.len(), 1, "one revocation statement on the ledger");
+        assert_eq!(revokes[0].1.reason.as_deref(), Some("rotated"));
+        let revoked = attest::revoked_by(entries.iter(), &[node.identity.clone()]);
+        assert!(revoked.contains(&attestation_id));
+
+        // Both status views render the revocation without error.
+        run(cli(
+            d,
+            Commands::Attest {
+                cmd: AttestCmd::Status {
+                    subject: None,
+                    id: Some(hex::encode(attestation_id)),
+                },
+            },
+        ))
+        .unwrap();
+        run(cli(
+            d,
+            Commands::Attest {
+                cmd: AttestCmd::Status {
+                    subject: Some(subject),
+                    id: None,
+                },
+            },
+        ))
+        .unwrap();
     }
 }

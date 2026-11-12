@@ -352,32 +352,47 @@ impl Store {
     /// Is `subject` (a node or writer key) vouched for by any of `attestors`
     /// through on-ledger attestations? This is also the **network admission**
     /// check: membership granted by trust roots, carried by the ledger
-    /// itself. (Ignores `min_cosigners`, which refines writer admission
-    /// only - joining is a lighter bar than writing.)
+    /// itself. A trusted revocation (`identity.revoke` authored by one of
+    /// `attestors`) kills the attestation it names, so ejection propagates
+    /// through the same ledger the admission does. (Ignores
+    /// `min_cosigners`, which refines writer admission only - joining is a
+    /// lighter bar than writing.)
     pub fn key_attested_by(&self, subject: &str, attestors: &[String]) -> StoreResult<bool> {
         let entries = self.all_entries()?;
+        let revoked = datu_core::attest::revoked_by(entries.iter(), attestors);
         for (attestation, _doc) in
             datu_core::attest::attestations_for(entries.iter(), subject)
         {
-            if attestors.contains(&attestation.body.author) {
-                return Ok(true);
+            if !attestors.contains(&attestation.body.author) {
+                continue;
             }
+            let id = attestation.id().map_err(StoreError::Core)?;
+            if revoked.contains(&id) {
+                continue;
+            }
+            return Ok(true);
         }
         Ok(false)
     }
 
     /// Is this entry's author vouched for by a configured trust root,
-    /// honouring `min_cosigners`?
+    /// honouring `min_cosigners` and revocations? A revocation naming an
+    /// attestation (authored by a configured attestor) removes exactly that
+    /// attestation's weight; a later, unrevoked attestation admits again.
     fn attested_by_root(&self, entry: &Entry, policy: &WritePolicy) -> StoreResult<bool> {
         let entries = self.all_entries()?;
+        let revoked = datu_core::attest::revoked_by(entries.iter(), &policy.attestors);
         for (attestation, _doc) in
             datu_core::attest::attestations_for(entries.iter(), &entry.body.author)
         {
             if !policy.attestors.contains(&attestation.body.author) {
                 continue;
             }
+            let id = attestation.id().map_err(StoreError::Core)?;
+            if revoked.contains(&id) {
+                continue;
+            }
             if policy.min_cosigners > 0 {
-                let id = attestation.id().map_err(StoreError::Core)?;
                 let cosigners = datu_core::attest::cosigners_for(entries.iter(), &id);
                 if cosigners.len() < policy.min_cosigners {
                     continue;

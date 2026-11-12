@@ -86,6 +86,32 @@ impl Keys {
         };
         Entry::sign(body, &self.ed, &self.pq).unwrap()
     }
+
+    fn revoke(
+        &self,
+        attestation_id: [u8; 32],
+        seq: u64,
+        prev: Option<[u8; 32]>,
+        reason: Option<&str>,
+    ) -> Entry {
+        let doc = datu_core::attest::RevokeDoc {
+            attestation: hex::encode(attestation_id),
+            reason: reason.map(|r| r.to_string()),
+        };
+        let body = EntryBody {
+            version: datu_core::ENTRY_VERSION,
+            author: String::new(),
+            author_pq: String::new(),
+            pq_alg: String::new(),
+            namespace: "identity.revoke".to_string(),
+            seq,
+            prev,
+            refs: vec![attestation_id],
+            timestamp_ms: 2,
+            payload: doc.payload_bytes().unwrap(),
+        };
+        Entry::sign(body, &self.ed, &self.pq).unwrap()
+    }
 }
 
 fn gated_policy(attestors: Vec<String>, gated: &[&str]) -> WritePolicy {
@@ -170,6 +196,48 @@ fn attestation_from_unknown_key_does_not_admit() {
         store.insert_entry(&bidder.entry("gov.bids", 0, b"bid")),
         Err(StoreError::Denied(_))
     ));
+}
+
+#[test]
+fn trusted_revocation_kills_the_attestation_it_names() {
+    let registry = Keys::new();
+    let bidder = Keys::new();
+    let store = gated_store(gated_policy(vec![registry.hex()], &["gov.*"]));
+
+    let attestation = registry.attest(&bidder.hex());
+    let attestation_id = attestation.id().unwrap();
+    assert!(store.insert_entry(&attestation).unwrap());
+    let first = bidder.entry("gov.bids", 0, b"bid");
+    let first_id = first.id().unwrap();
+    assert!(store.insert_entry(&first).unwrap());
+
+    // The root revokes: a new appended statement, never an edit.
+    let revoke = registry.revoke(attestation_id, 1, Some(attestation_id), Some("left the consortium"));
+    assert!(store.insert_entry(&revoke).unwrap());
+
+    // The bidder is no longer an admitted writer.
+    assert!(matches!(
+        store.insert_entry(&bidder.entry_with_prev("gov.bids", 1, Some(first_id), b"second bid")),
+        Err(StoreError::Denied(_))
+    ));
+}
+
+#[test]
+fn revocation_from_an_untrusted_key_has_no_effect() {
+    let registry = Keys::new();
+    let stranger = Keys::new();
+    let bidder = Keys::new();
+    let store = gated_store(gated_policy(vec![registry.hex()], &["gov.*"]));
+
+    let attestation = registry.attest(&bidder.hex());
+    let attestation_id = attestation.id().unwrap();
+    assert!(store.insert_entry(&attestation).unwrap());
+    // A stranger's revoke is ledger content without effect.
+    assert!(store
+        .insert_entry(&stranger.revoke(attestation_id, 0, None, None))
+        .unwrap());
+
+    assert!(store.insert_entry(&bidder.entry("gov.bids", 0, b"bid")).unwrap());
 }
 
 #[test]
