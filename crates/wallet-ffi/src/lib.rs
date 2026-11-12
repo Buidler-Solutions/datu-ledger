@@ -12,10 +12,10 @@
 //! - `datu_string_free(ptr)`
 //!
 //! The request grammar mirrors the desktop bridge routes (`{"action":
-//! "identities"}`, `create`, `party-sign`, `seal`, `open`, `export`,
-//! `import`, `sign-entry`, `verify-entry`) and returns the same response
-//! shapes, so a front end can swap an HTTP bridge for this core without
-//! changing screens. Errors come back as `{"error": "…"}` - including
+//! "identities"}`, `create`, `party-sign`, `seal`, `open`, `seal-deferred`,
+//! `release-deferred`, `open-deferred`, `export`, `import`, `sign-entry`,
+//! `verify-entry`) and returns the same response shapes, so a front end can
+//! swap an HTTP bridge for this core without changing screens. Errors come back as `{"error": "…"}` - including
 //! passphrase throttling: 5 wrong passphrases lock that identity for 15 s.
 //!
 //! There is no pairing token and no origin allowlist here: the security
@@ -30,7 +30,7 @@ use std::sync::Mutex;
 
 use datu_core::parties::SignedDocument;
 use datu_wallet::wire::{self, SignRequest};
-use datu_wallet::{IdentityBackup, LoadedIdentity, Wallet};
+use datu_wallet::{DeferredField, IdentityBackup, LoadedIdentity, Wallet};
 use serde_json::{json, Value};
 
 const MAX_PASSPHRASE_FAILURES: u32 = 5;
@@ -194,6 +194,100 @@ fn process_inner(core: &WalletCore, request_json: &str) -> Result<Value, String>
                 "document": document,
             }))
         }
+        // Deferred delivery: ciphertext now, the key half only at release.
+        "seal-deferred" => {
+            let name = str_field(&body, "name")?;
+            let passphrase = str_field(&body, "passphrase")?;
+            let identity = load_guarded(core, &name, &passphrase)?;
+            let mut document = body
+                .get("document")
+                .cloned()
+                .ok_or("missing 'document'")?;
+            let fields = string_list(&body, "fields");
+            let mut holders = string_list(&body, "to");
+            for field in string_list(&body, "to_fields") {
+                match document.get(&field) {
+                    Some(Value::String(key)) => holders.push(key.clone()),
+                    Some(Value::Array(items)) => {
+                        for item in items {
+                            if let Some(key) = item.as_str() {
+                                holders.push(key.to_string());
+                            }
+                        }
+                    }
+                    _ => return Err(format!("document has no seal key in field '{field}'")),
+                }
+            }
+            holders.sort();
+            holders.dedup();
+            if holders.len() != 1 {
+                return Err(
+                    "deferred delivery addresses exactly one holder seal key (to / to_fields)"
+                        .into(),
+                );
+            }
+            let releases =
+                identity.seal_deferred_fields(&mut document, &fields, &holders[0])?;
+            let secrets: serde_json::Map<String, Value> = releases
+                .iter()
+                .map(|(field, secret)| (field.clone(), json!(hex::encode(secret))))
+                .collect();
+            Ok(json!({
+                "ok": true,
+                "sealed": releases.len(),
+                "holder": holders[0],
+                "document": document,
+                "releases": secrets,
+            }))
+        }
+        "release-deferred" => {
+            let field = str_field(&body, "field")?;
+            let document = body.get("document").cloned().ok_or("missing 'document'")?;
+            let field_value = document
+                .get(&field)
+                .cloned()
+                .ok_or_else(|| format!("document has no field '{field}'"))?;
+            let deferred: DeferredField = serde_json::from_value(field_value)
+                .map_err(|e| format!("'{field}' is not a deferred-delivery field: {e}"))?;
+            let release = body.get("release").cloned().ok_or("missing 'release'")?;
+            let secret_hex = release
+                .get("fields")
+                .and_then(|fields| fields.get(&field))
+                .and_then(|secret| secret.as_str())
+                .ok_or_else(|| format!("release secrets have no entry for '{field}'"))?;
+            let secret: [u8; 32] = hex::decode(secret_hex)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or("release secret is not a 32-byte hex value")?;
+            let share = datu_wallet::attach_release(&deferred, &secret)?;
+            Ok(json!({ "ok": true, "field": field, "share": share }))
+        }
+        "open-deferred" => {
+            let name = str_field(&body, "name")?;
+            let passphrase = str_field(&body, "passphrase")?;
+            let identity = load_guarded(core, &name, &passphrase)?;
+            let field = str_field(&body, "field")?;
+            let document = body.get("document").cloned().ok_or("missing 'document'")?;
+            let field_value = document
+                .get(&field)
+                .cloned()
+                .ok_or_else(|| format!("document has no field '{field}'"))?;
+            let deferred: DeferredField = serde_json::from_value(field_value)
+                .map_err(|e| format!("'{field}' is not a deferred-delivery field: {e}"))?;
+            let release = body.get("release").cloned().ok_or("missing 'release'")?;
+            let share = datu_wallet::SealedShare::find(&release).ok_or(
+                "release carries no share object (expected a 'datu-share-v2' object)",
+            )?;
+            let plaintext = datu_wallet::open_deferred(
+                &deferred,
+                &share,
+                &identity.public.seal_public,
+                &identity.seal,
+            )?;
+            let value: Value = serde_json::from_slice(&plaintext)
+                .map_err(|e| format!("decrypted field is not valid JSON: {e}"))?;
+            Ok(json!({ "ok": true, "field": field, "value": value }))
+        }
         "export" => {
             let name = str_field(&body, "name")?;
             let passphrase = str_field(&body, "passphrase")?;
@@ -272,7 +366,7 @@ fn process_inner(core: &WalletCore, request_json: &str) -> Result<Value, String>
             Ok(json!({ "ok": true, "id": hex_encode(id), "entry": entry_json }))
         }
         other => Err(format!(
-            "unknown action '{other}' - expected identities, create, party-sign, seal, open, export, import, sign-entry, verify-entry"
+            "unknown action '{other}' - expected identities, create, party-sign, seal, open, seal-deferred, release-deferred, open-deferred, export, import, sign-entry, verify-entry"
         )),
     }
 }

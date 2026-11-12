@@ -240,3 +240,80 @@ fn raw_c_abi_smoke() {
     unsafe { ffi::datu_string_free(raw) };
     assert!(text.contains("null handle"), "unexpected: {text}");
 }
+
+#[test]
+fn deferred_delivery_roundtrip() {
+    let (core, _dir) = temp_core();
+    let made_issuer = request(
+        &core,
+        json!({"action": "create", "name": "issuer", "passphrase": "issuer pass"}),
+    );
+    assert_eq!(made_issuer["ok"], json!(true), "{made_issuer}");
+    let made_holder = request(
+        &core,
+        json!({"action": "create", "name": "holder", "passphrase": "holder pass"}),
+    );
+    assert_eq!(made_holder["ok"], json!(true), "{made_holder}");
+    let holder_seal = made_holder["identity"]["seal_public"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let sealed = request(
+        &core,
+        json!({
+            "action": "seal-deferred",
+            "name": "issuer",
+            "passphrase": "issuer pass",
+            "document": {"cert_id": "C-1", "owner_name": "Amina", "holder_seal": holder_seal},
+            "fields": ["owner_name"],
+            "to_fields": ["holder_seal"],
+        }),
+    );
+    assert_eq!(sealed["ok"], json!(true), "seal-deferred failed: {sealed}");
+    assert_eq!(sealed["document"]["owner_name"]["sealed"], "datu-sealed-deferred-v2");
+    assert!(sealed["releases"]["owner_name"].as_str().is_some());
+
+    let released = request(
+        &core,
+        json!({
+            "action": "release-deferred",
+            "document": sealed["document"],
+            "field": "owner_name",
+            "release": {"version": 1, "fields": sealed["releases"]},
+        }),
+    );
+    assert_eq!(released["ok"], json!(true), "release failed: {released}");
+    assert_eq!(released["share"]["sealed"], "datu-share-v2");
+
+    // The release addresses the nominated holder only.
+    let denied = request(
+        &core,
+        json!({
+            "action": "open-deferred",
+            "name": "issuer",
+            "passphrase": "issuer pass",
+            "document": sealed["document"],
+            "field": "owner_name",
+            "release": released["share"],
+        }),
+    );
+    assert!(
+        denied["error"].as_str().unwrap_or("").contains("another holder"),
+        "{denied}"
+    );
+
+    let opened = request(
+        &core,
+        json!({
+            "action": "open-deferred",
+            "name": "holder",
+            "passphrase": "holder pass",
+            "document": sealed["document"],
+            "field": "owner_name",
+            "release": released["share"],
+        }),
+    );
+    assert_eq!(opened["ok"], json!(true), "open failed: {opened}");
+    assert_eq!(opened["value"], json!("Amina"));
+}
