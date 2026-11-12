@@ -213,6 +213,26 @@ enum ContractCmd {
         /// Contract entry id (hex)
         #[arg(long)]
         id: String,
+        /// Write the contract's wasm body to this file (audit what will run)
+        #[arg(long = "wasm-out")]
+        wasm_out: Option<PathBuf>,
+    },
+    /// Build a contract spec JSON: the rule shape before it is party-signed
+    /// into a gov.contract document and published
+    New {
+        /// Document kind the contract admits, e.g. land.title.grant
+        #[arg(long)]
+        admits: String,
+        /// wasm32 module implementing the predicate (base64-encoded into the
+        /// spec); omit for a JSON-DSL skeleton to fill in by hand
+        #[arg(long = "wasm-file", conflicts_with = "wasm_b64")]
+        wasm_file: Option<PathBuf>,
+        /// Already-compiled module bytes as base64 (rare; prefer --wasm-file)
+        #[arg(long = "wasm-b64", conflicts_with = "wasm_file")]
+        wasm_b64: Option<String>,
+        /// Write the spec here instead of stdout
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Evaluate the contract an entry's document declares, condition by condition
     Check {
@@ -1592,7 +1612,7 @@ fn cmd_verify(node: &Node) -> Result<(), String> {
 }
 
 /// Show the rule itself: a contract entry's spec.
-fn cmd_contract_show(node: &Node, id: String) -> Result<(), String> {
+fn cmd_contract_show(node: &Node, id: String, wasm_out: Option<PathBuf>) -> Result<(), String> {
     let entry_id = parse_id(&id)?;
     let entry = s(node.store.get_entry(&entry_id))?
         .ok_or_else(|| format!("entry {id} is not on this node"))?;
@@ -1617,6 +1637,23 @@ fn cmd_contract_show(node: &Node, id: String) -> Result<(), String> {
         short(&entry.body.author),
         entry.body.seq
     );
+    if let Some(path) = wasm_out {
+        let body = spec
+            .wasm
+            .as_deref()
+            .ok_or("this contract carries no wasm body (a JSON-DSL rule)")?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .map_err(|_| "the contract's wasm body is not valid base64".to_string())?;
+        std::fs::write(&path, &bytes)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        println!(
+            "wasm body written to {} ({} bytes, BLAKE3 {})",
+            path.display(),
+            bytes.len(),
+            hex::encode(blake3::hash(&bytes).as_bytes())
+        );
+    }
     let mut json = serde_json::to_value(&spec).map_err(|e| e.to_string())?;
     // Elide the wasm body: it can be hundreds of KB of base64. `check`
     // executes the rule; `show` describes it.
@@ -1631,6 +1668,59 @@ fn cmd_contract_show(node: &Node, id: String) -> Result<(), String> {
     println!(
         "{}",
         serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+/// Build a contract spec JSON. The wasm body is base64-encoded here so the
+/// authoring flow never hand-rolls it; the spec still needs party signatures
+/// (datu wallet cosign-doc --kind gov.contract) before `datu publish
+/// --ns gov.contracts` can land it.
+fn cmd_contract_new(
+    admits: String,
+    wasm_file: Option<PathBuf>,
+    wasm_b64: Option<String>,
+    out: Option<PathBuf>,
+) -> Result<(), String> {
+    let wasm = match (wasm_file, wasm_b64) {
+        (Some(path), None) => {
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            Some(base64::engine::general_purpose::STANDARD.encode(&bytes))
+        }
+        (None, Some(b64)) => Some(b64),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("clap enforces the conflict"),
+    };
+    let mut spec = serde_json::json!({
+        "version": contract::CONTRACT_VERSION,
+        "admits": admits,
+    });
+    if let Some(body) = &wasm {
+        spec["wasm"] = serde_json::json!(body);
+    }
+    let json = serde_json::to_string_pretty(&spec).map_err(|e| e.to_string())?;
+    match &out {
+        Some(path) => {
+            std::fs::write(path, &json)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            println!("contract spec written to {}", path.display());
+        }
+        None => println!("{json}"),
+    }
+    match wasm {
+        Some(body) => println!(
+            "wasm body: {} bytes of base64 (the module runs sandboxed, fuel-metered, no host calls)",
+            body.len()
+        ),
+        None => println!(
+            "JSON-DSL skeleton: add requires_refs / requires_parties / deadlines, or pass --wasm-file"
+        ),
+    }
+    println!(
+        "next: sign it into a gov.contract document and publish, e.g.
+  datu wallet cosign-doc --name <you> --role issuer --kind gov.contract --input <spec> --out contract.json
+  datu publish --ns gov.contracts --file contract.json"
     );
     Ok(())
 }
@@ -3726,7 +3816,20 @@ fn run(cli: Cli) -> Result<(), String> {
         Commands::Contract { cmd } => {
             let node = load_node_reader(&cli.data_dir)?;
             match cmd {
-                ContractCmd::Show { id } => cmd_contract_show(&node, id.clone()),
+                ContractCmd::Show { id, wasm_out } => {
+                    cmd_contract_show(&node, id.clone(), wasm_out.clone())
+                }
+                ContractCmd::New {
+                    admits,
+                    wasm_file,
+                    wasm_b64,
+                    out,
+                } => cmd_contract_new(
+                    admits.clone(),
+                    wasm_file.clone(),
+                    wasm_b64.clone(),
+                    out.clone(),
+                ),
                 ContractCmd::Check { id } => cmd_contract_check(&node, id.clone()),
                 ContractCmd::Status { id } => cmd_contract_status(&node, id.clone()),
             }
@@ -4270,6 +4373,47 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&opened_path).unwrap()).unwrap();
         assert_eq!(opened, serde_json::json!("Amina"));
     }
+    /// A wasm contract spec can be built without hand-rolling base64.
+    #[test]
+    fn contract_new_encodes_the_wasm_body() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(contract_new_flow)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn contract_new_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        run(cli(d, Commands::Init)).unwrap();
+        // The 8-byte header alone is a valid (empty) wasm module.
+        let wasm = d.join("rule.wasm");
+        std::fs::write(&wasm, b" asm   ").unwrap();
+        let spec_path = d.join("spec.json");
+        run(cli(
+            d,
+            Commands::Contract {
+                cmd: ContractCmd::New {
+                    admits: "land.title.grant".into(),
+                    wasm_file: Some(wasm),
+                    wasm_b64: None,
+                    out: Some(spec_path.clone()),
+                },
+            },
+        ))
+        .unwrap();
+        let spec: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&spec_path).unwrap()).unwrap();
+        assert_eq!(spec["admits"], "land.title.grant");
+        assert_eq!(spec["version"], 1);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(spec["wasm"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, b" asm   ");
+    }
 }
+
 
 

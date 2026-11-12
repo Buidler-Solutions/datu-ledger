@@ -30,6 +30,10 @@ quantum-resistant accountability ledger: a distributed system for
 | Offline operation | Verification is 100% local; sync is file exchange, transport-agnostic |
 | Writer gate | Local policy per node: gated namespaces admit only trust roots, explicit writers, or authors attested by a trust root (`--min-cosigners` optional) |
 | Citizen consent | Gated documents can require party signatures (`--require-role holder`): the affected person's own hybrid signature over the exact document bytes |
+| Predicate contracts | Rules are ledger content in `gov.contracts`: a JSON DSL or a deterministic wasm body, enforced at admission and re-evaluated by anyone with the same pure predicate |
+| Membership revocation | Trust roots retire attestations with `identity.revoke` statements; ejection travels the same sync path as admission, and writer gates honor it too |
+| Witness time attestation | Coverage proofs pin an entry id into a checkpoint's signed Merkle root: offline-verifiable proof that a witness's ledger held it by a claimed time |
+| Deferred delivery | Sealed fields can be made openable only at release: the key half is withheld until the release entry publishes it, sealed to the holder alone |
 
 ## Why a DAG, and why no consensus
 
@@ -678,8 +682,13 @@ contracts namespace, at the pinned version. Open observers mirror everything
 and can evaluate the same predicate on demand:
 
 ```sh
+datu contract new --admits land.title.grant --wasm-file rule.wasm --out spec.json
+                                                       # spec with the wasm body
+                                                       # base64-encoded for you
 datu publish --ns gov.contracts --file contract.json   # the rule itself
 datu contract show --id <contract-entry-id>            # inspect the rule
+datu contract show --id <contract-entry-id> --wasm-out rule.wasm
+                                                       # extract the module, hash printed
 datu contract check --id <governed-entry-id>           # condition-by-condition verdict
 datu contract status --id <anchor-entry-id>           # pending view (below)
 ```
@@ -824,7 +833,7 @@ anchors, no accounts:
   field such as `holder_key`, `licensee_key`, `bidder_key`), verifies
   signatures locally from any node, and decrypts only the fields sealed to
   you. Before signing it enforces the same self-binding rule as the
-  validators: `<role>_key` in the document must be your key. Panel v1.4.0
+  validators: `<role>_key` in the document must be your key. Panel v1.4.x
   also surfaces the newer ledger facts: attestation records show a
   `REVOKED by …` badge when a trusted `identity.revoke` statement names
   them, deferred-delivery fields are marked as waiting for their release,
