@@ -16,7 +16,7 @@ mod policy;
 pub mod manifest;
 mod contract;
 
-pub use contract::ContractCheck;
+pub use contract::{CitedEntry, ContractCheck, ContractOutlook};
 pub use manifest::{manifest_namespace, CompiledManifest, Freshness, ManifestDoc, ManifestStatus};
 pub use policy::{NamespaceRule, RoleRule, POLICY_VERSION, WritePolicy};
 

@@ -15,8 +15,8 @@
 //!   open observers mirror everything and can still evaluate.
 
 use datu_core::contract::{
-    is_contracts_namespace, ClosureEntry, ConditionStatus, ContractRef, ContractSpec,
-    CONTRACTS_NAMESPACE,
+    is_contracts_namespace, ClosureEntry, ConditionKind, ConditionStatus, ContractRef,
+    ContractSpec, CONTRACTS_NAMESPACE,
 };
 use datu_core::parties::SignedDocument;
 use datu_core::Entry;
@@ -67,7 +67,11 @@ impl Store {
         let (admitted, reasons, conditions) = match self.resolve_contract(&declared) {
             Err(reason) => (false, vec![reason], Vec::new()),
             Ok(spec) => {
-                let report = spec.evaluate_report(&document, &self.closure_of(entry));
+                let report = spec.evaluate_report(
+                    &document,
+                    entry.body.timestamp_ms,
+                    &self.closure_of(entry),
+                );
                 (report.admitted, report.reasons, report.conditions)
             }
         };
@@ -134,6 +138,7 @@ impl Store {
             .filter_map(|id| {
                 self.get_entry(id).ok().flatten().map(|referenced| ClosureEntry {
                     id: *id,
+                    author: referenced.body.author.clone(),
                     timestamp_ms: referenced.body.timestamp_ms,
                     document: SignedDocument::from_payload(&referenced.body.payload),
                 })
@@ -155,4 +160,147 @@ impl Store {
             ))),
         }
     }
+
+    /// The pending view of a governed agreement: the contract an *anchor*
+    /// entry declares, judged over the evidence that exists so far - every
+    /// stored entry citing the anchor - instead of the anchor's own refs.
+    /// This is the walker behind "conditions outstanding" surfaces (escrow
+    /// status, reward pending, Signet's pending-for-me card): a future
+    /// satisfying document would cite the citing entries, so counting them
+    /// now answers "what is still outstanding".
+    ///
+    /// Only the citation-side predicates (refs and deadline) are judged
+    /// here; kind, party signatures, window, and seals belong to the future
+    /// document itself. `Ok(None)` = the anchor declares no contract.
+    pub fn contract_outlook(&self, anchor_id: &[u8; 32]) -> StoreResult<Option<ContractOutlook>> {
+        let Some(anchor) = self.get_entry(anchor_id)? else {
+            return Err(StoreError::Denied(format!(
+                "entry {} is not present on this node",
+                hex::encode(anchor_id)
+            )));
+        };
+        let Some(document) = SignedDocument::from_payload(&anchor.body.payload) else {
+            return Ok(None);
+        };
+        let declared = match ContractRef::from_doc(&document.doc) {
+            Ok(None) => return Ok(None),
+            Ok(Some(declared)) => declared,
+            Err(reason) => {
+                return Ok(Some(ContractOutlook::unresolved(&document, vec![reason])))
+            }
+        };
+        let contract_id = declared.parse_id().unwrap_or([0u8; 32]);
+        let outlook = match self.resolve_contract(&declared) {
+            Err(reason) => ContractOutlook::unresolved(&document, vec![reason]),
+            Ok(spec) => {
+                // Every stored entry citing the anchor is candidate evidence
+                // for a future satisfying document.
+                let citing_entries: Vec<Entry> = self
+                    .all_entries()?
+                    .into_iter()
+                    .filter(|entry| entry.body.refs.iter().any(|r| r == anchor_id))
+                    .collect();
+                let citing: Vec<CitedEntry> = citing_entries
+                    .iter()
+                    .map(|entry| {
+                        Ok::<_, StoreError>(CitedEntry {
+                            id: entry.id().map_err(StoreError::Core)?,
+                            author: entry.body.author.clone(),
+                            namespace: entry.body.namespace.clone(),
+                            kind: SignedDocument::from_payload(&entry.body.payload)
+                                .map(|doc| doc.kind),
+                            timestamp_ms: entry.body.timestamp_ms,
+                        })
+                    })
+                    .collect::<StoreResult<_>>()?;
+                let closure: Vec<ClosureEntry> = citing_entries
+                    .into_iter()
+                    .map(|entry| {
+                        Ok::<_, StoreError>(ClosureEntry {
+                            id: entry.id().map_err(StoreError::Core)?,
+                            author: entry.body.author.clone(),
+                            timestamp_ms: entry.body.timestamp_ms,
+                            document: SignedDocument::from_payload(&entry.body.payload),
+                        })
+                    })
+                    .collect::<StoreResult<_>>()?;
+                // Judge only the citation-side predicates: evaluate a
+                // synthetic future document of the admitted kind carrying
+                // the anchor's fields (the deadline lives there), then keep
+                // the deadline and refs conditions.
+                let future = SignedDocument::new(&spec.admits, document.doc.clone());
+                let report = spec.evaluate_report(&future, anchor.body.timestamp_ms, &closure);
+                let conditions: Vec<ConditionStatus> = report
+                    .conditions
+                    .into_iter()
+                    .filter(|condition| {
+                        matches!(
+                            condition.kind,
+                            ConditionKind::Deadline | ConditionKind::Refs
+                        )
+                    })
+                    .collect();
+                let ready = conditions.iter().all(|condition| condition.met);
+                ContractOutlook {
+                    contract_id,
+                    version: declared.version,
+                    kind: document.kind.clone(),
+                    admits: spec.admits.clone(),
+                    ready,
+                    reasons: Vec::new(),
+                    conditions,
+                    citing,
+                }
+            }
+        };
+        Ok(Some(outlook))
+    }
+}
+
+/// The pending view of the contract an anchor document declares.
+#[derive(Debug, Clone)]
+pub struct ContractOutlook {
+    /// Declared contract entry id (all-zero when unresolvable).
+    pub contract_id: [u8; 32],
+    pub version: u8,
+    /// Kind of the anchor document (e.g. the escrow agreement).
+    pub kind: String,
+    /// Kind a satisfying future document must carry.
+    pub admits: String,
+    /// Are the citation-side requirements already satisfied by the
+    /// evidence this node can see?
+    pub ready: bool,
+    /// Why not (resolution failures; empty when the contract resolved).
+    pub reasons: Vec<String>,
+    /// Citation-side conditions only (deadline + refs).
+    pub conditions: Vec<ConditionStatus>,
+    /// Entries citing the anchor, insertion order - the evidence so far.
+    pub citing: Vec<CitedEntry>,
+}
+
+impl ContractOutlook {
+    fn unresolved(document: &SignedDocument, reasons: Vec<String>) -> ContractOutlook {
+        ContractOutlook {
+            contract_id: [0u8; 32],
+            version: 0,
+            kind: document.kind.clone(),
+            admits: String::new(),
+            ready: false,
+            reasons,
+            conditions: Vec::new(),
+            citing: Vec::new(),
+        }
+    }
+}
+
+/// One piece of evidence in the pending view: a stored entry citing the
+/// anchor agreement.
+#[derive(Debug, Clone)]
+pub struct CitedEntry {
+    pub id: [u8; 32],
+    pub author: String,
+    pub namespace: String,
+    /// Document kind when the payload is a signed document.
+    pub kind: Option<String>,
+    pub timestamp_ms: u64,
 }

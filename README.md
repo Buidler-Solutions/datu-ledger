@@ -601,11 +601,18 @@ Contracts gate; people act.
 
 A contract spec is a small JSON rule - `admits` (the document kind),
 `requires_parties` (verified party roles, with key pins and field binds),
-`requires_refs` (cited documents of a kind, optionally with a required party
-or a minimum of distinct cosigners), and `deadline_from_field`. It is
-published as a party-signed `gov.contract` document into the `gov.contracts`
-namespace through the ordinary writer policy, so the entry id *is* the
-contract's address. A governed document opts in by naming its rule:
+`requires_refs` (cited documents of a kind, optionally with a required
+party, a minimum of distinct cosigners, or a pinned entry author: the
+authority-feed predicate, where one designated author sequences a feed so
+"the authority allocated this" is deterministic), `deadline_from_field`
+(citations stamped after it do not count), `not_before_field` /
+`not_after_field` (a landing window on the entry's own timestamp;
+validator-clock subjective at admission, violations provable later via
+witness checkpoints), and `requires_sealed` (fields that must be
+`datu-sealed-*` ciphertext whenever present). The spec is published as a
+party-signed `gov.contract` document into the `gov.contracts` namespace
+through the ordinary writer policy, so the entry id *is* the contract's
+address. A governed document opts in by naming its rule:
 
 ```json
 {"parcel": "PH-1", "holder_key": "…", "deadline_ms": 1770000000000,
@@ -624,16 +631,39 @@ and can evaluate the same predicate on demand:
 datu publish --ns gov.contracts --file contract.json   # the rule itself
 datu contract show --id <contract-entry-id>            # inspect the rule
 datu contract check --id <governed-entry-id>           # condition-by-condition verdict
+datu contract status --id <anchor-entry-id>           # pending view (below)
 ```
 
 `datu verify` recounts contract satisfaction across the whole ledger
 (`contracts_failed`) as evidence - what a stricter node would have refused,
-or what arrived before the rule did. Because contracts are generic
-predicates over documents and citations, ecosystem conventions can build on
-them without new protocol machinery: document escrow (a certificate released
-to a holder once compliance entries arrive), one-award-per-parcel rewards,
-conditional registries. A tool for whoever needs it - documents that declare
-no contract are untouched.
+or what arrived before the rule did.
+
+### Pending agreements: conditions outstanding
+
+`datu contract status` answers the *pending* question: an anchor document
+(an escrow agreement, a reward offer) declares a contract for a **future**
+satisfying document. The walker judges the citation-side conditions
+against the evidence that exists so far - every stored entry citing the
+anchor - and reports `READY` or `OUTSTANDING`, condition by condition, with
+the evidence list. Kind, party signatures, window, and seals belong to the
+future document itself and are not judged early. The same shape is served
+at `GET /v1/contract/status/<anchor-id>` for panels and dApps, which is
+how a "pending for me" card renders straight from contract evaluation.
+
+Because contracts are generic predicates over documents and citations,
+ecosystem conventions can build on them without new protocol machinery.
+One worked example, **document escrow** (data release, not value): a
+`datu.cert.escrow` anchor holds the certificate fields sealed to the
+registry, names the `holder_key`/`agent_key`, deadline, and its contract;
+compliance entries (payment proof, inspection) cite the anchor; the
+`datu.cert.release` cites the compliance set, is agent-signed per the
+contract's party bind, and re-seals the certificate to the holder's seal
+key. Release is not unlocking - the reader ACL is baked into ciphertext,
+so a release is a new targeted encryption act: attributable, refs-linked,
+condition-bound. The holder watches the anchor go OUTSTANDING to READY
+without ever reading a certificate field. Other conventions fall out the
+same way: one-award-per-parcel rewards, conditional registries. A tool for
+whoever needs it - documents that declare no contract are untouched.
 
 ## Network modes: who may join and sync
 
@@ -772,8 +802,8 @@ tokenless, offline-capable operation.
   crypto, bloom filters, attestation/cosign helpers, party signatures,
   document contracts (predicate specs)
 - `crates/store` - append-only storage (immutability triggers), writer policy
-  gate, contract admission + evaluation, bundles, delta files, reconciliation
-  pages, full verification
+  gate, contract admission + evaluation + pending-status walker, bundles,
+  delta files, reconciliation pages, full verification
 - `crates/p2p` - DATUP2P1: the native node-to-node sync protocol over raw TCP
 - `crates/wallet` - keychain identities (Argon2id), reference signer,
   party consent signing, multi-reader field sealing (`datu-sealed-v2`; reads

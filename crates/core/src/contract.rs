@@ -49,9 +49,20 @@ fn default_count() -> usize {
     1
 }
 
+/// A `datu-sealed-*` / `dag-sealed-*` reader-ACL object (field-level
+/// encryption; see the wallet crate). A plaintext personal field breaks the
+/// seal demand.
+pub fn is_sealed(value: &serde_json::Value) -> bool {
+    value
+        .get("sealed")
+        .and_then(|s| s.as_str())
+        .map(|s| s.starts_with("datu-sealed-") || s.starts_with("dag-sealed-"))
+        .unwrap_or(false)
+}
+
 /// One reference requirement: the closure must contain at least `count`
 /// cited entries whose documents are of `kind` and satisfy the optional
-/// party constraints.
+/// party and author constraints.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RefRequirement {
     /// Document kind a qualifying citation must carry.
@@ -67,6 +78,12 @@ pub struct RefRequirement {
     /// verified party keys (independent cosigners).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_cosigners: Option<usize>,
+    /// If set, the qualifying *entry* must be authored by this key (hex):
+    /// the authority-feed predicate. One designated author sequences the
+    /// feed, so "the authority allocated this" is deterministic without
+    /// consensus - the citation is the allocation receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
 }
 
 /// One party requirement on the governed document itself. Mirrors the
@@ -99,6 +116,21 @@ pub struct ContractSpec {
     /// entries stamped after it do not count toward `requires_refs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_from_field: Option<String>,
+    /// Document field carrying the earliest landing time (ms). The
+    /// governed entry's own timestamp must be at or after it. Validator-
+    /// clock subjective at admission; violations stay provable later via
+    /// witness checkpoints over the entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before_field: Option<String>,
+    /// Document field carrying the latest landing time (ms). The governed
+    /// entry's own timestamp must be at or before it - the release window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_after_field: Option<String>,
+    /// Document fields that must be **encrypted** (a `datu-sealed-*`
+    /// object) whenever they appear in the governed document. A missing
+    /// field is fine; a present field in plaintext is a denial.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires_sealed: Vec<String>,
 }
 
 impl ContractSpec {
@@ -118,10 +150,13 @@ impl ContractSpec {
     }
 
     /// Full evaluation with per-condition detail (for `datu contract check`
-    /// and audits). Pure: same document and closure, same report.
+    /// and audits). Pure: same document, entry timestamp, and closure, same
+    /// report. `entry_ts` is the governed entry's own author-claimed
+    /// timestamp (used only by the landing window predicates).
     pub fn evaluate_report(
         &self,
         document: &SignedDocument,
+        entry_ts: u64,
         closure: &[ClosureEntry],
     ) -> ContractReport {
         let mut conditions = Vec::new();
@@ -129,6 +164,7 @@ impl ContractSpec {
 
         let kind_met = document.kind == self.admits;
         conditions.push(ConditionStatus {
+            kind: ConditionKind::Kind,
             requirement: format!("document kind is '{}'", self.admits),
             required: self.admits.clone(),
             found: document.kind.clone(),
@@ -170,6 +206,7 @@ impl ContractSpec {
                 ));
             }
             conditions.push(ConditionStatus {
+                kind: ConditionKind::Party,
                 requirement: describe.clone(),
                 required: "verified".into(),
                 found: if satisfied { "present".into() } else { "missing".into() },
@@ -189,6 +226,7 @@ impl ContractSpec {
         if let Some(field) = &self.deadline_from_field {
             let met = deadline.is_some();
             conditions.push(ConditionStatus {
+                kind: ConditionKind::Deadline,
                 requirement: format!("deadline field '{field}' carries a number"),
                 required: "numeric".into(),
                 found: deadline
@@ -203,13 +241,89 @@ impl ContractSpec {
             }
         }
 
+        // Landing window: the governed entry's own timestamp against
+        // declared bounds. Validator-clock subjective at admission (an
+        // author-claimed ts is a claim, not truth); violations stay
+        // provable later via witness checkpoints over the entry.
+        for (field, opens) in [
+            self.not_before_field.as_ref().map(|f| (f, true)),
+            self.not_after_field.as_ref().map(|f| (f, false)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let bound = document.doc.get(field).and_then(|v| v.as_u64());
+            let met = match bound {
+                Some(b) if opens => entry_ts >= b,
+                Some(b) => entry_ts <= b,
+                None => false,
+            };
+            conditions.push(ConditionStatus {
+                kind: ConditionKind::Window,
+                requirement: format!(
+                    "entry lands {} doc field '{}', the {} of the window",
+                    if opens { "at or after" } else { "at or before" },
+                    field,
+                    if opens { "opening" } else { "closing" }
+                ),
+                required: bound
+                    .map(|b| b.to_string())
+                    .unwrap_or_else(|| "numeric".into()),
+                found: format!("entry ts {entry_ts}"),
+                met,
+            });
+            if !met {
+                let why = match bound {
+                    Some(b) if opens => {
+                        format!("entry ts {entry_ts} is before the window opening {b}")
+                    }
+                    Some(b) => format!("entry ts {entry_ts} is after the window closing {b}"),
+                    None => format!(
+                        "document does not carry a number in '{field}' (fail-closed)"
+                    ),
+                };
+                reasons.push(format!("contract landing window: {why}"));
+            }
+        }
+
+        // Sealed fields: personal data is never published in plaintext.
+        // A missing field is fine (nothing to leak); a present field must
+        // be a sealed object.
+        for field in &self.requires_sealed {
+            let (found, met) = match document.doc.get(field.as_str()) {
+                None => ("absent".to_string(), true),
+                Some(value) => {
+                    let sealed = is_sealed(value);
+                    (if sealed { "sealed" } else { "plaintext" }.to_string(), sealed)
+                }
+            };
+            conditions.push(ConditionStatus {
+                kind: ConditionKind::Sealed,
+                requirement: format!("field '{field}' is encrypted when present"),
+                required: "sealed".into(),
+                found: found.clone(),
+                met,
+            });
+            if !met {
+                reasons.push(format!(
+                    "contract requires field '{field}' to be encrypted: the ledger stores ciphertext only"
+                ));
+            }
+        }
+
         for req in &self.requires_refs {
             let counts = |entry: &ClosureEntry| -> bool {
                 deadline.map(|d| entry.timestamp_ms <= d).unwrap_or(true)
             };
+            let on_feed = |entry: &ClosureEntry| -> bool {
+                req.author
+                    .as_ref()
+                    .map(|author| &entry.author == author)
+                    .unwrap_or(true)
+            };
             let found = closure
                 .iter()
-                .filter(|entry| counts(entry))
+                .filter(|entry| counts(entry) && on_feed(entry))
                 .filter(|entry| {
                     entry
                         .document
@@ -219,24 +333,30 @@ impl ContractSpec {
                 })
                 .count();
             let met = found >= req.count;
-            let mut describe =
-                format!("{} cited ref(s) of kind '{}'", req.count, req.kind);
+            let mut qualifiers = String::new();
             if let Some(role) = &req.party {
-                describe.push_str(&format!(" with a verified '{role}' party"));
+                qualifiers.push_str(&format!(" with a verified '{role}' party"));
             }
             if let Some(min) = req.min_cosigners {
-                describe.push_str(&format!(" with at least {min} distinct cosigners"));
+                qualifiers.push_str(&format!(" with at least {min} distinct cosigners"));
+            }
+            if let Some(author) = &req.author {
+                qualifiers.push_str(&format!(
+                    " authored by {} (the authority feed)",
+                    &author[..16.min(author.len())]
+                ));
             }
             conditions.push(ConditionStatus {
-                requirement: describe,
+                kind: ConditionKind::Refs,
+                requirement: format!("{} cited ref(s) of kind '{}'{}", req.count, req.kind, qualifiers),
                 required: req.count.to_string(),
                 found: found.to_string(),
                 met,
             });
             if !met {
                 reasons.push(format!(
-                    "contract requires {} cited ref(s) of kind '{}', found {} (late citations do not count)",
-                    req.count, req.kind, found
+                    "contract requires {} cited ref(s) of kind '{}'{}, found {} (late or off-feed citations do not count)",
+                    req.count, req.kind, qualifiers, found
                 ));
             }
         }
@@ -252,9 +372,10 @@ impl ContractSpec {
     pub fn evaluate(
         &self,
         document: &SignedDocument,
+        entry_ts: u64,
         closure: &[ClosureEntry],
     ) -> ContractVerdict {
-        match self.evaluate_report(document, closure) {
+        match self.evaluate_report(document, entry_ts, closure) {
             report if report.admitted => ContractVerdict::Admitted,
             report => ContractVerdict::Denied(report.reasons.join("; ")),
         }
@@ -336,11 +457,12 @@ impl ContractRef {
 }
 
 /// One direct causal reference of the governed entry, resolved as far as
-/// this node can see it: its id, its author-claimed timestamp, and its
+/// this node can see it: its id, author, author-claimed timestamp, and its
 /// payload as a signed document if it is one.
 #[derive(Clone, Debug)]
 pub struct ClosureEntry {
     pub id: [u8; 32],
+    pub author: String,
     pub timestamp_ms: u64,
     pub document: Option<SignedDocument>,
 }
@@ -351,10 +473,42 @@ pub enum ContractVerdict {
     Denied(String),
 }
 
+/// Which family of predicate a condition belongs to (lets walkers render
+/// citation-side conditions apart from document-side ones).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConditionKind {
+    /// Governed document kind matches `admits`.
+    Kind,
+    /// Verified party on the governed document.
+    Party,
+    /// Deadline field present; citations stamped after it do not count.
+    Deadline,
+    /// Landing-window bound on the governed entry's own timestamp.
+    Window,
+    /// Document field must be sealed when present.
+    Sealed,
+    /// Cited-reference requirement (counts the closure).
+    Refs,
+}
+
+impl ConditionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConditionKind::Kind => "kind",
+            ConditionKind::Party => "party",
+            ConditionKind::Deadline => "deadline",
+            ConditionKind::Window => "window",
+            ConditionKind::Sealed => "sealed",
+            ConditionKind::Refs => "refs",
+        }
+    }
+}
+
 /// One evaluated condition, met or not (report surface for
 /// `datu contract check` and audits).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConditionStatus {
+    pub kind: ConditionKind,
     pub requirement: String,
     pub required: String,
     pub found: String,
@@ -392,6 +546,7 @@ mod tests {
                 count: 1,
                 party: Some("inspector".into()),
                 min_cosigners: None,
+                author: None,
             }],
             requires_parties: vec![PartyRequirement {
                 role: "holder".into(),
@@ -399,14 +554,18 @@ mod tests {
                 bind_field: Some("holder_key".into()),
             }],
             deadline_from_field: Some("deadline_ms".into()),
+            not_before_field: None,
+            not_after_field: None,
+            requires_sealed: vec![],
         }
     }
 
-    fn closure_of(entries: &[(&SignedDocument, u64)]) -> Vec<ClosureEntry> {
+    fn closure_of(entries: &[(&SignedDocument, u64)], author: &str) -> Vec<ClosureEntry> {
         entries
             .iter()
             .map(|entry| ClosureEntry {
                 id: [0u8; 32],
+                author: author.to_string(),
                 timestamp_ms: entry.1,
                 document: Some(entry.0.clone()),
             })
@@ -428,14 +587,17 @@ mod tests {
             serde_json::json!({"parcel": "PH-1"}),
             &[("inspector", inspector)],
         );
-        let closure = closure_of(&[(&inspection, 500)]);
-        assert!(matches!(spec().evaluate(&doc, &closure), ContractVerdict::Admitted));
+        let closure = closure_of(&[(&inspection, 500)], "inspector-author");
+        assert!(matches!(
+            spec().evaluate(&doc, 2000, &closure),
+            ContractVerdict::Admitted
+        ));
     }
 
     #[test]
     fn wrong_kind_denied() {
         let doc = signed_doc("land.title.loan", serde_json::json!({}), &[]);
-        let report = spec().evaluate_report(&doc, &[]);
+        let report = spec().evaluate_report(&doc, 2000, &[]);
         assert!(!report.admitted);
         assert!(report.reasons[0].contains("land.title.grant"));
     }
@@ -448,7 +610,7 @@ mod tests {
             serde_json::json!({"holder_key": format!("{}0", "0".repeat(63)), "deadline_ms": 1000}),
             &[("holder", holder)],  // signed by holder, but doc names another key
         );
-        let report = spec().evaluate_report(&doc, &[]);
+        let report = spec().evaluate_report(&doc, 2000, &[]);
         assert!(!report.admitted);
         assert!(report.reasons.iter().any(|r| r.contains("'holder'")));
     }
@@ -468,13 +630,16 @@ mod tests {
             serde_json::json!({}),
             &[("inspector", inspector)],
         );
-        let late = closure_of(&[(&inspection, 1500)]);
+        let late = closure_of(&[(&inspection, 1500)], "inspector-author");
         assert!(matches!(
-            spec().evaluate(&doc, &late),
+            spec().evaluate(&doc, 2000, &late),
             ContractVerdict::Denied(_)
         ));
-        let on_time = closure_of(&[(&inspection, 1000)]);
-        assert!(matches!(spec().evaluate(&doc, &on_time), ContractVerdict::Admitted));
+        let on_time = closure_of(&[(&inspection, 1000)], "inspector-author");
+        assert!(matches!(
+            spec().evaluate(&doc, 2000, &on_time),
+            ContractVerdict::Admitted
+        ));
     }
 
     #[test]
@@ -484,7 +649,7 @@ mod tests {
             serde_json::json!({"deadline_ms": "soon"}),
             &[],
         );
-        let report = spec().evaluate_report(&doc, &[]);
+        let report = spec().evaluate_report(&doc, 2000, &[]);
         assert!(!report.admitted);
         assert!(report.reasons.iter().any(|r| r.contains("deadline")));
     }
@@ -499,6 +664,7 @@ mod tests {
             count: 1,
             party: None,
             min_cosigners: Some(2),
+            author: None,
         };
         assert!(!req.satisfied_by(&one));
         let mut two = signed_doc("x.report", serde_json::json!({}), &[("witness", a)]);
@@ -534,5 +700,118 @@ mod tests {
         let not_a_contract = serde_json::to_vec(&signed_doc("other.kind", serde_json::json!({}), &[]))
             .unwrap();
         assert!(ContractSpec::from_payload(&not_a_contract).is_none());
+    }
+
+    #[test]
+    fn authority_feed_pin_only_counts_that_author() {
+        let mut s = spec();
+        s.requires_refs = vec![RefRequirement {
+            kind: "land.title.inspection".into(),
+            count: 1,
+            party: None,
+            min_cosigners: None,
+            author: Some("feed-author".into()),
+        }];
+        let holder = SigningKey::generate(&mut OsRng);
+        let holder_key = hex::encode(holder.verifying_key().as_bytes());
+        let doc = signed_doc(
+            "land.title.grant",
+            serde_json::json!({"holder_key": holder_key, "deadline_ms": 1000}),
+            &[("holder", holder)],
+        );
+        let inspection = signed_doc("land.title.inspection", serde_json::json!({}), &[]);
+
+        let other_feed = closure_of(&[(&inspection, 500)], "someone-else");
+        assert!(matches!(
+            s.evaluate(&doc, 2000, &other_feed),
+            ContractVerdict::Denied(_)
+        ));
+        let authority_feed = closure_of(&[(&inspection, 500)], "feed-author");
+        assert!(matches!(
+            s.evaluate(&doc, 2000, &authority_feed),
+            ContractVerdict::Admitted
+        ));
+    }
+
+    #[test]
+    fn landing_window_bounds_the_entry_timestamp() {
+        let holder = SigningKey::generate(&mut OsRng);
+        let holder_key = hex::encode(holder.verifying_key().as_bytes());
+        let doc = signed_doc(
+            "land.title.grant",
+            serde_json::json!({"holder_key": holder_key, "deadline_ms": 9000, "opens": 1000, "closes": 3000}),
+            &[("holder", holder)],
+        );
+        let inspection = signed_doc(
+            "land.title.inspection",
+            serde_json::json!({}),
+            &[("inspector", SigningKey::generate(&mut OsRng))],
+        );
+        let closure = closure_of(&[(&inspection, 500)], "inspector");
+
+        let mut s = spec();
+        s.not_before_field = Some("opens".into());
+        s.not_after_field = Some("closes".into());
+
+        assert!(matches!(
+            s.evaluate(&doc, 2000, &closure),
+            ContractVerdict::Admitted
+        ));
+        let early = s.evaluate_report(&doc, 500, &closure);
+        assert!(!early.admitted);
+        assert!(early.reasons.iter().any(|r| r.contains("before the window opening")));
+        let late = s.evaluate_report(&doc, 4000, &closure);
+        assert!(!late.admitted);
+        assert!(late.reasons.iter().any(|r| r.contains("after the window closing")));
+    }
+
+    #[test]
+    fn landing_window_fails_closed_without_the_field() {
+        let holder = SigningKey::generate(&mut OsRng);
+        let holder_key = hex::encode(holder.verifying_key().as_bytes());
+        let doc = signed_doc(
+            "land.title.grant",
+            serde_json::json!({"holder_key": holder_key, "deadline_ms": 9000}),
+            &[("holder", holder)],
+        );
+        let mut s = spec();
+        s.not_after_field = Some("closes".into());
+        let report = s.evaluate_report(&doc, 2000, &[]);
+        assert!(!report.admitted);
+        assert!(report.reasons.iter().any(|r| r.contains("fail-closed")));
+    }
+
+    #[test]
+    fn sealed_fields_must_be_ciphertext() {
+        let holder = SigningKey::generate(&mut OsRng);
+        let holder_key = hex::encode(holder.verifying_key().as_bytes());
+        let mut s = spec();
+        s.requires_sealed = vec!["owner_name".into()];
+
+        let plain = signed_doc(
+            "land.title.grant",
+            serde_json::json!({"holder_key": holder_key, "deadline_ms": 9000, "owner_name": "Amina"}),
+            &[("holder", holder.clone())],
+        );
+        let report = s.evaluate_report(&plain, 2000, &[]);
+        assert!(!report.admitted);
+        assert!(report.reasons.iter().any(|r| r.contains("owner_name")));
+
+        let sealed = signed_doc(
+            "land.title.grant",
+            serde_json::json!({"holder_key": holder_key, "deadline_ms": 9000,
+                "owner_name": {"sealed": "datu-sealed-v2", "ciphertext": "..."}}),
+            &[("holder", holder)],
+        );
+        let inspection = signed_doc(
+            "land.title.inspection",
+            serde_json::json!({}),
+            &[("inspector", SigningKey::generate(&mut OsRng))],
+        );
+        let closure = closure_of(&[(&inspection, 500)], "inspector");
+        assert!(matches!(
+            s.evaluate(&sealed, 2000, &closure),
+            ContractVerdict::Admitted
+        ));
     }
 }

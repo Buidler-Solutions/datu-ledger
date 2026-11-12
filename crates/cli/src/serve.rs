@@ -301,6 +301,67 @@ fn handle_inner(
                 None => respond_json(stream, "400 Bad Request", &serde_json::json!({"error":"bad entry id"})),
             }
         }
+        // Pending view of a governed agreement: the contract an anchor
+        // declares, judged over the entries citing it. The read shape for
+        // "conditions outstanding" surfaces (Signet panel, registrar dApp).
+        ("GET", c) if c.starts_with("/v1/contract/status/") => {
+            let id_hex = &c["/v1/contract/status/".len()..];
+            let id = match hex::decode(id_hex)
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            {
+                Some(id) => id,
+                None => {
+                    respond_json(stream, "400 Bad Request", &serde_json::json!({"error":"bad entry id"}))?;
+                    return Ok(());
+                }
+            };
+            match store.contract_outlook(&id).map_err(|e| e.to_string())? {
+                None => respond_json(stream, "404 Not Found", &serde_json::json!({
+                    "error": "entry declares no contract"
+                })),
+                Some(outlook) => {
+                    let conditions: Vec<serde_json::Value> = outlook
+                        .conditions
+                        .iter()
+                        .map(|condition| {
+                            serde_json::json!({
+                                "kind": condition.kind.as_str(),
+                                "requirement": condition.requirement,
+                                "required": condition.required,
+                                "found": condition.found,
+                                "met": condition.met,
+                            })
+                        })
+                        .collect();
+                    let citing: Vec<serde_json::Value> = outlook
+                        .citing
+                        .iter()
+                        .map(|cited| {
+                            serde_json::json!({
+                                "id": hex::encode(cited.id),
+                                "author": cited.author,
+                                "namespace": cited.namespace,
+                                "kind": cited.kind,
+                                "timestamp_ms": cited.timestamp_ms,
+                            })
+                        })
+                        .collect();
+                    respond_json(stream, "200 OK", &serde_json::json!({
+                        "ok": true,
+                        "anchor": hex::encode(id),
+                        "contract_id": hex::encode(outlook.contract_id),
+                        "version": outlook.version,
+                        "kind": outlook.kind,
+                        "admits": outlook.admits,
+                        "ready": outlook.ready,
+                        "reasons": outlook.reasons,
+                        "conditions": conditions,
+                        "citing": citing,
+                    }))
+                }
+            }
+        }
         ("GET", f) if f.starts_with("/v1/feed/") => {
             let author = &f["/v1/feed/".len()..];
             let feed = store.feed(author).map_err(|e| e.to_string())?;

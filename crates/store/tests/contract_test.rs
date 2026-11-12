@@ -81,6 +81,7 @@ fn default_spec() -> ContractSpec {
             count: 1,
             party: Some("inspector".into()),
             min_cosigners: None,
+            author: None,
         }],
         requires_parties: vec![PartyRequirement {
             role: "holder".into(),
@@ -88,6 +89,9 @@ fn default_spec() -> ContractSpec {
             bind_field: Some("holder_key".into()),
         }],
         deadline_from_field: Some("deadline_ms".into()),
+        not_before_field: None,
+        not_after_field: None,
+        requires_sealed: vec![],
     }
 }
 
@@ -434,6 +438,7 @@ fn min_cosigners_requires_distinct_verified_parties() {
         count: 1,
         party: None,
         min_cosigners: Some(2),
+        author: None,
     }];
     let mut fx = fixture_with(&spec, "gov.contracts");
     let witness = SigningKey::generate(&mut OsRng);
@@ -458,6 +463,293 @@ fn min_cosigners_requires_distinct_verified_parties() {
             Some(fx.contract_ref())
         )
         .is_ok());
+}
+
+#[test]
+fn authority_feed_pin_only_counts_that_author() {
+    let mut spec = default_spec();
+    spec.requires_refs = vec![RefRequirement {
+        kind: "land.title.inspection".into(),
+        count: 1,
+        party: Some("inspector".into()),
+        min_cosigners: None,
+        author: Some(keys().author), // fresh key: nobody's feed yet
+    }];
+    let mut fx = fixture_with(&spec, "gov.contracts");
+    let compliance = fx.compliance(1000, None);
+    let message = denied_message(fx.grant(
+        vec![compliance.id().unwrap()],
+        None,
+        Some(1000),
+        Some(fx.contract_ref()),
+    ));
+    assert!(
+        message.contains("found 0"),
+        "citation from another author does not count: {message}"
+    );
+    assert!(
+        message.contains("authority feed"),
+        "denial names the authority: {message}"
+    );
+}
+
+#[test]
+fn landing_window_denies_late_and_early_documents() {
+    let mut spec = default_spec();
+    spec.not_before_field = Some("opens_ms".into());
+    spec.not_after_field = Some("closes_ms".into());
+    let mut fx = fixture_with(&spec, "gov.contracts");
+    let compliance = fx.compliance(1000, None);
+
+    // The grant entry lands at ts 2000 (grant_entry hardcodes it); give it
+    // a window of 1500..=2500 so it lands inside, then prove the edges.
+    let mut grant_with_window = |fx: &mut Fixture, opens: u64, closes: u64| {
+        let holder_key = hex::encode(fx.holder.ed.verifying_key().as_bytes());
+        let doc = serde_json::json!({
+            "parcel": "PH-1",
+            "holder_key": holder_key,
+            "deadline_ms": 3000,
+            "opens_ms": opens,
+            "closes_ms": closes,
+            "contract": fx.contract_ref(),
+        });
+        let payload = signed_doc("land.title.grant", doc, &[("holder", &fx.holder.ed)]);
+        let entry = make_entry(
+            &fx.registrar,
+            "gov.titles.grant",
+            payload,
+            fx.registrar_seq,
+            fx.registrar_prev,
+            vec![compliance.id().unwrap()],
+            2000,
+        );
+        fx.registrar_seq += 1;
+        fx.registrar_prev = Some(entry.id().unwrap());
+        fx.store.insert_entry(&entry)
+    };
+
+    assert!(grant_with_window(&mut fx, 1500, 2500).is_ok(), "inside the window");
+    let message = denied_message(grant_with_window(&mut fx, 2500, 9000));
+    assert!(
+        message.contains("before the window opening"),
+        "early landing denied: {message}"
+    );
+    let message = denied_message(grant_with_window(&mut fx, 1, 1500));
+    assert!(
+        message.contains("after the window closing"),
+        "late landing denied: {message}"
+    );
+}
+
+#[test]
+fn sealed_field_demand_denies_plaintext() {
+    let mut spec = default_spec();
+    spec.requires_sealed = vec!["owner_name".into()];
+    let mut fx = fixture_with(&spec, "gov.contracts");
+    let compliance = fx.compliance(1000, None);
+    let holder_key = hex::encode(fx.holder.ed.verifying_key().as_bytes());
+    let plaintext = serde_json::json!({
+        "parcel": "PH-1",
+        "holder_key": holder_key,
+        "deadline_ms": 1000,
+        "owner_name": "Amina",
+        "contract": fx.contract_ref(),
+    });
+    let payload = signed_doc("land.title.grant", plaintext, &[("holder", &fx.holder.ed)]);
+    let entry = make_entry(
+        &fx.registrar,
+        "gov.titles.grant",
+        payload,
+        fx.registrar_seq,
+        fx.registrar_prev,
+        vec![compliance.id().unwrap()],
+        2000,
+    );
+    let message = denied_message(fx.store.insert_entry(&entry));
+    assert!(
+        message.contains("owner_name"),
+        "plaintext personal field denied: {message}"
+    );
+    assert!(
+        message.contains("ciphertext"),
+        "denial explains the seal demand: {message}"
+    );
+}
+
+#[test]
+fn outlook_tracks_conditions_outstanding() {
+    // The escrow convention end to end: an anchor agreement declares a
+    // contract that governs a future release; compliance entries cite the
+    // anchor; the outlook answers what is still outstanding.
+    let spec = ContractSpec {
+        version: CONTRACT_VERSION,
+        admits: "datu.cert.release".into(),
+        requires_refs: vec![RefRequirement {
+            kind: "datu.compliance.inspection".into(),
+            count: 1,
+            party: Some("inspector".into()),
+            min_cosigners: None,
+            author: None,
+        }],
+        requires_parties: vec![PartyRequirement {
+            role: "agent".into(),
+            key: None,
+            bind_field: Some("agent_key".into()),
+        }],
+        deadline_from_field: Some("deadline_ms".into()),
+        not_before_field: None,
+        not_after_field: None,
+        requires_sealed: vec![],
+    };
+    let mut fx = fixture_with(&spec, "gov.contracts");
+    let agent = SigningKey::generate(&mut OsRng);
+    let agent_key = hex::encode(agent.verifying_key().as_bytes());
+
+    // 1. The anchor agreement (open namespace: it is not itself governed,
+    //    it declares the rule for what may later satisfy it).
+    let anchor_doc = serde_json::json!({
+        "cert_id": "C-1",
+        "agent_key": agent_key,
+        "deadline_ms": 5000,
+        "contract": fx.contract_ref(),
+    });
+    let anchor_payload = signed_doc("datu.cert.escrow", anchor_doc, &[]);
+    let anchor = publish(
+        &fx.store,
+        &fx.registrar,
+        "records.escrow",
+        anchor_payload,
+        fx.registrar_seq,
+        fx.registrar_prev,
+        vec![],
+        1000,
+    );
+    fx.registrar_seq += 1;
+    fx.registrar_prev = Some(anchor.id().unwrap());
+
+    // 2. Pending: no compliance yet.
+    let outlook = fx.store.contract_outlook(&anchor.id().unwrap()).unwrap().unwrap();
+    assert!(!outlook.ready);
+    assert_eq!(outlook.admits, "datu.cert.release");
+    assert!(outlook.citing.is_empty());
+    let refs_condition = outlook
+        .conditions
+        .iter()
+        .find(|c| c.requirement.contains("datu.compliance.inspection"))
+        .unwrap();
+    assert!(!refs_condition.met);
+    assert_eq!(refs_condition.found, "0");
+
+    // 3. Compliance arrives, citing the anchor.
+    let compliance_payload = signed_doc(
+        "datu.compliance.inspection",
+        serde_json::json!({"cert_id": "C-1"}),
+        &[("inspector", &fx.inspector.ed)],
+    );
+    let compliance = publish(
+        &fx.store,
+        &fx.inspector,
+        "records.compliance",
+        compliance_payload,
+        fx.inspector_seq,
+        fx.inspector_prev,
+        vec![anchor.id().unwrap()],
+        2000,
+    );
+    fx.inspector_seq += 1;
+    fx.inspector_prev = Some(compliance.id().unwrap());
+
+    let outlook = fx.store.contract_outlook(&anchor.id().unwrap()).unwrap().unwrap();
+    assert!(outlook.ready, "citation side is satisfied");
+    assert_eq!(outlook.citing.len(), 1);
+    assert_eq!(outlook.citing[0].kind.as_deref(), Some("datu.compliance.inspection"));
+    assert!(outlook.conditions.iter().all(|c| c.met));
+
+    // 4. The release lands in a gated namespace, citing the compliance
+    //    entry, agent-signed per the contract's party demand.
+    let release_doc = serde_json::json!({
+        "cert_id": "C-1",
+        "agent_key": agent_key,
+        "deadline_ms": 5000,
+        "contract": fx.contract_ref(),
+    });
+    let release_payload = signed_doc("datu.cert.release", release_doc, &[("agent", &agent)]);
+    let release = make_entry(
+        &fx.registrar,
+        "gov.titles.grant",
+        release_payload,
+        fx.registrar_seq,
+        fx.registrar_prev,
+        vec![compliance.id().unwrap()],
+        3000,
+    );
+    assert!(fx.store.insert_entry(&release).is_ok());
+    let check = fx.store.check_contract(&release).unwrap().unwrap();
+    assert!(check.admitted);
+}
+
+#[test]
+fn outlook_late_compliance_stays_outstanding() {
+    let spec = ContractSpec {
+        version: CONTRACT_VERSION,
+        admits: "datu.cert.release".into(),
+        requires_refs: vec![RefRequirement {
+            kind: "datu.compliance.inspection".into(),
+            count: 1,
+            party: None,
+            min_cosigners: None,
+            author: None,
+        }],
+        requires_parties: vec![],
+        deadline_from_field: Some("deadline_ms".into()),
+        not_before_field: None,
+        not_after_field: None,
+        requires_sealed: vec![],
+    };
+    let mut fx = fixture_with(&spec, "gov.contracts");
+    let anchor_doc = serde_json::json!({
+        "cert_id": "C-2",
+        "deadline_ms": 1500,
+        "contract": fx.contract_ref(),
+    });
+    let anchor = publish(
+        &fx.store,
+        &fx.registrar,
+        "records.escrow",
+        signed_doc("datu.cert.escrow", anchor_doc, &[]),
+        fx.registrar_seq,
+        fx.registrar_prev,
+        vec![],
+        1000,
+    );
+    fx.registrar_seq += 1;
+    fx.registrar_prev = Some(anchor.id().unwrap());
+
+    let late_payload = signed_doc(
+        "datu.compliance.inspection",
+        serde_json::json!({"cert_id": "C-2"}),
+        &[("inspector", &fx.inspector.ed)],
+    );
+    publish(
+        &fx.store,
+        &fx.inspector,
+        "records.compliance",
+        late_payload,
+        fx.inspector_seq,
+        fx.inspector_prev,
+        vec![anchor.id().unwrap()],
+        2000, // after the anchor's declared deadline
+    );
+    let outlook = fx.store.contract_outlook(&anchor.id().unwrap()).unwrap().unwrap();
+    assert!(!outlook.ready, "late evidence is visible but does not count");
+    assert_eq!(outlook.citing.len(), 1, "the late entry is still listed as evidence");
+    let refs_condition = outlook
+        .conditions
+        .iter()
+        .find(|c| c.requirement.contains("datu.compliance.inspection"))
+        .unwrap();
+    assert!(!refs_condition.met);
+    assert_eq!(refs_condition.found, "0");
 }
 
 #[test]

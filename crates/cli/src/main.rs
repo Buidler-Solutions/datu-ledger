@@ -216,6 +216,14 @@ enum ContractCmd {
         #[arg(long)]
         id: String,
     },
+    /// Pending view of the contract an anchor entry declares: which
+    /// citation-side conditions are already met by the evidence on this
+    /// node (the walker behind "conditions outstanding" surfaces)
+    Status {
+        /// Anchor entry id (hex), e.g. the escrow agreement
+        #[arg(long)]
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1426,6 +1434,75 @@ fn cmd_contract_check(node: &Node, id: String) -> Result<(), String> {
                 println!("reasons:");
                 for reason in &check.reasons {
                     println!("  - {reason}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pending view: judge the contract an anchor document declares over the
+/// evidence that exists so far (every stored entry citing the anchor).
+/// Party signatures, kind, window, and seals belong to the future satisfying
+/// document; only citation-side conditions are judged here.
+fn cmd_contract_status(node: &Node, id: String) -> Result<(), String> {
+    let anchor_id = parse_id(&id)?;
+    match s(node.store.contract_outlook(&anchor_id))? {
+        None => println!(
+            "entry {} declares no contract (nothing pending)",
+            short(&id)
+        ),
+        Some(outlook) => {
+            println!("anchor      {}", short(&id));
+            println!("document    kind '{}'", outlook.kind);
+            println!(
+                "contract    {} v{}",
+                short(&hex::encode(outlook.contract_id)),
+                outlook.version
+            );
+            if !outlook.admits.is_empty() {
+                println!("awaits      a '{}' document citing this anchor", outlook.admits);
+            }
+            println!(
+                "evidence    {} citing entries on this node",
+                outlook.citing.len()
+            );
+            println!(
+                "verdict     {}",
+                if outlook.ready {
+                    "READY - citation-side conditions are met; the satisfying document may land"
+                } else {
+                    "OUTSTANDING - citation-side conditions unmet"
+                }
+            );
+            if !outlook.conditions.is_empty() {
+                println!("conditions:");
+                for condition in &outlook.conditions {
+                    println!(
+                        "  [{}] {} (required: {}, found: {})",
+                        if condition.met { "met    " } else { "NOT MET" },
+                        condition.requirement,
+                        condition.required,
+                        condition.found
+                    );
+                }
+            }
+            if !outlook.reasons.is_empty() {
+                println!("reasons:");
+                for reason in &outlook.reasons {
+                    println!("  - {reason}");
+                }
+            }
+            if !outlook.citing.is_empty() {
+                println!("citing entries (the evidence so far):");
+                for cited in &outlook.citing {
+                    println!(
+                        "  {}  kind {}  author {}  ts {}",
+                        short(&hex::encode(cited.id)),
+                        cited.kind.as_deref().unwrap_or("-"),
+                        short(&cited.author),
+                        cited.timestamp_ms
+                    );
                 }
             }
         }
@@ -3163,6 +3240,7 @@ fn run(cli: Cli) -> Result<(), String> {
             match cmd {
                 ContractCmd::Show { id } => cmd_contract_show(&node, id.clone()),
                 ContractCmd::Check { id } => cmd_contract_check(&node, id.clone()),
+                ContractCmd::Status { id } => cmd_contract_status(&node, id.clone()),
             }
         }
         Commands::Sync { peers, page } => {
