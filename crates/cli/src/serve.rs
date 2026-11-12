@@ -934,7 +934,26 @@ async function loadEntries(){
   rows.appendChild(tr)})}
 async function show(id){let e=await j('/v1/entry/'+id);if(e.error)e=await j('/v1/conflict/'+id);
  const d=document.getElementById('detail');d.style.display='block';
- const p=atob(e.payload_base64||'');d.textContent=JSON.stringify(e,null,2)+'\n\npayload:\n'+p}
+ const p=atob(e.payload_base64||'');d.textContent=JSON.stringify(e,null,2)+'\n\npayload:\n'+p;
+ // Ledger facts worth surfacing next to any record: who witnessed it (and
+ // as of when), and whether it declares a contract (the pending view).
+ const facts=[];
+ try{
+  const c=await j('/v1/coverage/'+id);
+  if(c.witnesses&&c.witnesses.length){
+   facts.push('witnessed by '+c.witnesses.length+' node(s): '+c.witnesses.map(w=>short(w.signer)+' as of '+new Date(w.timestamp_ms).toISOString()+' (height '+w.height+')').join('; '));
+  }else{
+   facts.push('witness coverage: none fresh on this node yet');
+  }
+ }catch(_){}
+ try{
+  const o=await j('/v1/contract/status/'+id);
+  if(o&&!o.error){
+   facts.push('contract '+(o.contract_id||'').slice(0,12)+'... '+(o.ready?'READY':'OUTSTANDING')+' - awaits a \''+o.admits+'\' document');
+   (o.reasons||[]).forEach(r=>facts.push('  reason: '+r));
+  }
+ }catch(_){}
+ if(facts.length) d.textContent+='\n\n'+facts.join('\n')}
 async function search(){const q=document.getElementById('q').value.trim();
  if(/^[0-9a-fA-F]{64}$/.test(q)){show(q)}
  else if(/^[0-9a-fA-F]{63,}$/.test(q)){const d=await j('/v1/feed/'+q);showFeed(d)}
@@ -1161,6 +1180,15 @@ mod tests {
             "the haves budget (5/min here) must bite within six requests"
         );
     }
+    /// The explorer's entry view keeps pointing at the ledger-fact routes;
+    /// a rename there must not silently drop the panels of evidence.
+    #[test]
+    fn explorer_surfaces_coverage_and_contracts() {
+        assert!(EXPLORER_HTML.contains("/v1/coverage/"));
+        assert!(EXPLORER_HTML.contains("/v1/contract/status/"));
+        assert!(EXPLORER_HTML.contains("/v1/checkpoints"));
+    }
+
     /// The coverage-proof endpoint serves the same offline-verifiable
     /// artifact `datu witness prove` writes: checkpoint + Merkle path.
     #[test]

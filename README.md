@@ -275,7 +275,10 @@ DATU_WALLET_PASS=... datu wallet open --name ministry --input sealed.json
 ### `datu serve` - node HTTP API + explorer
 
 `datu serve --addr 127.0.0.1:7474` exposes a std-only HTTP API plus a dark-theme
-ledger explorer at `/` (entries, search, witnesses - read-only mirror-node view):
+ledger explorer at `/` (entries, search, witnesses, disputes - read-only
+mirror-node view). The entry view surfaces the ledger facts alongside the
+record: fresh witness coverage with claimed times, and any declared
+contract's pending/ready verdict with its reasons:
 
 - `GET /v1/status` - node counters, the enforced policy, and (when a manifest
   is pinned) a `manifest` block with `freshness` + the reason for it
