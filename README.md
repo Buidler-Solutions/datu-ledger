@@ -313,6 +313,19 @@ see `datu-sealed-v2` (multi-reader, current write format); legacy `dag-sealed-v2
 and `dag-sealed-v1` blobs stay readable
 in `crates/wallet`.
 
+**Deferred delivery.** A field can be sealed *now* and openable *later*:
+`datu wallet seal-deferred` encrypts under a fresh content key and splits
+the key - one share rides in the ledger object (harmless alone), the other
+is kept by the issuer and published only by the release entry, sealed to
+the nominated holder (`datu wallet release-deferred` emits exactly that
+object). The ledger carries the complete ciphertext from day one, so a
+release is a tiny, targeted key act rather than a re-transmission; before
+the release the holder is locked out cryptographically, not by policy.
+`datu wallet open-deferred` recomposes the key, and the per-field BLAKE3
+commitment checks the reveal.
+Contract `requires_sealed` demands accept the deferred mark
+(`datu-sealed-deferred-v2`) like any other seal.
+
 ## Run a node anywhere: transports & the home node (Tier 6)
 
 Entries are self-verifying objects, not messages - so the transport is a
@@ -686,7 +699,8 @@ compliance entries (payment proof, inspection) cite the anchor; the
 `datu.cert.release` cites the compliance set, is agent-signed per the
 contract's party bind, and re-seals the certificate to the holder's seal
 key. Release is not unlocking - the reader ACL is baked into ciphertext,
-so a release is a new targeted encryption act: attributable, refs-linked,
+so a release is a new targeted encryption act (or, with deferred delivery,
+the publication of one withheld key share): attributable, refs-linked,
 condition-bound. The holder watches the anchor go OUTSTANDING to READY
 without ever reading a certificate field. Other conventions fall out the
 same way: one-award-per-parcel rewards, conditional registries. A tool for

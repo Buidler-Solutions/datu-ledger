@@ -521,6 +521,60 @@ enum WalletCmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Seal selected fields for deferred delivery: ciphertext lands now,
+    /// the key half only at release (fields stay unopenable until then)
+    SealDeferred {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// Holder X25519 seal public key (hex) the release will address
+        #[arg(long, conflicts_with = "to_field")]
+        to: Option<String>,
+        /// Read the holder's seal key from this top-level document field
+        #[arg(long = "to-field", conflicts_with = "to")]
+        to_field: Option<String>,
+        #[arg(long)]
+        input: PathBuf,
+        /// Comma-separated top-level field names to defer
+        #[arg(long)]
+        fields: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Where to write the release secrets (default: <input>.release.json)
+        #[arg(long = "release-out")]
+        release_out: Option<PathBuf>,
+    },
+    /// Attach a deferred field's release half: emits the object a release
+    /// entry carries (sealed to the nominated holder)
+    ReleaseDeferred {
+        #[arg(long)]
+        input: PathBuf,
+        /// Field name of the deferred object inside the input document
+        #[arg(long)]
+        field: String,
+        /// Release secrets written by seal-deferred
+        #[arg(long)]
+        release: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Open a deferred field with its published release object
+    OpenDeferred {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        field: String,
+        /// Release object (or any document containing one)
+        #[arg(long)]
+        release: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Decrypt sealed fields addressed to one of your identities
     Open {
         #[arg(long)]
@@ -1134,6 +1188,170 @@ fn cmd_wallet_open(
     let json = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
     write_output(out, &json)?;
     println!("{opened} field(s) decrypted for {}, {skipped} sealed for other readers", identity.public.name);
+    Ok(())
+}
+
+/// Seal selected fields for deferred delivery. The document carries
+/// unopenable ciphertext from day one; the release secrets come back as a
+/// side file the issuer keeps until the release entry publishes them.
+fn cmd_wallet_seal_deferred(
+    data_dir: &Path,
+    name: &str,
+    passphrase: &str,
+    to: &Option<String>,
+    to_field: &Option<String>,
+    input: &Path,
+    fields: &str,
+    out: &Option<PathBuf>,
+    release_out: &Option<PathBuf>,
+) -> Result<(), String> {
+    let wallet = datu_wallet::Wallet::open(data_dir);
+    let identity = wallet.load(name, passphrase)?;
+    let text =
+        std::fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let mut document: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("input must be a JSON object: {e}"))?;
+    let holder_key = match (to, to_field) {
+        (Some(key), None) => key.clone(),
+        (None, Some(field)) => document
+            .get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("document has no seal key string in field '{field}'"))?
+            .to_string(),
+        _ => return Err("pass exactly one holder key: --to KEY or --to-field FIELD".into()),
+    };
+    let field_names: Vec<String> = fields
+        .split(',')
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect();
+    let releases = identity.seal_deferred_fields(&mut document, &field_names, &holder_key)?;
+    if releases.is_empty() {
+        return Err("none of the named fields are present in the document".into());
+    }
+    let json = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
+    write_output(out, &json)?;
+    let map: serde_json::Map<String, serde_json::Value> = releases
+        .iter()
+        .map(|(field, secret)| (field.clone(), serde_json::json!(hex::encode(secret))))
+        .collect();
+    let release_doc = serde_json::json!({"version": 1, "fields": map});
+    let release_path = release_out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("{}.release.json", input.display())));
+    std::fs::write(
+        &release_path,
+        serde_json::to_string_pretty(&release_doc).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("cannot write {}: {e}", release_path.display()))?;
+    println!(
+        "{} field(s) sealed for deferred delivery to {}",
+        releases.len(),
+        short(&holder_key)
+    );
+    println!(
+        "  release secrets written to {} - keep them off the ledger until the release",
+        release_path.display()
+    );
+    println!("  after release, the holder opens with: datu wallet open-deferred");
+    Ok(())
+}
+
+/// Attach a deferred field's release half: needs public keys only, because
+/// releasing is an act of the ledger, not of the seal key.
+fn cmd_wallet_release_deferred(
+    input: &Path,
+    field: &str,
+    release: &Path,
+    out: &Option<PathBuf>,
+) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let document: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("input must be a JSON object: {e}"))?;
+    let field_value = document
+        .get(field)
+        .cloned()
+        .ok_or_else(|| format!("input has no field '{field}'"))?;
+    let deferred: datu_wallet::DeferredField = serde_json::from_value(field_value)
+        .map_err(|e| format!("'{field}' is not a deferred-delivery field: {e}"))?;
+    let release_text = std::fs::read_to_string(release)
+        .map_err(|e| format!("cannot read {}: {e}", release.display()))?;
+    let release_doc: serde_json::Value = serde_json::from_str(&release_text)
+        .map_err(|e| format!("release secrets must be JSON: {e}"))?;
+    let secret_hex = release_doc["fields"][field]
+        .as_str()
+        .ok_or_else(|| format!("release secrets have no entry for '{field}'"))?;
+    let secret: [u8; 32] = hex::decode(secret_hex)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or("release secret is not a 32-byte hex value")?;
+    let share = datu_wallet::attach_release(&deferred, &secret)?;
+    let json = serde_json::to_string_pretty(&share).map_err(|e| e.to_string())?;
+    write_output(out, &json)?;
+    println!(
+        "release half for '{field}' sealed to {} - put this object in the release entry",
+        short(&deferred.release_to)
+    );
+    Ok(())
+}
+
+/// Find the first release-share object anywhere in a JSON value.
+fn find_release_share(value: &serde_json::Value) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("sealed").and_then(|m| m.as_str()) == Some(datu_wallet::SHARE_MARK) {
+                return Some(value.clone());
+            }
+            map.values().find_map(find_release_share)
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(find_release_share),
+        _ => None,
+    }
+}
+
+/// Open a deferred field with its published release object: the holder
+/// identity recomposes the content key and checks the commitment.
+fn cmd_wallet_open_deferred(
+    data_dir: &Path,
+    name: &str,
+    passphrase: &str,
+    input: &Path,
+    field: &str,
+    release: &Path,
+    out: &Option<PathBuf>,
+) -> Result<(), String> {
+    let wallet = datu_wallet::Wallet::open(data_dir);
+    let identity = wallet.load(name, passphrase)?;
+    let text =
+        std::fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let document: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("input must be a JSON object: {e}"))?;
+    let field_value = document
+        .get(field)
+        .cloned()
+        .ok_or_else(|| format!("input has no field '{field}'"))?;
+    let deferred: datu_wallet::DeferredField = serde_json::from_value(field_value)
+        .map_err(|e| format!("'{field}' is not a deferred-delivery field: {e}"))?;
+    let release_text = std::fs::read_to_string(release)
+        .map_err(|e| format!("cannot read {}: {e}", release.display()))?;
+    let release_doc: serde_json::Value = serde_json::from_str(&release_text)
+        .map_err(|e| format!("release must be JSON: {e}"))?;
+    let share_value = find_release_share(&release_doc)
+        .ok_or("release file carries no share object (expected a 'datu-share-v2' object)")?;
+    let share: datu_wallet::SealedShare = serde_json::from_value(share_value)
+        .map_err(|e| format!("release share does not parse: {e}"))?;
+    let plaintext = datu_wallet::open_deferred(
+        &deferred,
+        &share,
+        &identity.public.seal_public,
+        &identity.seal,
+    )?;
+    let value: serde_json::Value = serde_json::from_slice(&plaintext)
+        .map_err(|e| format!("decrypted field is not valid JSON: {e}"))?;
+    let json = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    write_output(out, &json)?;
+    println!("field '{field}' opened for {}", identity.public.name);
     Ok(())
 }
 
@@ -3348,6 +3566,46 @@ fn run(cli: Cli) -> Result<(), String> {
                 let pass = get_passphrase(passphrase.clone())?;
                 cmd_wallet_seal(&cli.data_dir, name, &pass, to, to_fields, &input, &fields, &out)
             }
+            WalletCmd::SealDeferred {
+                name,
+                passphrase,
+                to,
+                to_field,
+                input,
+                fields,
+                out,
+                release_out,
+            } => {
+                let pass = get_passphrase(passphrase.clone())?;
+                cmd_wallet_seal_deferred(
+                    &cli.data_dir,
+                    name,
+                    &pass,
+                    to,
+                    to_field,
+                    &input,
+                    &fields,
+                    &out,
+                    &release_out,
+                )
+            }
+            WalletCmd::ReleaseDeferred {
+                input,
+                field,
+                release,
+                out,
+            } => cmd_wallet_release_deferred(&input, &field, &release, &out),
+            WalletCmd::OpenDeferred {
+                name,
+                passphrase,
+                input,
+                field,
+                release,
+                out,
+            } => {
+                let pass = get_passphrase(passphrase.clone())?;
+                cmd_wallet_open_deferred(&cli.data_dir, name, &pass, &input, &field, &release, &out)
+            }
             WalletCmd::Open {
                 name,
                 passphrase,
@@ -3896,5 +4154,138 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("does not reach"), "tampering is caught: {err}");
     }
+    /// Deferred delivery end to end through the CLI: seal now (unopenable),
+    /// release the key half, holder opens, non-holder cannot.
+    #[test]
+    fn deferred_delivery_cli_roundtrip() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(deferred_delivery_flow)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn deferred_delivery_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for (name, pass) in [("issuer", "pw1"), ("holder", "pw2")] {
+            run(cli(
+                d,
+                Commands::Signet {
+                    cmd: WalletCmd::Create {
+                        name: name.into(),
+                        passphrase: Some(pass.into()),
+                    },
+                },
+            ))
+            .unwrap();
+        }
+        let holder_seal = datu_wallet::Wallet::open(d)
+            .load("holder", "pw2")
+            .unwrap()
+            .public
+            .seal_public;
+
+        let doc = d.join("escrow.json");
+        std::fs::write(
+            &doc,
+            format!(
+                r#"{{"cert_id":"C-7","owner_name":"Amina","holder_seal":"{holder_seal}"}}"#
+            ),
+        )
+        .unwrap();
+
+        let sealed_path = d.join("sealed.json");
+        let secrets_path = d.join("secrets.json");
+        run(cli(
+            d,
+            Commands::Signet {
+                cmd: WalletCmd::SealDeferred {
+                    name: "issuer".into(),
+                    passphrase: Some("pw1".into()),
+                    to: None,
+                    to_field: Some("holder_seal".into()),
+                    input: doc.clone(),
+                    fields: "owner_name".into(),
+                    out: Some(sealed_path.clone()),
+                    release_out: Some(secrets_path.clone()),
+                },
+            },
+        ))
+        .unwrap();
+
+        let sealed_doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sealed_path).unwrap()).unwrap();
+        assert_eq!(sealed_doc["owner_name"]["sealed"], "datu-sealed-deferred-v2");
+
+        // Opening without a release object has nothing to open with.
+        let err = run(cli(
+            d,
+            Commands::Signet {
+                cmd: WalletCmd::OpenDeferred {
+                    name: "holder".into(),
+                    passphrase: Some("pw2".into()),
+                    input: sealed_path.clone(),
+                    field: "owner_name".into(),
+                    release: sealed_path.clone(),
+                    out: None,
+                },
+            },
+        ))
+        .unwrap_err();
+        assert!(err.contains("no share object"), "locked before release: {err}");
+
+        let share_path = d.join("share.json");
+        run(cli(
+            d,
+            Commands::Signet {
+                cmd: WalletCmd::ReleaseDeferred {
+                    input: sealed_path.clone(),
+                    field: "owner_name".into(),
+                    release: secrets_path.clone(),
+                    out: Some(share_path.clone()),
+                },
+            },
+        ))
+        .unwrap();
+
+        // The release addresses the nominated holder only.
+        let err = run(cli(
+            d,
+            Commands::Signet {
+                cmd: WalletCmd::OpenDeferred {
+                    name: "issuer".into(),
+                    passphrase: Some("pw1".into()),
+                    input: sealed_path.clone(),
+                    field: "owner_name".into(),
+                    release: share_path.clone(),
+                    out: None,
+                },
+            },
+        ))
+        .unwrap_err();
+        assert!(err.contains("another holder"), "{err}");
+
+        let opened_path = d.join("opened.json");
+        run(cli(
+            d,
+            Commands::Signet {
+                cmd: WalletCmd::OpenDeferred {
+                    name: "holder".into(),
+                    passphrase: Some("pw2".into()),
+                    input: sealed_path.clone(),
+                    field: "owner_name".into(),
+                    release: share_path.clone(),
+                    out: Some(opened_path.clone()),
+                },
+            },
+        ))
+        .unwrap();
+        let opened: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&opened_path).unwrap()).unwrap();
+        assert_eq!(opened, serde_json::json!("Amina"));
+    }
 }
+
 

@@ -41,6 +41,15 @@ pub const SEALED_MARK: &str = "dag-sealed-v1";
 pub const SEALED_V2_MARK: &str = "datu-sealed-v2";
 /// Pre-rebrand v2 seal mark: still readable, never written.
 pub const SEALED_V2_MARK_LEGACY: &str = "dag-sealed-v2";
+
+/// Deferred-delivery sealed field (v2): ciphertext from day one, but the
+/// content key is split - a public share rides in the object, the release
+/// share is published only by the release entry, sealed to the nominated
+/// holder. Nobody can open the field until the release happens.
+pub const DEFERRED_MARK: &str = "datu-sealed-deferred-v2";
+
+/// The release-share object a release entry carries for a deferred field.
+pub const SHARE_MARK: &str = "datu-share-v2";
 pub const KEYS_DIR: &str = "wallet/identities";
 pub const INDEX_FILE: &str = "wallet/index.json";
 
@@ -503,6 +512,40 @@ impl LoadedIdentity {
         Ok(sealed_count)
     }
 
+    /// Replace selected top-level fields with deferred-delivery sealed
+    /// objects addressed to one holder: the document is written once and
+    /// carries unopenable ciphertext from day one. Each field's release
+    /// secret comes back for the issuer to keep; the release entry publishes
+    /// it via [`attach_release`], and only then can the holder open the
+    /// field with [`open_deferred`].
+    pub fn seal_deferred_fields(
+        &self,
+        document: &mut serde_json::Value,
+        field_names: &[String],
+        holder_seal_public_hex: &str,
+    ) -> WResult<Vec<(String, [u8; 32])>> {
+        let holder = parse_x25519_public(holder_seal_public_hex, "holder seal key")?;
+        let map = document
+            .as_object_mut()
+            .ok_or("document must be a JSON object")?;
+        let mut releases = Vec::new();
+        for name in field_names {
+            let value = match map.get(name) {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+            let plaintext = serde_json::to_vec(&value)
+                .map_err(|e| format!("cannot serialize field '{name}': {e}"))?;
+            let (deferred, release_secret) = seal_deferred(&plaintext, &holder)?;
+            map.insert(
+                name.clone(),
+                serde_json::to_value(deferred).map_err(|e| e.to_string())?,
+            );
+            releases.push((name.clone(), release_secret));
+        }
+        Ok(releases)
+    }
+
     /// Decrypt every sealed field addressed to this identity's sealing key
     /// (v1 single-reader and v2 multi-reader formats). Returns
     /// (opened, skipped_for_other_readers).
@@ -521,6 +564,10 @@ impl LoadedIdentity {
                 None => continue,
             };
             match obj.get("sealed").and_then(|m| m.as_str()) {
+                // Deferred-delivery fields stay locked here on purpose: the
+                // release share is not on the ledger yet. `open_deferred`
+                // opens them once the release publishes it.
+                Some(DEFERRED_MARK) => skipped += 1,
                 Some(SEALED_V2_MARK) | Some(SEALED_V2_MARK_LEGACY) => {
                     let sealed: SealedFieldV2 =
                         serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
@@ -624,11 +671,7 @@ fn seal_field_multi(plaintext: &[u8], readers: &[XPublicKey]) -> WResult<serde_j
     serde_json::to_value(sealed).map_err(|e| e.to_string())
 }
 
-fn open_recipient(
-    recipient: &Recipient,
-    commitment: &str,
-    my_seal: &StaticSecret,
-) -> WResult<Vec<u8>> {
+fn open_recipient_raw(recipient: &Recipient, my_seal: &StaticSecret) -> WResult<Vec<u8>> {
     let eph_bytes = hex::decode(&recipient.eph).map_err(|_| "bad eph key".to_string())?;
     let eph: [u8; 32] = eph_bytes
         .try_into()
@@ -644,9 +687,136 @@ fn open_recipient(
         .decode(&recipient.nonce)
         .map_err(|_| "bad nonce".to_string())?;
     let ct = B64.decode(&recipient.ct).map_err(|_| "bad ct".to_string())?;
-    let plaintext = open_symmetric(&key, &nonce, &ct)?;
+    open_symmetric(&key, &nonce, &ct)
+}
+
+fn open_recipient(
+    recipient: &Recipient,
+    commitment: &str,
+    my_seal: &StaticSecret,
+) -> WResult<Vec<u8>> {
+    let plaintext = open_recipient_raw(recipient, my_seal)?;
     let computed = hex::encode(blake3::hash(&plaintext).as_bytes());
     if computed != commitment {
+        return Err("commitment mismatch: field was tampered with".into());
+    }
+    Ok(plaintext)
+}
+
+fn parse_x25519_public(hex_key: &str, what: &str) -> WResult<XPublicKey> {
+    let bytes = hex::decode(hex_key.trim()).map_err(|_| format!("{what} must be hex"))?;
+    let key: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| format!("{what} must be 32 bytes"))?;
+    Ok(XPublicKey::from(key))
+}
+
+/// Deferred-delivery sealed field (v2). The ciphertext exists from day one,
+/// but the content key is split: `share` (public, right here, harmless
+/// alone) XOR the release share (withheld). The release entry publishes the
+/// release share sealed to `release_to`, which is the only act that makes
+/// the field openable - and only for that holder.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DeferredField {
+    pub sealed: String,
+    /// BLAKE3 of the plaintext (hex): the reveal is checkable.
+    pub commitment: String,
+    /// XChaCha20-Poly1305 nonce (base64, 24 bytes).
+    pub nonce: String,
+    /// Ciphertext under the reconstructed content key (base64).
+    pub ct: String,
+    /// Public half of the content key (hex).
+    pub share: String,
+    /// X25519 seal key the release half must be sealed to (hex).
+    pub release_to: String,
+}
+
+/// The release half of a deferred field's content key, sealed to the
+/// nominated holder. Carried by the release entry.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SealedShare {
+    pub sealed: String,
+    pub recipient: Recipient,
+}
+
+/// Seal one value for deferred delivery to `holder`: encrypt now under a
+/// fresh content key, hand back the release secret for later. The release
+/// secret never touches the ledger until the release publishes it.
+pub fn seal_deferred(plaintext: &[u8], holder: &XPublicKey) -> WResult<(DeferredField, [u8; 32])> {
+    use rand::RngCore;
+    let mut key = [0u8; 32];
+    OsRng.fill_bytes(&mut key);
+    let (nonce, ct) = seal_symmetric(&key, plaintext)?;
+    let mut release_secret = [0u8; 32];
+    OsRng.fill_bytes(&mut release_secret);
+    let share: [u8; 32] = std::array::from_fn(|i| key[i] ^ release_secret[i]);
+    Ok((
+        DeferredField {
+            sealed: DEFERRED_MARK.to_string(),
+            commitment: hex::encode(blake3::hash(plaintext).as_bytes()),
+            nonce: B64.encode(&nonce),
+            ct: B64.encode(&ct),
+            share: hex::encode(share),
+            release_to: hex::encode(holder.as_bytes()),
+        },
+        release_secret,
+    ))
+}
+
+/// Seal the release secret to the field's nominated holder: this object
+/// goes into the release entry. Needs public keys only - releasing is an
+/// act of the ledger, not of the seal key.
+pub fn attach_release(deferred: &DeferredField, release_secret: &[u8; 32]) -> WResult<SealedShare> {
+    if deferred.sealed != DEFERRED_MARK {
+        return Err("not a deferred-delivery field".to_string());
+    }
+    let holder = parse_x25519_public(&deferred.release_to, "release_to key")?;
+    Ok(SealedShare {
+        sealed: SHARE_MARK.to_string(),
+        recipient: seal_to_recipient(release_secret, &holder)?,
+    })
+}
+
+/// Open a deferred field with its published release object: the recipient
+/// entry must address this identity, the field must nominate the same
+/// holder, the content key recomposes from the two shares, and the
+/// commitment checks the reveal.
+pub fn open_deferred(
+    deferred: &DeferredField,
+    release: &SealedShare,
+    my_seal_public: &str,
+    my_seal: &StaticSecret,
+) -> WResult<Vec<u8>> {
+    if deferred.sealed != DEFERRED_MARK || release.sealed != SHARE_MARK {
+        return Err("not a deferred-delivery field and release-share pair".to_string());
+    }
+    if release.recipient.to != deferred.release_to {
+        return Err(
+            "the release half is not sealed to the holder this field nominates".to_string(),
+        );
+    }
+    if release.recipient.to != my_seal_public {
+        return Err("this field's release is addressed to another holder".to_string());
+    }
+    let mut release_secret: [u8; 32] = open_recipient_raw(&release.recipient, my_seal)?
+        .try_into()
+        .map_err(|_| "release share has the wrong length".to_string())?;
+    let share: [u8; 32] = hex::decode(&deferred.share)
+        .map_err(|_| "bad public share".to_string())?
+        .try_into()
+        .map_err(|_| "public share must be 32 bytes".to_string())?;
+    let key: [u8; 32] = std::array::from_fn(|i| share[i] ^ release_secret[i]);
+    // Do not keep the ephemeral secret around longer than needed.
+    release_secret.fill(0);
+    let nonce = B64
+        .decode(&deferred.nonce)
+        .map_err(|_| "bad nonce".to_string())?;
+    let ct = B64
+        .decode(&deferred.ct)
+        .map_err(|_| "bad ct".to_string())?;
+    let plaintext = open_symmetric(&key, &nonce, &ct)?;
+    let computed = hex::encode(blake3::hash(&plaintext).as_bytes());
+    if computed != deferred.commitment {
         return Err("commitment mismatch: field was tampered with".into());
     }
     Ok(plaintext)

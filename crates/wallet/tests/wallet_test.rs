@@ -244,3 +244,79 @@ fn backup_needs_both_the_identity_and_backup_passphrases() {
     assert_eq!(renamed.name, "bob-2");
     assert_eq!(renamed.ed_public, backup.ed_public);
 }
+
+#[test]
+fn deferred_delivery_withholds_the_key_until_release() {
+    let dir = tmpdir();
+    let wallet = Wallet::open(dir.path());
+    wallet.create("issuer", "pw1").unwrap();
+    wallet.create("holder", "pw2").unwrap();
+    wallet.create("outsider", "pw3").unwrap();
+    let issuer = wallet.load("issuer", "pw1").unwrap();
+    let holder = wallet.load("holder", "pw2").unwrap();
+    let outsider = wallet.load("outsider", "pw3").unwrap();
+
+    let mut doc = json!({
+        "cert_id": "C-9",
+        "owner_name": "Amina Yusuf",
+        "issued": true,
+    });
+    let releases = issuer
+        .seal_deferred_fields(
+            &mut doc,
+            &["owner_name".to_string()],
+            &holder.public.seal_public,
+        )
+        .unwrap();
+    assert_eq!(releases.len(), 1);
+
+    // On-ledger shape: ciphertext from day one, the nominated holder, and
+    // only the harmless public share of the content key.
+    let field: datu_wallet::DeferredField =
+        serde_json::from_value(doc["owner_name"].clone()).unwrap();
+    assert_eq!(field.sealed, datu_wallet::DEFERRED_MARK);
+    assert_eq!(field.release_to, holder.public.seal_public);
+    assert!(
+        datu_core::contract::is_sealed(&doc["owner_name"]),
+        "seal demands accept the deferred mark"
+    );
+
+    // Before the release, opening finds nothing to open: the field is
+    // skipped, exactly like a sealed field for another reader.
+    let (opened, skipped) = holder.open_fields(&mut doc.clone()).unwrap();
+    assert_eq!((opened, skipped), (0, 1));
+
+    // The release publishes the other half, sealed to the nominated holder.
+    let share = datu_wallet::attach_release(&field, &releases[0].1).unwrap();
+
+    // Even holding the release object, the wrong identity stays locked out.
+    assert!(datu_wallet::open_deferred(
+        &field,
+        &share,
+        &outsider.public.seal_public,
+        &outsider.seal
+    )
+    .is_err());
+
+    // The holder opens it, and the reveal matches the signed commitment.
+    let plaintext = datu_wallet::open_deferred(
+        &field,
+        &share,
+        &holder.public.seal_public,
+        &holder.seal,
+    )
+    .unwrap();
+    let restored: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
+    assert_eq!(restored, json!("Amina Yusuf"));
+
+    // Tampering with the public share breaks the key recomposition.
+    let mut tampered = field.clone();
+    tampered.share = "00".repeat(32);
+    assert!(datu_wallet::open_deferred(
+        &tampered,
+        &share,
+        &holder.public.seal_public,
+        &holder.seal
+    )
+    .is_err());
+}
