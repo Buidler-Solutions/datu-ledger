@@ -39,6 +39,18 @@ pub const MAGIC: [u8; 8] = *b"DATUP2P1";
 /// Hard cap on a single frame; pages are far below this.
 pub const MAX_FRAME: u32 = 64 * 1024 * 1024;
 
+/// Pages one connection may serve before the peer must reconnect. Each page
+/// costs the server a store scan, so an unbounded paged pull is CPU
+/// amplification; the budget bounds work per connection while the client
+/// resumes transparently from its cursor, so honest syncs never fail - they
+/// just reconnect. Old clients surface the budget message as an error and
+/// re-run their sync when they choose.
+pub const PULL_PAGES_PER_CONN: usize = 256;
+
+/// The marker a budget refusal carries. Clients recognize the prefix and
+/// resume; anything else is a real refusal.
+pub const PULL_BUDGET_PREFIX: &str = "pull-budget";
+
 /// Magic of the optional admission frame sent before the first pull.
 pub const HELLO_MAGIC: [u8; 8] = *b"DATUHEL1";
 /// How far a hello timestamp may drift from ours (clock-skew window).
@@ -358,10 +370,19 @@ fn refuse(stream: &mut TcpStream, message: String) {
     }
 }
 
-/// Serve PullRequests until the client hangs up. Errors only abort this
-/// connection. `first` is the already-read request that triggered serving.
-fn serve_pull_loop(stream: &mut TcpStream, store: &Store, first: PullRequest) {
+/// Serve PullRequests until the client hangs up or the per-connection page
+/// budget is spent. `first` is the already-read request that triggered
+/// serving. A spent budget answers with a resumable refusal carrying the
+/// [`PULL_BUDGET_PREFIX`] marker, so a client knows to reconnect with its
+/// cursor instead of treating it as a contradiction.
+fn serve_pull_loop_with_budget(
+    stream: &mut TcpStream,
+    store: &Store,
+    first: PullRequest,
+    page_budget: usize,
+) {
     let mut pending = Some(first);
+    let mut served = 0usize;
     loop {
         let request = match pending.take() {
             Some(r) => r,
@@ -382,8 +403,18 @@ fn serve_pull_loop(stream: &mut TcpStream, store: &Store, first: PullRequest) {
                 }
             }
         };
+        if served >= page_budget {
+            let _ = write_frame(
+                stream,
+                &ServerMessage::Error(format!(
+                    "{PULL_BUDGET_PREFIX}: served {served} page(s) on this connection; reconnect with your cursor to continue"
+                )),
+            );
+            return;
+        }
         match answer(&request, store) {
             Ok(message) => {
+                served += 1;
                 if write_frame(stream, &message).is_err() {
                     return;
                 }
@@ -400,7 +431,19 @@ fn serve_pull_loop(stream: &mut TcpStream, store: &Store, first: PullRequest) {
 /// [`NodeHello`] is verified and admitted (or refused), a bare
 /// [`PullRequest`] is served directly on the open network - and refused
 /// with [`HELLO_REQUIRED`] on a walled one.
-pub fn handle_connection(mut stream: TcpStream, store: &Store, network: Option<&NetworkPolicy>) {
+pub fn handle_connection(stream: TcpStream, store: &Store, network: Option<&NetworkPolicy>) {
+    handle_connection_with_budget(stream, store, network, PULL_PAGES_PER_CONN)
+}
+
+/// [`handle_connection`] with an explicit per-connection page budget: embed a
+/// server with a different shaping policy, or exercise the resume path in a
+/// test without streaming hundreds of pages.
+pub fn handle_connection_with_budget(
+    mut stream: TcpStream,
+    store: &Store,
+    network: Option<&NetworkPolicy>,
+    page_budget: usize,
+) {
     let bytes = match read_frame_bytes(&mut stream) {
         Ok(b) => b,
         Err(_) => return, // client gone before saying anything
@@ -423,7 +466,7 @@ pub fn handle_connection(mut stream: TcpStream, store: &Store, network: Option<&
             Err(_) => return, // hello-only probe
         };
         match PullRequest::try_from_slice(&bytes) {
-            Ok(request) => serve_pull_loop(&mut stream, store, request),
+            Ok(request) => serve_pull_loop_with_budget(&mut stream, store, request, page_budget),
             Err(e) => {
                 let _ = write_frame(
                     &mut stream,
@@ -437,7 +480,7 @@ pub fn handle_connection(mut stream: TcpStream, store: &Store, network: Option<&
             return;
         }
         match PullRequest::try_from_slice(&bytes) {
-            Ok(request) => serve_pull_loop(&mut stream, store, request),
+            Ok(request) => serve_pull_loop_with_budget(&mut stream, store, request, page_budget),
             Err(e) => {
                 let _ = write_frame(
                     &mut stream,
@@ -473,15 +516,6 @@ pub fn pull_and_merge(
     page_limit: u16,
     hello: Option<&NodeHello>,
 ) -> Result<PullStats, String> {
-    let mut stream =
-        TcpStream::connect(peer_addr).map_err(|e| format!("cannot connect to {peer_addr}: {e}"))?;
-    if let Some(hello) = hello {
-        write_frame(&mut stream, hello).map_err(|e| {
-            format!(
-                "{e} - if this peer runs an older datu without network modes, walled-mesh sync needs matching versions"
-            )
-        })?;
-    }
     let ids = store.entry_ids().map_err(|e| e.to_string())?;
     let mut bloom = datu_core::BloomFilter::new_for(ids.len().max(16), 0.001);
     for id in &ids {
@@ -489,50 +523,78 @@ pub fn pull_and_merge(
     }
     let mut stats = PullStats::default();
     let mut cursor: Option<i64> = None;
-    loop {
-        let request = PullRequest {
-            magic: MAGIC,
-            bloom_m: bloom.bit_count(),
-            bloom_k: bloom.hash_count(),
-            bloom_bits: bloom.bit_bytes(),
-            cursor,
-            limit: page_limit,
-        };
-        write_frame(&mut stream, &request)?;
-        let bytes = read_frame_bytes(&mut stream)?;
-        let message = ServerMessage::try_from_slice(&bytes)
-            .map_err(|e| format!("peer sent an invalid frame: {e}"))?;
-        let response = match message {
-            ServerMessage::Pull(r) => r,
-            ServerMessage::Error(m) => return Err(format!("peer refused: {m}")),
-        };
-        for entry in &response.entries {
-            match store.insert_entry(entry) {
-                Ok(true) => stats.entries_new += 1,
-                Ok(false) => stats.entries_existing += 1,
-                Err(StoreError::Denied(_)) => stats.entries_denied += 1,
-                Err(e) => {
-                    return Err(format!(
-                        "peer {peer_addr} serves history contradicting ours: {e} - \
-                         this is fork evidence; collect their witness stream and run `datu prove-fork`"
-                    ))
+
+    // Outer loop: one connection per session. A server that spends its
+    // per-connection page budget answers with the PULL_BUDGET_PREFIX marker;
+    // we reconnect and continue from the cursor, so large syncs complete
+    // against bounded servers. Progress is required: if a connection yields
+    // nothing and the cursor has not moved, the peer is stalling us.
+    'connection: loop {
+        let mut stream = TcpStream::connect(peer_addr)
+            .map_err(|e| format!("cannot connect to {peer_addr}: {e}"))?;
+        if let Some(hello) = hello {
+            write_frame(&mut stream, hello).map_err(|e| {
+                format!(
+                    "{e} - if this peer runs an older datu without network modes, walled-mesh sync needs matching versions"
+                )
+            })?;
+        }
+        let cursor_at_connect = cursor;
+        let mut merged_this_connection = 0usize;
+        loop {
+            let request = PullRequest {
+                magic: MAGIC,
+                bloom_m: bloom.bit_count(),
+                bloom_k: bloom.hash_count(),
+                bloom_bits: bloom.bit_bytes(),
+                cursor,
+                limit: page_limit,
+            };
+            write_frame(&mut stream, &request)?;
+            let bytes = read_frame_bytes(&mut stream)?;
+            let message = ServerMessage::try_from_slice(&bytes)
+                .map_err(|e| format!("peer sent an invalid frame: {e}"))?;
+            let response = match message {
+                ServerMessage::Pull(r) => r,
+                ServerMessage::Error(m) if m.starts_with(PULL_BUDGET_PREFIX) => {
+                    if merged_this_connection == 0 && cursor == cursor_at_connect {
+                        return Err(format!(
+                            "peer {peer_addr} offers no progress: it refuses the pull budget without serving a page - treat this peer as unhealthy"
+                        ));
+                    }
+                    continue 'connection;
+                }
+                ServerMessage::Error(m) => return Err(format!("peer refused: {m}")),
+            };
+            for entry in &response.entries {
+                match store.insert_entry(entry) {
+                    Ok(true) => stats.entries_new += 1,
+                    Ok(false) => stats.entries_existing += 1,
+                    Err(StoreError::Denied(_)) => stats.entries_denied += 1,
+                    Err(e) => {
+                        return Err(format!(
+                            "peer {peer_addr} serves history contradicting ours: {e} - \
+                             this is fork evidence; collect their witness stream and run `datu prove-fork`"
+                        ))
+                    }
                 }
             }
-        }
-        for checkpoint in &response.checkpoints {
-            match store.append_checkpoint(checkpoint) {
-                Ok(true) => stats.checkpoints_new += 1,
-                Ok(false) => {}
-                Err(e) => {
-                    return Err(format!(
-                        "peer {peer_addr} serves a contradictory checkpoint: {e} - fork evidence"
-                    ))
+            for checkpoint in &response.checkpoints {
+                match store.append_checkpoint(checkpoint) {
+                    Ok(true) => stats.checkpoints_new += 1,
+                    Ok(false) => {}
+                    Err(e) => {
+                        return Err(format!(
+                            "peer {peer_addr} serves a contradictory checkpoint: {e} - fork evidence"
+                        ))
+                    }
                 }
             }
-        }
-        cursor = response.cursor;
-        if !response.more || cursor.is_none() {
-            return Ok(stats);
-        }
+            merged_this_connection += response.entries.len();
+            cursor = response.cursor;
+            if !response.more || cursor.is_none() {
+                return Ok(stats);
+            }
+    }
     }
 }

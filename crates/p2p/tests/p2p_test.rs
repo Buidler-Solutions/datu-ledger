@@ -1,6 +1,6 @@
 use datu_core::pq::PqPrivateKey;
 use datu_core::{Checkpoint, CheckpointBody, Entry, EntryBody};
-use datu_p2p::{handle_connection, pull_and_merge};
+use datu_p2p::{handle_connection, handle_connection_with_budget, pull_and_merge};
 use datu_store::Store;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -130,4 +130,64 @@ fn bad_magic_is_refused_not_crashed() {
         datu_p2p::ServerMessage::Error(m) => assert!(m.contains("unknown frame")),
         other => panic!("expected error, got {other:?}"),
     }
+}
+
+/// A server with a one-page budget: the client must reconnect and resume
+/// from its cursor until the whole feed arrives, transparently.
+#[test]
+fn pull_budget_resumes_transparently() {
+    let server_keys = keys();
+    let entries = feed(&server_keys, 9);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let server_store = Store::open_in_memory().unwrap();
+        for e in &entries {
+            server_store.insert_entry(e).unwrap();
+        }
+        for conn in listener.incoming().flatten() {
+            handle_connection_with_budget(conn, &server_store, None, 1);
+        }
+    });
+
+    let client = Store::open_in_memory().unwrap();
+    let stats = pull_and_merge(&addr.to_string(), &client, 2, None).unwrap();
+    assert_eq!(stats.entries_new, 9, "every record arrived across reconnects");
+    assert_eq!(client.entry_count().unwrap(), 10); // genesis + 9 records
+    client.verify_all().unwrap();
+}
+
+/// A peer that answers the budget marker without ever serving a page is
+/// stalling; the client refuses it instead of reconnecting forever.
+#[test]
+fn budget_without_progress_is_refused() {
+    use datu_p2p::ServerMessage;
+    use std::io::{Read, Write};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for mut conn in listener.incoming().flatten() {
+            let mut len = [0u8; 4];
+            if conn.read_exact(&mut len).is_err() {
+                continue;
+            }
+            let n = u32::from_le_bytes(len) as usize;
+            let mut buf = vec![0u8; n];
+            if conn.read_exact(&mut buf).is_err() {
+                continue;
+            }
+            let message = ServerMessage::Error(format!(
+                "{}: no pages for you",
+                datu_p2p::PULL_BUDGET_PREFIX
+            ));
+            let bytes = borsh::to_vec(&message).unwrap();
+            let _ = conn.write_all(&(bytes.len() as u32).to_le_bytes());
+            let _ = conn.write_all(&bytes);
+        }
+    });
+
+    let client = Store::open_in_memory().unwrap();
+    let err = pull_and_merge(&addr.to_string(), &client, 500, None).unwrap_err();
+    assert!(err.contains("no progress"), "stalling peer named: {err}");
 }

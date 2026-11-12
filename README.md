@@ -361,6 +361,15 @@ positive merely defers an entry to the next sync, and a peer serving
 contradictory history aborts with fork evidence instead of merging
 (`datu prove-fork` builds the case).
 
+Every transport is bounded on the serving side. Native p2p caps one
+connection at 256 pages (each page costs the peer a store scan), answers a
+spent budget with a resumable marker instead of an error, and the client
+reconnects from its cursor transparently - so a large first sync walks
+across connections without failing, and a peer that refuses the budget
+without ever serving a page is refused as stalling. The HTTP `haves` route
+carries its own per-peer budget (`--haves-per-min`), and the write door its
+submission budget (`--submit-per-min`).
+
 ### The home node (daemon)
 
 One cheap computer at home runs 24/7 with zero configuration and no central
