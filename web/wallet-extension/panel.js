@@ -407,7 +407,11 @@ async function findMyRecords() {
       open.className = 'ghost';
       open.textContent = 'Decrypt';
       open.addEventListener('click', () => decryptRecord(i));
-      actions.append(verify, open);
+      const witnessed = document.createElement('button');
+      witnessed.className = 'ghost';
+      witnessed.textContent = 'Witnessed';
+      witnessed.addEventListener('click', () => showWitnesses(i));
+      actions.append(verify, open, witnessed);
       if (rec.revokedBy) {
         const revoked = document.createElement('div');
         revoked.className = 'meta err';
@@ -496,6 +500,42 @@ async function verifyRecord(index) {
     status('signatures verified locally (Ed25519 + ML-DSA-65)', 'ok');
   } catch (e) {
     status(`verification failed: ${e.message}`, 'err');
+  }
+}
+
+// Witness time-attestation: which fresh checkpoints cover this entry, as of
+// when. Each line is backed by the served Merkle proof, which verifies
+// offline (datu witness verify-proof) - the panel only displays it.
+async function showWitnesses(index) {
+  try {
+    const rec = myRecords[index];
+    const data = await nodeGet(`/v1/coverage/${rec.id}`);
+    const witnesses = data.witnesses || [];
+    const lines = [];
+    if (!witnesses.length) {
+      lines.push('No fresh witness covers this entry on this node right now.');
+      lines.push('Coverage follows the next checkpoint a witness signs over it.');
+    } else {
+      lines.push(`witnessed by ${witnesses.length} node(s):`);
+      for (const w of witnesses) {
+        lines.push(
+          `  ${String(w.signer).slice(0, 16)}…  as of ${new Date(w.timestamp_ms).toISOString()}  (checkpoint height ${w.height})`,
+        );
+      }
+      lines.push('');
+      lines.push('Each witness signed a Merkle root over its entry id set; the served proof pins this entry into that root and verifies with zero other context.');
+    }
+    for (const behind of data.stale || []) {
+      lines.push(`  behind: ${String(behind.signer).slice(0, 16)}… (${behind.reason})`);
+    }
+    $('verdict').style.display = 'block';
+    $('verdict').textContent = lines.join('\n');
+    status(
+      witnesses.length ? `${witnesses.length} witness checkpoint(s) cover this entry` : 'no fresh witness yet',
+      witnesses.length ? 'ok' : 'muted',
+    );
+  } catch (e) {
+    status(`coverage lookup failed: ${e.message}`, 'err');
   }
 }
 

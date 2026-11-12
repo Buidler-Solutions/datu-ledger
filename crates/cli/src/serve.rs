@@ -427,6 +427,7 @@ fn handle_inner(
                 .values()
                 .map(|cp| {
                     Ok(serde_json::json!({
+                        "id": hex::encode(cp.id().map_err(|e| e.to_string())?),
                         "signer": cp.body.signer,
                         "height": cp.body.height,
                         "entries_count": cp.body.entries_count,
@@ -436,6 +437,102 @@ fn handle_inner(
                 })
                 .collect::<Result<_, String>>()?;
             respond_json(stream, "200 OK", &serde_json::json!({ "witnesses": items }))
+        }
+        // Witness time-attestation over HTTP: the offline-verifiable proof
+        // that a checkpoint's signer had seen this entry as of the claimed
+        // time. `/v1/coverage/<entry>` tries every fresh witness (latest
+        // checkpoint per signer); `/v1/coverage/<entry>/<checkpoint>` pins
+        // one. The artifact mirrors `datu witness prove`, so a client can
+        // re-verify with zero other context.
+        ("GET", c) if c.starts_with("/v1/coverage/") => {
+            let rest = &c["/v1/coverage/".len()..];
+            let mut parts = rest.split('/');
+            let entry_hex = parts.next().unwrap_or("");
+            let checkpoint_hex = parts.next().filter(|part| !part.is_empty());
+            let entry_id: [u8; 32] = hex::decode(entry_hex)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or("entry id must be 32-byte hex")?;
+            let checkpoints = store.all_checkpoints().map_err(|e| e.to_string())?;
+            let candidates: Vec<datu_core::Checkpoint> = match checkpoint_hex {
+                Some(id_hex) => {
+                    let want: [u8; 32] = hex::decode(id_hex)
+                        .ok()
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .ok_or("checkpoint id must be 32-byte hex")?;
+                    checkpoints
+                        .into_iter()
+                        .filter(|cp| cp.id().map(|x| x == want).unwrap_or(false))
+                        .collect()
+                }
+                None => {
+                    let mut latest: std::collections::BTreeMap<String, datu_core::Checkpoint> =
+                        std::collections::BTreeMap::new();
+                    for cp in checkpoints {
+                        let update = match latest.get(&cp.body.signer) {
+                            Some(prev) => prev.body.height < cp.body.height,
+                            None => true,
+                        };
+                        if update {
+                            latest.insert(cp.body.signer.clone(), cp);
+                        }
+                    }
+                    latest.into_values().collect()
+                }
+            };
+            if candidates.is_empty() {
+                return respond_json(
+                    stream,
+                    "404 Not Found",
+                    &serde_json::json!({"error": "no such checkpoint on this node"}),
+                );
+            }
+            let mut witnesses = Vec::new();
+            let mut stale = Vec::new();
+            for cp in candidates {
+                match store.coverage_proof(&entry_id, &cp) {
+                    Ok(proof) => {
+                        let checkpoint_b64 = B64
+                            .encode(borsh::to_vec(&cp).map_err(|e| e.to_string())?);
+                        witnesses.push(serde_json::json!({
+                            "signer": cp.body.signer,
+                            "checkpoint_id": hex::encode(cp.id().map_err(|e| e.to_string())?),
+                            "height": cp.body.height,
+                            "timestamp_ms": cp.body.timestamp_ms,
+                            "checkpoint_b64": checkpoint_b64,
+                            "proof": proof,
+                        }));
+                    }
+                    Err(e) => stale.push(serde_json::json!({
+                        "signer": cp.body.signer,
+                        "checkpoint_id": hex::encode(cp.id().map_err(|e| e.to_string())?),
+                        "reason": e.to_string(),
+                    })),
+                }
+            }
+            if witnesses.is_empty() {
+                return respond_json(
+                    stream,
+                    "409 Conflict",
+                    &serde_json::json!({
+                        "ok": false,
+                        "entry": entry_hex,
+                        "witnesses": [],
+                        "stale": stale,
+                        "error": "no fresh witness covers this entry right now; a checkpoint's set must match this node's (sign one with `datu witness prove`)",
+                    }),
+                );
+            }
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({
+                    "ok": true,
+                    "entry": entry_hex,
+                    "witnesses": witnesses,
+                    "stale": stale,
+                }),
+            )
         }
         ("GET", "/v1/conflicts") => {
             let count = store.conflicts_count().map_err(|e| e.to_string())?;
@@ -886,7 +983,7 @@ checkGovernance();
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datu_core::{Entry, EntryBody};
+    use datu_core::{Checkpoint, CheckpointBody, Entry, EntryBody, CHECKPOINT_VERSION};
     use datu_wallet::wire::entry_full_json;
 
     fn signed(seq: u64, prev: Option<[u8; 32]>, payload: &[u8]) -> Entry {
@@ -1064,4 +1161,95 @@ mod tests {
             "the haves budget (5/min here) must bite within six requests"
         );
     }
+    /// The coverage-proof endpoint serves the same offline-verifiable
+    /// artifact `datu witness prove` writes: checkpoint + Merkle path.
+    #[test]
+    fn http_coverage_proof_endpoint() {
+        use borsh::BorshDeserialize;
+
+        let dir = tempfile::tempdir().unwrap();
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let data = dir.path().to_path_buf();
+        // One entry, then a witness checkpoint over everything seen.
+        let entry_id = {
+            let store = Store::open(&data.join("node.db")).unwrap();
+            let entry = signed(0, None, b"record");
+            store.insert_entry(&entry).unwrap();
+            let ids = store.entry_ids().unwrap();
+            let key = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+            let pq = datu_core::pq::keypair().unwrap().1;
+            let body = CheckpointBody {
+                version: CHECKPOINT_VERSION,
+                signer: String::new(),
+                signer_pq: String::new(),
+                pq_alg: String::new(),
+                height: 0,
+                prev: None,
+                timestamp_ms: 777,
+                entries_count: ids.len() as u64,
+                entry_ids_root: datu_core::merkle::merkle_root(&ids),
+            };
+            store
+                .append_checkpoint(&Checkpoint::sign(body, &key, &pq).unwrap())
+                .unwrap();
+            hex::encode(entry.id().unwrap())
+        };
+        std::thread::spawn(move || {
+            let _ = serve(&data, &format!("127.0.0.1:{port}"), None, 5, 5);
+        });
+        let mut ready = false;
+        for _ in 0..200 {
+            if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
+                drop(s);
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(ready, "serve did not come up");
+
+        let (status, body) = http(port, "GET", &format!("/v1/coverage/{entry_id}"), "");
+        assert!(status.contains("200"), "{status} {body}");
+        let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let witnesses = listing["witnesses"].as_array().unwrap();
+        assert_eq!(witnesses.len(), 1);
+        let witness = &witnesses[0];
+        assert_eq!(witness["timestamp_ms"].as_u64(), Some(777));
+
+        // Verify the served artifact offline, exactly like a browser would:
+        // decode the checkpoint, verify both signatures, walk the path.
+        let checkpoint_bytes = B64
+            .decode(witness["checkpoint_b64"].as_str().unwrap())
+            .unwrap();
+        let checkpoint = Checkpoint::try_from_slice(&checkpoint_bytes).unwrap();
+        checkpoint.verify().unwrap();
+        let proof: datu_core::checkpoint::CoverageProof =
+            serde_json::from_value(witness["proof"].clone()).unwrap();
+        proof.verify(&checkpoint).unwrap();
+
+        // The checkpoint id pins the same witness.
+        let (status, body) = http(
+            port,
+            "GET",
+            &format!(
+                "/v1/coverage/{entry_id}/{}",
+                witness["checkpoint_id"].as_str().unwrap()
+            ),
+            "",
+        );
+        assert!(status.contains("200"), "{status} {body}");
+
+        // An id no fresh witness covered is explained, not fabricated.
+        let (status, body) = http(
+            port,
+            "GET",
+            &format!("/v1/coverage/{}", hex::encode([6u8; 32])),
+            "",
+        );
+        assert!(status.contains("409"), "{status} {body}");
+        assert!(body.contains("stale"), "{body}");
+    }
 }
+

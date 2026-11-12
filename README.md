@@ -283,7 +283,13 @@ ledger explorer at `/` (entries, search, witnesses - read-only mirror-node view)
 - `GET /v1/entry/{id}` - full entry (payload base64, both signatures)
 - `GET /v1/feed/{author}` - head **plus `next`** ({seq, prev}) so dApps build
   correct sign requests without racing the chain
-- `GET /v1/checkpoints` - signed tamper-evidence
+- `GET /v1/checkpoints` - signed tamper-evidence: every witness's latest
+  checkpoint (signer, height, entries covered, Merkle root, claimed time)
+- `GET /v1/coverage/{entry-id}` (optionally `/{checkpoint-id}`) - witness
+  time-attestation over HTTP: for each fresh witness, the checkpoint plus
+  the Merkle path that pins this entry into its signed root, in the same
+  offline-verifiable shape as `datu witness prove`; `409` with `stale[]`
+  reasons when no checkpoint covers the entry right now
 - `POST /v1/entries` - submission contract: the node accepts only fully-signed
   entries (Ed25519 + ML-DSA-65 both verified server-side); `201` inserted,
   `200` duplicate (idempotent), `403` denied by this node's writer policy,
@@ -815,9 +821,11 @@ anchors, no accounts:
   validators: `<role>_key` in the document must be your key. Panel v1.4.0
   also surfaces the newer ledger facts: attestation records show a
   `REVOKED by …` badge when a trusted `identity.revoke` statement names
-  them, and deferred-delivery fields are marked as waiting for their
-  release, with an *Open deferred* action that takes the release object
-  and opens the field in place through the bridge.
+  them, deferred-delivery fields are marked as waiting for their release,
+  with an *Open deferred* action that takes the release object and opens
+  the field in place through the bridge, and every record gets a
+  *Witnessed* view that lists the fresh witness checkpoints covering it
+  (signer, claimed time, served proof), backed by `/v1/coverage`.
 - **One wallet per person, several identities per wallet** for context
   (`alice-home`, `alice-business`). The panel keeps a **wallet profile list**
   (label + bridge URL) and switches between local bridges; pairing tokens
