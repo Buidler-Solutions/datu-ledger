@@ -567,7 +567,7 @@ impl Store {
     }
 
     pub fn entry_ids(&self) -> StoreResult<Vec<[u8; 32]>> {
-        let mut stmt = self.conn.prepare("SELECT id FROM entries")?;
+        let mut stmt = self.conn.prepare("SELECT id FROM entries ORDER BY ord")?;
         let rows = stmt.query_map([], |row| {
             let blob: Vec<u8> = row.get(0)?;
             let arr: [u8; 32] = blob.as_slice().try_into().map_err(|_| sql_invalid(0))?;
@@ -880,18 +880,29 @@ impl Store {
         checkpoint: &Checkpoint,
     ) -> StoreResult<datu_core::checkpoint::CoverageProof> {
         let ids = self.entry_ids()?;
-        let root = datu_core::merkle::merkle_root(&ids);
-        if ids.len() as u64 != checkpoint.body.entries_count
-            || root != checkpoint.body.entry_ids_root
-        {
-            return Err(StoreError::Denied(format!(
-                "checkpoint {} covers a set this node no longer has ({} ids now, {} at signing): sign a fresh checkpoint to attest this entry's presence",
-                hex::encode(checkpoint.id().map_err(StoreError::Core)?),
+        // The checkpoint's set is exactly the ids its signer had seen, and
+        // this store is append-only in insertion order - so that set is the
+        // first `entries_count` ids here whenever this node holds every
+        // entry the signer held. Rebuilding the prefix makes proofs work
+        // against historical checkpoints too, not only the newest one; a
+        // root mismatch (missing entries, different history) fails closed.
+        let count = checkpoint.body.entries_count as usize;
+        let set = if count <= ids.len() {
+            let prefix = &ids[..count];
+            (datu_core::merkle::merkle_root(prefix) == checkpoint.body.entry_ids_root)
+                .then_some(prefix)
+        } else {
+            None
+        };
+        let checkpoint_hex = hex::encode(checkpoint.id().map_err(StoreError::Core)?);
+        let set = set.ok_or_else(|| {
+            StoreError::Denied(format!(
+                "checkpoint {checkpoint_hex} covers a set this node cannot reconstruct ({} ids now, {} at signing, root differs): this node is missing entries the witness had, or holds a different history",
                 ids.len(),
                 checkpoint.body.entries_count
-            )));
-        }
-        datu_core::checkpoint::CoverageProof::build(&ids, entry_id).ok_or_else(|| {
+            ))
+        })?;
+        datu_core::checkpoint::CoverageProof::build(set, entry_id).ok_or_else(|| {
             StoreError::Denied(format!(
                 "entry {} is not in checkpoint {}'s covered set",
                 hex::encode(entry_id),

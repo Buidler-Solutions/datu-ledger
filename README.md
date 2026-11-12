@@ -675,7 +675,9 @@ authority-feed predicate, where one designated author sequences a feed so
 `not_after_field` (a landing window on the entry's own timestamp;
 validator-clock subjective at admission, violations provable later via
 witness checkpoints: `datu witness prove` emits the offline-verifiable
-coverage proof), and `requires_sealed` (fields that must be
+coverage proof, and the append-only store rebuilds a checkpoint's exact
+signed set from its id prefix, so proofs work against older checkpoints
+too, not just the newest), and `requires_sealed` (fields that must be
 `datu-sealed-*` ciphertext whenever present). The spec is published as a
 party-signed `gov.contract` document into the `gov.contracts` namespace
 through the ordinary writer policy, so the entry id *is* the contract's
