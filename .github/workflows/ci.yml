@@ -10,7 +10,7 @@ jobs:
     name: rust workspace tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Pinned so a fresh stable release cannot turn CI red through a new
       # lint alone; bump deliberately, after running the gates locally.
       - uses: dtolnay/rust-toolchain@1.96.0
@@ -28,8 +28,8 @@ jobs:
     name: web builds and extension scripts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       - name: extension scripts parse
