@@ -321,8 +321,9 @@ the nominated holder (`datu wallet release-deferred` emits exactly that
 object). The ledger carries the complete ciphertext from day one, so a
 release is a tiny, targeted key act rather than a re-transmission; before
 the release the holder is locked out cryptographically, not by policy.
-`datu wallet open-deferred` recomposes the key, and the per-field BLAKE3
-commitment checks the reveal.
+`datu wallet open-deferred` (or the panel's *Open deferred* action, via the
+bridge route) recomposes the key, and the per-field BLAKE3 commitment checks
+the reveal.
 Contract `requires_sealed` demands accept the deferred mark
 (`datu-sealed-deferred-v2`) like any other seal.
 
@@ -811,7 +812,12 @@ anchors, no accounts:
   field such as `holder_key`, `licensee_key`, `bidder_key`), verifies
   signatures locally from any node, and decrypts only the fields sealed to
   you. Before signing it enforces the same self-binding rule as the
-  validators: `<role>_key` in the document must be your key.
+  validators: `<role>_key` in the document must be your key. Panel v1.4.0
+  also surfaces the newer ledger facts: attestation records show a
+  `REVOKED by …` badge when a trusted `identity.revoke` statement names
+  them, and deferred-delivery fields are marked as waiting for their
+  release, with an *Open deferred* action that takes the release object
+  and opens the field in place through the bridge.
 - **One wallet per person, several identities per wallet** for context
   (`alice-home`, `alice-business`). The panel keeps a **wallet profile list**
   (label + bridge URL) and switches between local bridges; pairing tokens
@@ -829,6 +835,7 @@ GET  /v1/wallet/identities     public identities (ed + seal keys)
 POST /v1/wallet/party-sign     {name, passphrase, role, document, kind?}
 POST /v1/wallet/seal           {name, passphrase, document, fields, to[], to_fields[]}
 POST /v1/wallet/open           {name, passphrase, document}
+POST /v1/wallet/deferred-open  {name, passphrase, document, field, release}
 POST /v1/wallet/verify-entry   {entry}  → verify both hybrid signatures locally
 POST /v1/wallet/sign-entry     {name, passphrase, request}
 ```

@@ -291,6 +291,23 @@ function concernsMe(payload, me) {
   return Object.values(doc).some((v) => v === me.ed_public);
 }
 
+// Deferred-delivery fields (wallet seal-deferred): ciphertext on the ledger
+// from day one, but the content key's other half is published only by the
+// release entry. The holder cannot open them until that release lands.
+const DEFERRED_MARK = 'datu-sealed-deferred-v2';
+
+function payloadDoc(payload) {
+  return payload?.doc ?? payload ?? {};
+}
+
+function deferredFields(payload) {
+  const doc = payloadDoc(payload);
+  if (!doc || typeof doc !== 'object') return [];
+  return Object.entries(doc)
+    .filter(([, value]) => value && typeof value === 'object' && value.sealed === DEFERRED_MARK)
+    .map(([name]) => name);
+}
+
 function recordLabel(payload, id) {
   const doc = payload?.doc ?? payload ?? {};
   const candidates = ['parcel', 'title_no', 'license_id', 'license_no', 'licence_no',
@@ -309,6 +326,24 @@ async function findMyRecords() {
     const identity = selected();
     const pattern = $('nsFilter').value.trim();
     const list = await nodeGet('/v1/entries?limit=200');
+    // Attestation revocations (identity.revoke): a trusted statement names
+    // the attestation id it kills. Best-effort - older nodes may not serve
+    // the namespace, and the badge is informational, never a verdict.
+    const revoked = {}; // attestation id -> revoker entry author
+    try {
+      const revokes = await nodeGet('/v1/entries?ns=identity.revoke&limit=200');
+      for (const item of revokes.entries || []) {
+        try {
+          const full = await nodeGet(`/v1/entry/${item.id}`);
+          const body = JSON.parse(new TextDecoder().decode(
+            Uint8Array.from(atob(full.payload_base64), (c) => c.charCodeAt(0)),
+          ));
+          if (typeof body.attestation === 'string') {
+            revoked[body.attestation] = full.author ?? item.author ?? '(unknown signer)';
+          }
+        } catch { /* skip malformed revoke */ }
+      }
+    } catch { /* best-effort */ }
     myRecords = [];
     for (const item of list.entries || []) {
       if (!nsMatches(pattern, item.namespace)) continue;
@@ -339,6 +374,8 @@ async function findMyRecords() {
         payload,
         contract,
         outlook,
+        revokedBy: revoked[item.id] || null,
+        deferred: deferredFields(payload),
       });
     }
     if (!myRecords.length) {
@@ -371,6 +408,23 @@ async function findMyRecords() {
       open.textContent = 'Decrypt';
       open.addEventListener('click', () => decryptRecord(i));
       actions.append(verify, open);
+      if (rec.revokedBy) {
+        const revoked = document.createElement('div');
+        revoked.className = 'meta err';
+        revoked.textContent = `REVOKED by ${String(rec.revokedBy).slice(0, 16)}… - this attestation no longer admits where that signer is a trusted root`;
+        card.insertBefore(revoked, actions);
+      }
+      if (rec.deferred.length) {
+        const deferredLine = document.createElement('div');
+        deferredLine.className = 'meta';
+        deferredLine.textContent = `${rec.deferred.length} field(s) sealed for deferred delivery (${rec.deferred.join(', ')}) - the release entry carries the key half`;
+        card.insertBefore(deferredLine, actions);
+        const deferredButton = document.createElement('button');
+        deferredButton.className = 'ghost';
+        deferredButton.textContent = 'Open deferred';
+        deferredButton.addEventListener('click', () => openDeferred(i, rec.deferred[0]));
+        actions.append(deferredButton);
+      }
       if (rec.contract) {
         const conditions = document.createElement('button');
         conditions.className = 'ghost';
@@ -464,6 +518,39 @@ async function decryptRecord(index) {
     status(data.opened > 0 ? 'your data, decrypted locally' : 'nothing is sealed to you', data.opened > 0 ? 'ok' : 'muted');
   } catch (e) {
     status(e.message, 'err');
+  }
+}
+
+// Open a deferred-delivery field: the user pastes the release object (the
+// 'datu-share-v2' key half the release entry published), the bridge seals
+// nothing new and only recomposes the key locally. Wrong holder, wrong
+// field, or a tampered share fail closed.
+async function openDeferred(index, field) {
+  try {
+    const identity = selected();
+    const rec = myRecords[index];
+    if (!$('pass').value) throw new Error('enter your vault passphrase (Sign tab)');
+    const raw = window.prompt(
+      `Paste the release object for '${field}' (the datu-share-v2 JSON published by the release entry)`,
+    );
+    if (!raw) return;
+    let release;
+    try { release = JSON.parse(raw); } catch { throw new Error('release object must be JSON'); }
+    const data = await bridge('/v1/wallet/deferred-open', {
+      name: identity.name,
+      passphrase: $('pass').value,
+      document: payloadDoc(rec.payload),
+      field,
+      release,
+    });
+    $('decrypted').style.display = 'block';
+    $('decrypted').textContent = `${field} (opened with the release half):
+
+${JSON.stringify(data.value, null, 2)}`;
+    document.querySelector('nav button[data-tab="data"]').click();
+    status(`'${field}' opened - the release half was sealed to you`, 'ok');
+  } catch (e) {
+    status(`cannot open deferred field: ${e.message}`, 'err');
   }
 }
 

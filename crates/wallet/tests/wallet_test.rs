@@ -320,3 +320,24 @@ fn deferred_delivery_withholds_the_key_until_release() {
     )
     .is_err());
 }
+
+#[test]
+fn release_share_finder_accepts_bare_and_nested_objects() {
+    let share = json!({
+        "sealed": "datu-share-v2",
+        "recipient": {
+            "to": "ab".repeat(32),
+            "eph": "cd".repeat(32),
+            "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "ct": "AAAA",
+        },
+    });
+
+    // A bare share object.
+    assert!(datu_wallet::SealedShare::find(&share).is_some());
+    // Any document containing one (e.g. a release entry payload).
+    let nested = json!({"doc": {"released_key": share}, "kind": "datu.cert.release"});
+    assert!(datu_wallet::SealedShare::find(&nested).is_some());
+    // Nothing to find.
+    assert!(datu_wallet::SealedShare::find(&json!({"sealed": "datu-sealed-v2"})).is_none());
+}

@@ -1296,20 +1296,6 @@ fn cmd_wallet_release_deferred(
     Ok(())
 }
 
-/// Find the first release-share object anywhere in a JSON value.
-fn find_release_share(value: &serde_json::Value) -> Option<serde_json::Value> {
-    match value {
-        serde_json::Value::Object(map) => {
-            if map.get("sealed").and_then(|m| m.as_str()) == Some(datu_wallet::SHARE_MARK) {
-                return Some(value.clone());
-            }
-            map.values().find_map(find_release_share)
-        }
-        serde_json::Value::Array(items) => items.iter().find_map(find_release_share),
-        _ => None,
-    }
-}
-
 /// Open a deferred field with its published release object: the holder
 /// identity recomposes the content key and checks the commitment.
 fn cmd_wallet_open_deferred(
@@ -1337,10 +1323,8 @@ fn cmd_wallet_open_deferred(
         .map_err(|e| format!("cannot read {}: {e}", release.display()))?;
     let release_doc: serde_json::Value = serde_json::from_str(&release_text)
         .map_err(|e| format!("release must be JSON: {e}"))?;
-    let share_value = find_release_share(&release_doc)
+    let share = datu_wallet::SealedShare::find(&release_doc)
         .ok_or("release file carries no share object (expected a 'datu-share-v2' object)")?;
-    let share: datu_wallet::SealedShare = serde_json::from_value(share_value)
-        .map_err(|e| format!("release share does not parse: {e}"))?;
     let plaintext = datu_wallet::open_deferred(
         &deferred,
         &share,

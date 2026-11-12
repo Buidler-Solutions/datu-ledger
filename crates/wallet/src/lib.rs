@@ -739,6 +739,25 @@ pub struct SealedShare {
     pub recipient: Recipient,
 }
 
+impl SealedShare {
+    /// Find the first release-share object anywhere in a JSON value: a bare
+    /// share, or any document that contains one (a release entry's payload,
+    /// a pasted artifact, ...). Best-effort by design - malformed candidates
+    /// are skipped, not errors.
+    pub fn find(value: &serde_json::Value) -> Option<SealedShare> {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.get("sealed").and_then(|m| m.as_str()) == Some(SHARE_MARK) {
+                    return serde_json::from_value(value.clone()).ok();
+                }
+                map.values().find_map(SealedShare::find)
+            }
+            serde_json::Value::Array(items) => items.iter().find_map(SealedShare::find),
+            _ => None,
+        }
+    }
+}
+
 /// Seal one value for deferred delivery to `holder`: encrypt now under a
 /// fresh content key, hand back the release secret for later. The release
 /// secret never touches the ledger until the release publishes it.

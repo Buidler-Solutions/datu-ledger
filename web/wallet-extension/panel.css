@@ -111,6 +111,7 @@
       .record .head { display: flex; justify-content: space-between; gap: 6px; align-items: baseline; }
       .record .parcel { font-size: 12px; }
       .record .meta { color: var(--muted); font-size: 10px; }
+      .record .meta.err { color: var(--danger); font-weight: 600; }
       .record .actions { display: flex; gap: 6px; margin-top: 8px; }
       .record .actions button { margin-top: 0; flex: 1; padding: 7px; }
 

@@ -311,6 +311,40 @@ fn handle_inner(
                 }),
             )
         }
+        // Deferred delivery: open a field whose release share the release
+        // entry has published. The holder - and only the holder - recomposes
+        // the content key; the BLAKE3 commitment checks the reveal.
+        ("POST", "/v1/wallet/deferred-open") => {
+            let body_json = parse_body(&body)?;
+            let name = str_field(&body_json, "name")?;
+            let passphrase = str_field(&body_json, "passphrase")?;
+            let identity = load_guarded(&wallet, &name, &passphrase)?;
+            let field = str_field(&body_json, "field")?;
+            let document = body_json.get("document").ok_or("missing 'document'")?;
+            let field_value = document
+                .get(field.as_str())
+                .cloned()
+                .ok_or_else(|| format!("document has no field '{field}'"))?;
+            let deferred: datu_wallet::DeferredField = serde_json::from_value(field_value)
+                .map_err(|e| format!("'{field}' is not a deferred-delivery field: {e}"))?;
+            let release = body_json.get("release").ok_or("missing 'release'")?;
+            let share = datu_wallet::SealedShare::find(release).ok_or(
+                "release carries no share object (expected a 'datu-share-v2' object)",
+            )?;
+            let plaintext = datu_wallet::open_deferred(
+                &deferred,
+                &share,
+                &identity.public.seal_public,
+                &identity.seal,
+            )?;
+            let value: serde_json::Value = serde_json::from_slice(&plaintext)
+                .map_err(|e| format!("decrypted field is not valid JSON: {e}"))?;
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({ "ok": true, "field": field, "value": value }),
+            )
+        }
         // Portable, separately-encrypted identity backup (offline copy or
         // moving to another device). Needs the identity passphrase AND sets a
         // distinct backup passphrase.
