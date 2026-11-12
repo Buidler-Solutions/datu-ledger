@@ -341,3 +341,63 @@ fn release_share_finder_accepts_bare_and_nested_objects() {
     // Nothing to find.
     assert!(datu_wallet::SealedShare::find(&json!({"sealed": "datu-sealed-v2"})).is_none());
 }
+
+#[test]
+fn a_lost_secrets_file_is_recoverable_by_the_issuer() {
+    let dir = tmpdir();
+    let wallet = Wallet::open(dir.path());
+    wallet.create("issuer", "pw1").unwrap();
+    wallet.create("holder", "pw2").unwrap();
+    let issuer = wallet.load("issuer", "pw1").unwrap();
+    let holder = wallet.load("holder", "pw2").unwrap();
+
+    let mut doc = json!({ "owner_name": "Amina" });
+    // The returned secrets are deliberately ignored: the file is "lost".
+    let _releases = issuer
+        .seal_deferred_fields(
+            &mut doc,
+            &["owner_name".to_string()],
+            &holder.public.seal_public,
+        )
+        .unwrap();
+    let field: datu_wallet::DeferredField =
+        serde_json::from_value(doc["owner_name"].clone()).unwrap();
+    assert!(field.recovery.is_some(), "custody copy rides in the field");
+
+    // The issuer recovers the release half from its own sealed copy and the
+    // deferred loop still closes.
+    let secret = datu_wallet::recover_release_secret(
+        &field,
+        &issuer.public.seal_public,
+        &issuer.seal,
+    )
+    .unwrap();
+    let share = datu_wallet::attach_release(&field, &secret).unwrap();
+    let plaintext = datu_wallet::open_deferred(
+        &field,
+        &share,
+        &holder.public.seal_public,
+        &holder.seal,
+    )
+    .unwrap();
+    let restored: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
+    assert_eq!(restored, json!("Amina"));
+
+    // The holder cannot open the issuer's custody copy, and fields sealed
+    // before custody copies existed say so instead of failing weirdly.
+    assert!(datu_wallet::recover_release_secret(
+        &field,
+        &holder.public.seal_public,
+        &holder.seal
+    )
+    .is_err());
+    let mut legacy = field.clone();
+    legacy.recovery = None;
+    let err = datu_wallet::recover_release_secret(
+        &legacy,
+        &issuer.public.seal_public,
+        &issuer.seal,
+    )
+    .unwrap_err();
+    assert!(err.contains("no recovery copy"));
+}

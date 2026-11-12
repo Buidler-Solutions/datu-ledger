@@ -338,9 +338,13 @@ the nominated holder (`datu wallet release-deferred` emits exactly that
 object). The ledger carries the complete ciphertext from day one, so a
 release is a tiny, targeted key act rather than a re-transmission; before
 the release the holder is locked out cryptographically, not by policy.
-`datu wallet open-deferred` (or the panel's *Open deferred* action, via the
-bridge route; the desktop FFI carries the same three actions) recomposes the
-key, and the per-field BLAKE3 commitment checks the reveal.
+Each deferred field also carries a custody copy of the release half sealed
+to the issuer's own seal key: losing the secrets file no longer makes the
+field unopenable forever - `datu wallet release-deferred --recover --name
+<issuer>` reseals from that copy. `datu wallet open-deferred` (or the
+panel's *Open deferred* action, via the bridge route; the desktop FFI
+carries the same three actions) recomposes the key, and the per-field
+BLAKE3 commitment checks the reveal.
 Contract `requires_sealed` demands accept the deferred mark
 (`datu-sealed-deferred-v2`) like any other seal.
 

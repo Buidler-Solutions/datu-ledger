@@ -525,6 +525,7 @@ impl LoadedIdentity {
         holder_seal_public_hex: &str,
     ) -> WResult<Vec<(String, [u8; 32])>> {
         let holder = parse_x25519_public(holder_seal_public_hex, "holder seal key")?;
+        let own_seal = XPublicKey::from(&self.seal);
         let map = document
             .as_object_mut()
             .ok_or("document must be a JSON object")?;
@@ -536,7 +537,8 @@ impl LoadedIdentity {
             };
             let plaintext = serde_json::to_vec(&value)
                 .map_err(|e| format!("cannot serialize field '{name}': {e}"))?;
-            let (deferred, release_secret) = seal_deferred(&plaintext, &holder)?;
+            let (deferred, release_secret) =
+                seal_deferred_with_recovery(&plaintext, &holder, Some(&own_seal))?;
             map.insert(
                 name.clone(),
                 serde_json::to_value(deferred).map_err(|e| e.to_string())?,
@@ -729,6 +731,13 @@ pub struct DeferredField {
     pub share: String,
     /// X25519 seal key the release half must be sealed to (hex).
     pub release_to: String,
+    /// The release half sealed back to the issuer's own seal key (hex
+    /// recipient entry): a custody copy. It changes no trust - the issuer
+    /// already knows the plaintext - it only means a lost secrets file no
+    /// longer makes the field unopenable forever. Old fields parse without
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<Recipient>,
 }
 
 /// The release half of a deferred field's content key, sealed to the
@@ -762,6 +771,14 @@ impl SealedShare {
 /// fresh content key, hand back the release secret for later. The release
 /// secret never touches the ledger until the release publishes it.
 pub fn seal_deferred(plaintext: &[u8], holder: &XPublicKey) -> WResult<(DeferredField, [u8; 32])> {
+    seal_deferred_with_recovery(plaintext, holder, None)
+}
+
+fn seal_deferred_with_recovery(
+    plaintext: &[u8],
+    holder: &XPublicKey,
+    recovery_to: Option<&XPublicKey>,
+) -> WResult<(DeferredField, [u8; 32])> {
     use rand::RngCore;
     let mut key = [0u8; 32];
     OsRng.fill_bytes(&mut key);
@@ -769,6 +786,10 @@ pub fn seal_deferred(plaintext: &[u8], holder: &XPublicKey) -> WResult<(Deferred
     let mut release_secret = [0u8; 32];
     OsRng.fill_bytes(&mut release_secret);
     let share: [u8; 32] = std::array::from_fn(|i| key[i] ^ release_secret[i]);
+    let recovery = match recovery_to {
+        Some(key) => Some(seal_to_recipient(&release_secret, key)?),
+        None => None,
+    };
     Ok((
         DeferredField {
             sealed: DEFERRED_MARK.to_string(),
@@ -777,9 +798,34 @@ pub fn seal_deferred(plaintext: &[u8], holder: &XPublicKey) -> WResult<(Deferred
             ct: B64.encode(&ct),
             share: hex::encode(share),
             release_to: hex::encode(holder.as_bytes()),
+            recovery,
         },
         release_secret,
     ))
+}
+
+/// Recover a deferred field's release half from the issuer's own sealed
+/// custody copy (`field.recovery`): the safety net for a lost secrets file.
+/// Only the seal key the copy was sealed to can open it.
+pub fn recover_release_secret(
+    field: &DeferredField,
+    my_seal_public: &str,
+    my_seal: &StaticSecret,
+) -> WResult<[u8; 32]> {
+    if field.sealed != DEFERRED_MARK {
+        return Err("not a deferred-delivery field".to_string());
+    }
+    let recovery = field
+        .recovery
+        .as_ref()
+        .ok_or("this field carries no recovery copy (sealed before custody copies existed)")?;
+    if recovery.to != my_seal_public {
+        return Err("the recovery copy is sealed to another identity".to_string());
+    }
+    let secret: [u8; 32] = open_recipient_raw(recovery, my_seal)?
+        .try_into()
+        .map_err(|_| "recovered release secret has the wrong length".to_string())?;
+    Ok(secret)
 }
 
 /// Seal the release secret to the field's nominated holder: this object

@@ -574,8 +574,17 @@ enum WalletCmd {
         #[arg(long)]
         field: String,
         /// Release secrets written by seal-deferred
+        #[arg(long, required_unless_present = "recover")]
+        release: Option<PathBuf>,
+        /// Recover the release secret from the issuer's own custody copy
+        /// sealed in the field (safety net when the secrets file is lost)
+        #[arg(long, requires_all = ["name", "passphrase"])]
+        recover: bool,
+        /// Issuer identity that sealed the field (with --recover)
         #[arg(long)]
-        release: PathBuf,
+        name: Option<String>,
+        #[arg(long)]
+        passphrase: Option<String>,
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -1277,12 +1286,19 @@ fn cmd_wallet_seal_deferred(
     Ok(())
 }
 
-/// Attach a deferred field's release half: needs public keys only, because
-/// releasing is an act of the ledger, not of the seal key.
+/// Attach a deferred field's release half: usually needs public keys only,
+/// because releasing is an act of the ledger, not of the seal key. With
+/// `--recover` the issuer's identity opens the sealed custody copy instead
+/// of reading a secrets file.
+#[allow(clippy::too_many_arguments)]
 fn cmd_wallet_release_deferred(
+    data_dir: &Path,
     input: &Path,
     field: &str,
-    release: &Path,
+    release: Option<&PathBuf>,
+    recover: bool,
+    name: Option<&str>,
+    passphrase: Option<&str>,
     out: &Option<PathBuf>,
 ) -> Result<(), String> {
     let text =
@@ -1295,17 +1311,31 @@ fn cmd_wallet_release_deferred(
         .ok_or_else(|| format!("input has no field '{field}'"))?;
     let deferred: datu_wallet::DeferredField = serde_json::from_value(field_value)
         .map_err(|e| format!("'{field}' is not a deferred-delivery field: {e}"))?;
-    let release_text = std::fs::read_to_string(release)
-        .map_err(|e| format!("cannot read {}: {e}", release.display()))?;
-    let release_doc: serde_json::Value = serde_json::from_str(&release_text)
-        .map_err(|e| format!("release secrets must be JSON: {e}"))?;
-    let secret_hex = release_doc["fields"][field]
-        .as_str()
-        .ok_or_else(|| format!("release secrets have no entry for '{field}'"))?;
-    let secret: [u8; 32] = hex::decode(secret_hex)
-        .ok()
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or("release secret is not a 32-byte hex value")?;
+    let secret: [u8; 32] = if recover {
+        let name = name.ok_or("--recover needs --name")?;
+        let passphrase = passphrase.ok_or("--recover needs --passphrase")?;
+        let identity = datu_wallet::Wallet::open(data_dir).load(name, passphrase)?;
+        let secret = datu_wallet::recover_release_secret(
+            &deferred,
+            &identity.public.seal_public,
+            &identity.seal,
+        )?;
+        println!("release secret recovered from the issuer's sealed custody copy");
+        secret
+    } else {
+        let release = release.ok_or("pass --release secrets.json or --recover")?;
+        let release_text = std::fs::read_to_string(release)
+            .map_err(|e| format!("cannot read {}: {e}", release.display()))?;
+        let release_doc: serde_json::Value = serde_json::from_str(&release_text)
+            .map_err(|e| format!("release secrets must be JSON: {e}"))?;
+        let secret_hex = release_doc["fields"][field]
+            .as_str()
+            .ok_or_else(|| format!("release secrets have no entry for '{field}'"))?;
+        hex::decode(secret_hex)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or("release secret is not a 32-byte hex value")?
+    };
     let share = datu_wallet::attach_release(&deferred, &secret)?;
     let json = serde_json::to_string_pretty(&share).map_err(|e| e.to_string())?;
     write_output(out, &json)?;
@@ -3691,8 +3721,27 @@ fn run(cli: Cli) -> Result<(), String> {
                 input,
                 field,
                 release,
+                recover,
+                name,
+                passphrase,
                 out,
-            } => cmd_wallet_release_deferred(&input, &field, &release, &out),
+            } => {
+                let pass = if *recover {
+                    Some(get_passphrase(passphrase.clone())?)
+                } else {
+                    None
+                };
+                cmd_wallet_release_deferred(
+                    &cli.data_dir,
+                    &input,
+                    field,
+                    release.as_ref(),
+                    *recover,
+                    name.as_deref(),
+                    pass.as_deref(),
+                    &out,
+                )
+            }
             WalletCmd::OpenDeferred {
                 name,
                 passphrase,
@@ -4354,7 +4403,10 @@ mod tests {
                 cmd: WalletCmd::ReleaseDeferred {
                     input: sealed_path.clone(),
                     field: "owner_name".into(),
-                    release: secrets_path.clone(),
+                    release: Some(secrets_path.clone()),
+                    recover: false,
+                    name: None,
+                    passphrase: None,
                     out: Some(share_path.clone()),
                 },
             },
@@ -4396,6 +4448,43 @@ mod tests {
         let opened: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&opened_path).unwrap()).unwrap();
         assert_eq!(opened, serde_json::json!("Amina"));
+
+        // Lost the secrets file? The issuer's sealed custody copy recovers
+        // the release half, and the holder opens with it all the same.
+        let recovered_share = d.join("share-recovered.json");
+        run(cli(
+            d,
+            Commands::Signet {
+                cmd: WalletCmd::ReleaseDeferred {
+                    input: sealed_path.clone(),
+                    field: "owner_name".into(),
+                    release: None,
+                    recover: true,
+                    name: Some("issuer".into()),
+                    passphrase: Some("pw1".into()),
+                    out: Some(recovered_share.clone()),
+                },
+            },
+        ))
+        .unwrap();
+        let recovered_opened = d.join("opened-recovered.json");
+        run(cli(
+            d,
+            Commands::Signet {
+                cmd: WalletCmd::OpenDeferred {
+                    name: "holder".into(),
+                    passphrase: Some("pw2".into()),
+                    input: sealed_path.clone(),
+                    field: "owner_name".into(),
+                    release: recovered_share,
+                    out: Some(recovered_opened.clone()),
+                },
+            },
+        ))
+        .unwrap();
+        let recovered: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&recovered_opened).unwrap()).unwrap();
+        assert_eq!(recovered, serde_json::json!("Amina"));
     }
     /// A wasm contract spec can be built without hand-rolling base64.
     #[test]
