@@ -1,5 +1,7 @@
 # DATU - Decentralized Accountable Trust Union
 
+[![ci](https://github.com/greenarmor/datu-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/greenarmor/datu-ledger/actions/workflows/ci.yml)
+
 **DATU** - **D**ecentralized **A**ccountable **T**rust **U**nion - is a tokenless,
 quantum-resistant accountability ledger: a distributed system for
 **accountability and transparency** where:
