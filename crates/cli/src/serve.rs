@@ -39,6 +39,12 @@ pub const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// Default per-peer submission budget for `POST /v1/entries`.
 pub const DEFAULT_SUBMIT_PER_MIN: usize = 60;
 
+/// Default budget for the sync reconciliation route, per peer IP per
+/// minute: one full pull of a 240k-entry ledger per window. Generous for
+/// honest syncs (a fresh node pages through in well under a minute),
+/// bounded for scan amplification (every haves page walks the store).
+pub const DEFAULT_HAVES_PER_MIN: usize = 120;
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -46,16 +52,18 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Per-peer sliding-window limiter on the one unauthenticated write route -
-/// spam resistance without accounts or tokens. `per_min == 0` disables it.
-pub struct SubmitLimiter {
+/// Per-peer sliding-window limiter for unauthenticated routes - spam
+/// resistance without accounts or tokens. Configured per route: the write
+/// door prices retries against spam, the sync route against scan
+/// amplification. `per_min == 0` disables it.
+pub struct PeerLimiter {
     per_min: usize,
     hits: Mutex<std::collections::HashMap<String, Vec<u64>>>,
 }
 
-impl SubmitLimiter {
+impl PeerLimiter {
     pub fn new(per_min: usize) -> Self {
-        SubmitLimiter {
+        PeerLimiter {
             per_min,
             hits: Mutex::new(std::collections::HashMap::new()),
         }
@@ -120,6 +128,7 @@ pub fn serve(
     addr: &str,
     policy: Option<WritePolicy>,
     submit_per_min: usize,
+    haves_per_min: usize,
 ) -> Result<(), String> {
     // Fail fast if there is no node to serve.
     let store = Store::open_with_policy(&data_dir.join("node.db"), policy.clone())
@@ -168,10 +177,14 @@ pub fn serve(
     if submit_per_min > 0 {
         println!("  limits:    {submit_per_min} submissions/min per peer IP (--submit-per-min, 0 = off)");
     }
+    if haves_per_min > 0 {
+        println!("  sync:      {haves_per_min} haves requests/min per peer IP (--haves-per-min, 0 = off)");
+    }
     println!("  feed head: GET  http://{addr}/v1/feed/{{author}}");
     println!("ctrl-c to stop");
     let dir = data_dir.to_path_buf();
-    let limiter = (submit_per_min > 0).then(|| Arc::new(SubmitLimiter::new(submit_per_min)));
+    let limiter = (submit_per_min > 0).then(|| Arc::new(PeerLimiter::new(submit_per_min)));
+    let haves_limiter = (haves_per_min > 0).then(|| Arc::new(PeerLimiter::new(haves_per_min)));
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(s) => s,
@@ -181,9 +194,10 @@ pub fn serve(
         let policy = policy.clone();
         let network = network.clone();
         let limiter = limiter.clone();
+        let haves_limiter = haves_limiter.clone();
         let governance = governance.clone();
         std::thread::spawn(move || {
-            let _ = handle(stream, &dir, policy, network, limiter, governance);
+            let _ = handle(stream, &dir, policy, network, limiter, haves_limiter, governance);
         });
     }
     Ok(())
@@ -194,11 +208,20 @@ fn handle(
     data_dir: &PathBuf,
     policy: Option<WritePolicy>,
     network: Option<NetworkPolicy>,
-    limiter: Option<Arc<SubmitLimiter>>,
+    limiter: Option<Arc<PeerLimiter>>,
+    haves_limiter: Option<Arc<PeerLimiter>>,
     governance: Arc<Option<Governance>>,
 ) -> Result<(), String> {
     let mut stream = stream;
-    if let Err(e) = handle_inner(&mut stream, data_dir, policy, network, limiter, governance) {
+    if let Err(e) = handle_inner(
+        &mut stream,
+        data_dir,
+        policy,
+        network,
+        limiter,
+        haves_limiter,
+        governance,
+    ) {
         let _ = respond_json(&mut stream, "400 Bad Request", &serde_json::json!({ "error": e }));
     }
     Ok(())
@@ -209,7 +232,8 @@ fn handle_inner(
     data_dir: &PathBuf,
     policy: Option<WritePolicy>,
     network: Option<NetworkPolicy>,
-    limiter: Option<Arc<SubmitLimiter>>,
+    limiter: Option<Arc<PeerLimiter>>,
+    haves_limiter: Option<Arc<PeerLimiter>>,
     governance: Arc<Option<Governance>>,
 ) -> Result<(), String> {
     let request = match read_request(stream) {
@@ -542,6 +566,28 @@ fn handle_inner(
             }
         }
         ("POST", "/v1/sync/haves") => {
+            // Every page walks the store, so an unthrottled client turns a
+            // read route into CPU amplification. Shaped like submissions:
+            // per-peer window, Retry-After, and it fails open - served
+            // data still verifies cryptographically.
+            if let Some(haves) = &haves_limiter {
+                let peer = stream
+                    .peer_addr()
+                    .map(|a| a.ip().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
+                if let Some(retry_after) = haves.check(&peer, now_ms()) {
+                    return respond_json_retry(
+                        stream,
+                        "429 Too Many Requests",
+                        retry_after,
+                        &serde_json::json!({
+                            "ok": false,
+                            "error": "sync rate limit exceeded for this peer",
+                            "retry_after_s": retry_after,
+                        }),
+                    );
+                }
+            }
             let body_json: serde_json::Value =
                 serde_json::from_slice(&body).map_err(|e| format!("bad JSON: {e}"))?;
             let m = body_json["m"].as_u64().unwrap_or(0);
@@ -901,14 +947,14 @@ mod tests {
     }
 
     #[test]
-    fn submit_limiter_sliding_window() {
-        let limiter = SubmitLimiter::new(2);
+    fn peer_limiter_sliding_window() {
+        let limiter = PeerLimiter::new(2);
         assert_eq!(limiter.check("a", 1_000), None);
         assert_eq!(limiter.check("a", 2_000), None);
         assert!(limiter.check("a", 3_000).is_some(), "third hit in window denied");
         assert_eq!(limiter.check("b", 3_000), None, "budget is per peer");
         assert_eq!(limiter.check("a", 61_500), None, "window has slid");
-        let off = SubmitLimiter::new(0);
+        let off = PeerLimiter::new(0);
         for _ in 0..10 {
             assert_eq!(off.check("a", 1), None, "0 = unlimited");
         }
@@ -933,7 +979,7 @@ mod tests {
             hex::encode(r.id().unwrap())
         };
         std::thread::spawn(move || {
-            let _ = serve(&data, &format!("127.0.0.1:{port}"), None, 5);
+            let _ = serve(&data, &format!("127.0.0.1:{port}"), None, 5, 5);
         });
         let mut ready = false;
         for _ in 0..200 {
@@ -992,5 +1038,30 @@ mod tests {
                 assert!(body.contains("retry_after_s"));
             }
         }
+
+        // The sync route carries its own per-peer budget: every page walks
+        // the store, so an unthrottled client would be CPU amplification.
+        let bloom = serde_json::json!({
+            "m": 64, "k": 3,
+            "bits_b64": B64.encode([0u8; 8]),
+        })
+        .to_string();
+        let mut saw_429 = false;
+        for _ in 0..6 {
+            let (status, body) = http(port, "POST", "/v1/sync/haves", &bloom);
+            if status.contains("429") {
+                assert!(
+                    body.contains("sync rate limit"),
+                    "429 body names the sync budget: {body}"
+                );
+                saw_429 = true;
+                break;
+            }
+            assert!(status.contains("200"), "within the haves budget: {status}");
+        }
+        assert!(
+            saw_429,
+            "the haves budget (5/min here) must bite within six requests"
+        );
     }
 }

@@ -93,6 +93,9 @@ enum Commands {
         /// Max POST /v1/entries per peer IP per minute (0 = unlimited)
         #[arg(long = "submit-per-min", default_value_t = 60)]
         submit_per_min: u32,
+        /// Max POST /v1/sync/haves per peer IP per minute (0 = unlimited)
+        #[arg(long = "haves-per-min", default_value_t = 120)]
+        haves_per_min: u32,
     },
     /// Signet Personal Vault: identities, signing, field-level encryption
     #[command(alias = "wallet")]
@@ -3171,11 +3174,13 @@ fn run(cli: Cli) -> Result<(), String> {
             addr,
             read_only,
             submit_per_min,
+            haves_per_min,
         } => serve::serve(
             &cli.data_dir,
             addr,
             effective_policy(&cli.data_dir, *read_only, false)?,
             *submit_per_min as usize,
+            *haves_per_min as usize,
         ),
         Commands::Signet { cmd } => match cmd {
             WalletCmd::Create {

@@ -284,7 +284,10 @@ ledger explorer at `/` (entries, search, witnesses - read-only mirror-node view)
   disputes banner + view with open/resolved tags
 - `POST /v1/sync/haves` - bloom-filter reconciliation over HTTP
   (`{m, k, bits_b64, cursor, limit}` → `{entries[], cursor, more, checkpoints[]}`;
-  the same exchange also runs over raw TCP and over files - see transports)
+  the same exchange also runs over raw TCP and over files - see transports);
+  `429` over the per-peer sync budget (`--haves-per-min`, default 120/min,
+  0 = off; `Retry-After` header) - every page scans the store, so the read
+  route is shaped like the write door
 
 A browser-extension wallet implements exactly two JSON contracts:
 `SignRequest` in (from the dApp, after checking `GET /v1/feed`), entry-JSON out
