@@ -170,7 +170,9 @@ fn gated_namespace_denies_unadmitted_author() {
     let rogue = Keys::new();
 
     // Ungated namespaces stay open even on a gated node.
-    assert!(store.insert_entry(&rogue.entry("general", 0, b"hi")).unwrap());
+    assert!(store
+        .insert_entry(&rogue.entry("general", 0, b"hi"))
+        .unwrap());
 
     let stranger = Keys::new();
     match store.insert_entry(&stranger.entry("gov.records", 0, b"forged")) {
@@ -187,7 +189,9 @@ fn explicit_writer_is_admitted() {
     policy.writers = vec![writer.hex()];
     policy.attestors = vec![Keys::new().hex()];
     let store = gated_store(policy);
-    assert!(store.insert_entry(&writer.entry("gov.records", 0, b"official")).unwrap());
+    assert!(store
+        .insert_entry(&writer.entry("gov.records", 0, b"official"))
+        .unwrap());
 }
 
 #[test]
@@ -204,7 +208,9 @@ fn attestation_from_trust_root_admits_writer() {
     // The registry attests the bidder (identity.attest is ungated here).
     assert!(store.insert_entry(&registry.attest(&bidder.hex())).unwrap());
     // Now the bidder is admitted - admission is rooted in the attestation graph.
-    assert!(store.insert_entry(&bidder.entry("gov.bids", 0, b"bid")).unwrap());
+    assert!(store
+        .insert_entry(&bidder.entry("gov.bids", 0, b"bid"))
+        .unwrap());
 }
 
 #[test]
@@ -234,7 +240,12 @@ fn trusted_revocation_kills_the_attestation_it_names() {
     assert!(store.insert_entry(&first).unwrap());
 
     // The root revokes: a new appended statement, never an edit.
-    let revoke = registry.revoke(attestation_id, 1, Some(attestation_id), Some("left the consortium"));
+    let revoke = registry.revoke(
+        attestation_id,
+        1,
+        Some(attestation_id),
+        Some("left the consortium"),
+    );
     assert!(store.insert_entry(&revoke).unwrap());
 
     // The bidder is no longer an admitted writer.
@@ -259,7 +270,9 @@ fn revocation_from_an_untrusted_key_has_no_effect() {
         .insert_entry(&stranger.revoke(attestation_id, 0, None, None))
         .unwrap());
 
-    assert!(store.insert_entry(&bidder.entry("gov.bids", 0, b"bid")).unwrap());
+    assert!(store
+        .insert_entry(&bidder.entry("gov.bids", 0, b"bid"))
+        .unwrap());
 }
 
 #[test]
@@ -280,8 +293,12 @@ fn min_cosigners_is_enforced() {
     ));
     // A cosigner adds weight; now the subject is admitted.
     let cosigner = Keys::new();
-    assert!(store.insert_entry(&cosigner.cosign(attestation_id)).unwrap());
-    assert!(store.insert_entry(&bidder.entry("gov.bids", 0, b"bid")).unwrap());
+    assert!(store
+        .insert_entry(&cosigner.cosign(attestation_id))
+        .unwrap());
+    assert!(store
+        .insert_entry(&bidder.entry("gov.bids", 0, b"bid"))
+        .unwrap());
 }
 
 #[test]
@@ -330,7 +347,9 @@ fn required_party_role_must_sign() {
     let mut fully_signed = registrar_signed;
     fully_signed.sign("holder", &citizen.ed, None).unwrap();
     let bytes = serde_json::to_vec(&fully_signed).unwrap();
-    assert!(store.insert_entry(&registry.entry("gov.titles", 0, &bytes)).unwrap());
+    assert!(store
+        .insert_entry(&registry.entry("gov.titles", 0, &bytes))
+        .unwrap());
 }
 
 #[test]
@@ -345,9 +364,7 @@ fn tampered_party_document_is_denied() {
         "land.title.application",
         serde_json::json!({"parcel": "TIT-1"}),
     );
-    document
-        .sign("holder", &citizen.ed, None)
-        .unwrap();
+    document.sign("holder", &citizen.ed, None).unwrap();
     // Mutate after signing: the holder never consented to this.
     document.doc["parcel"] = serde_json::json!("TIT-999");
     let bytes = serde_json::to_vec(&document).unwrap();
@@ -364,8 +381,12 @@ fn denied_entries_are_skipped_not_fatal_in_merges() {
 
     // Open observer mirror: collects everything.
     let observer = Store::open_in_memory().unwrap();
-    assert!(observer.insert_entry(&writer.entry("general", 0, b"open data")).unwrap());
-    assert!(observer.insert_entry(&rogue.entry("gov.records", 0, b"forged")).unwrap());
+    assert!(observer
+        .insert_entry(&writer.entry("general", 0, b"open data"))
+        .unwrap());
+    assert!(observer
+        .insert_entry(&rogue.entry("gov.records", 0, b"forged"))
+        .unwrap());
     let bundle = observer.export_bundle("").unwrap();
 
     // Gated node: imports the rest, skips the rogue entry, does not abort.
@@ -500,7 +521,9 @@ fn per_namespace_rules_are_independent() {
     let mut bid = SignedDocument::new("bid", serde_json::json!({"lot": "L7"}));
     bid.sign("bidder", &bidder.ed, None).unwrap();
     let bytes = serde_json::to_vec(&bid).unwrap();
-    assert!(store.insert_entry(&registry.entry("gov.bids.lot7", 0, &bytes)).unwrap());
+    assert!(store
+        .insert_entry(&registry.entry("gov.bids.lot7", 0, &bytes))
+        .unwrap());
 
     // A title with only a bidder signature is missing the holder requirement.
     assert!(matches!(
@@ -529,7 +552,11 @@ fn holder_must_be_the_key_named_in_the_document() {
     let mut honest = title_doc(&citizen.hex());
     honest.sign("holder", &citizen.ed, None).unwrap();
     assert!(store
-        .insert_entry(&registry.entry("gov.titles.application", 0, &serde_json::to_vec(&honest).unwrap()))
+        .insert_entry(&registry.entry(
+            "gov.titles.application",
+            0,
+            &serde_json::to_vec(&honest).unwrap()
+        ))
         .unwrap());
 
     // Someone else signs the holder role while the doc names the citizen.
@@ -577,7 +604,11 @@ fn pinned_role_key_is_enforced() {
     let mut genuine = degree.clone();
     genuine.sign("registrar", &registry.ed, None).unwrap();
     assert!(store
-        .insert_entry(&registry.entry("gov.degrees.2026", 0, &serde_json::to_vec(&genuine).unwrap()))
+        .insert_entry(&registry.entry(
+            "gov.degrees.2026",
+            0,
+            &serde_json::to_vec(&genuine).unwrap()
+        ))
         .unwrap());
 
     // An admitted writer cannot sign the registrar role with their own key.
@@ -605,11 +636,13 @@ fn personal_fields_must_be_encrypted() {
     policy.rules = vec![title_rule];
     let store = gated_store(policy);
 
-    let sealed_blob = || serde_json::json!({
-        "sealed": "datu-sealed-v2",
-        "recipients": [],
-        "commitment": "00"
-    });
+    let sealed_blob = || {
+        serde_json::json!({
+            "sealed": "datu-sealed-v2",
+            "recipients": [],
+            "commitment": "00"
+        })
+    };
 
     let build = |holder_name: serde_json::Value, with_birth: bool| {
         let mut doc = serde_json::json!({
@@ -639,11 +672,7 @@ fn personal_fields_must_be_encrypted() {
     }
 
     // Sealed name: accepted.
-    let sealed_entry = registry.entry(
-        "gov.titles.application",
-        0,
-        &build(sealed_blob(), true),
-    );
+    let sealed_entry = registry.entry("gov.titles.application", 0, &build(sealed_blob(), true));
     assert!(store.insert_entry(&sealed_entry).unwrap());
 
     // Legacy pre-rebrand seal marks (dag-sealed-*) are still accepted.
@@ -778,7 +807,9 @@ fn per_author_cap_counts_each_namespace_separately() {
     }];
     let store = gated_store(policy);
 
-    assert!(store.insert_entry(&writer.entry("gov.titles.a", 0, b"one")).unwrap());
+    assert!(store
+        .insert_entry(&writer.entry("gov.titles.a", 0, b"one"))
+        .unwrap());
     // Second entry in the SAME namespace hits the cap…
     let first_id = store.latest(&writer.hex()).unwrap().unwrap().id().unwrap();
     let second = writer.entry_with_prev("gov.titles.a", 1, Some(first_id), b"two");
@@ -895,7 +926,8 @@ fn a_key_revocation_binds_even_an_explicit_writer() {
     assert!(store
         .insert_entry(&registry.revoke_key(&writer.hex(), 0, None))
         .unwrap());
-    let denied = store.insert_entry(&writer.entry_with_prev("gov.bids", 1, Some(first_id), b"bid again"));
+    let denied =
+        store.insert_entry(&writer.entry_with_prev("gov.bids", 1, Some(first_id), b"bid again"));
     match denied {
         Err(StoreError::Denied(message)) => {
             assert!(message.contains("revoked"), "{message}");

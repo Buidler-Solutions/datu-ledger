@@ -239,7 +239,11 @@ fn compile_impl(
 
     let mut chain: Vec<(String, String, Option<String>)> = Vec::new();
     let (mut current_id, mut current_doc) = (geneses[0].id.clone(), geneses[0].doc.clone());
-    chain.push((geneses[0].id.clone(), geneses[0].author.clone(), current_doc.note.clone()));
+    chain.push((
+        geneses[0].id.clone(),
+        geneses[0].author.clone(),
+        current_doc.note.clone(),
+    ));
 
     loop {
         // Only continuations signed by a key the *current* manifest still
@@ -309,8 +313,7 @@ pub fn head(store: &Store, network_id: &str) -> Result<Option<(String, Vec<Strin
         ));
     }
 
-    let (mut current_id, mut current_roots) =
-        (geneses[0].id.clone(), geneses[0].doc.roots.clone());
+    let (mut current_id, mut current_roots) = (geneses[0].id.clone(), geneses[0].doc.roots.clone());
     loop {
         let nexts: Vec<&Loaded> = docs
             .iter()

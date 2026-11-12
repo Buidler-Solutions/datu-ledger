@@ -17,13 +17,7 @@ fn keys() -> Keys {
     }
 }
 
-fn cp(
-    k: &Keys,
-    height: u64,
-    prev: Option<[u8; 32]>,
-    root: [u8; 32],
-    count: u64,
-) -> Checkpoint {
+fn cp(k: &Keys, height: u64, prev: Option<[u8; 32]>, root: [u8; 32], count: u64) -> Checkpoint {
     let body = CheckpointBody {
         version: 1,
         signer: String::new(),
@@ -86,7 +80,13 @@ fn same_height_fork_across_streams_detected() {
 fn internal_duplicate_detected() {
     let authority = keys();
     let mut stream = honest_chain(&authority, 2);
-    stream.push(cp(&authority, 1, Some(stream[0].id().unwrap()), [9u8; 32], 99));
+    stream.push(cp(
+        &authority,
+        1,
+        Some(stream[0].id().unwrap()),
+        [9u8; 32],
+        99,
+    ));
     let evidence = analyze(&stream, &[]).unwrap();
     assert!(evidence
         .iter()
@@ -98,7 +98,13 @@ fn chain_break_detected() {
     let authority = keys();
     let mut stream = honest_chain(&authority, 3);
     // Height 2 claims to follow height 1 but points elsewhere.
-    stream[2] = cp(&authority, 2, Some([0xBA; 32]), stream[2].body.entry_ids_root, 3);
+    stream[2] = cp(
+        &authority,
+        2,
+        Some([0xBA; 32]),
+        stream[2].body.entry_ids_root,
+        3,
+    );
     let evidence = analyze(&stream, &[]).unwrap();
     assert!(evidence
         .iter()

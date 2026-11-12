@@ -23,7 +23,8 @@ pub const NS_GENESIS: &str = "genesis";
 /// Founder, exactly as written inside the record payload.
 pub const GENESIS_FOUNDER: &str = "EB. Secretaria aka greenarmor";
 /// Ed25519 author key of the minted record (hex).
-pub const GENESIS_AUTHOR_HEX: &str = "b21a2df8016f6a387388f462c6799558c9b25a012f00352f1bd2e8b075018666";
+pub const GENESIS_AUTHOR_HEX: &str =
+    "b21a2df8016f6a387388f462c6799558c9b25a012f00352f1bd2e8b075018666";
 /// BLAKE3 entry id of the minted record (hex).
 pub const GENESIS_ID_HEX: &str = "37616bce5bfb8b773f7c99a9e52bcd7aa43294301ab074a908fbc9a334315d63";
 /// The signed genesis entry (borsh, hex): Ed25519 + ML-DSA-65 over the
@@ -76,7 +77,10 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&entry.body.payload).unwrap();
         assert_eq!(payload["founder"], GENESIS_FOUNDER);
         assert_eq!(payload["kind"], "genesis");
-        assert_eq!(payload["project"], "DATU — a DAG-type accountability ledger, not a blockchain");
+        assert_eq!(
+            payload["project"],
+            "DATU — a DAG-type accountability ledger, not a blockchain"
+        );
         let statement = payload["statement"].as_str().unwrap();
         // No redundant messaging: the statement carries its headline exactly once.
         assert_eq!(statement.matches("The Greatest Life Hack").count(), 1);

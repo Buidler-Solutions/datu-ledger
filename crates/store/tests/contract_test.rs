@@ -157,16 +157,7 @@ fn fixture_with(spec: &ContractSpec, contract_ns: &str) -> Fixture {
         serde_json::to_value(spec).unwrap(),
         &[("issuer", &issuer)],
     );
-    let contract = publish(
-        &store,
-        &registrar,
-        contract_ns,
-        payload,
-        0,
-        None,
-        vec![],
-        1,
-    );
+    let contract = publish(&store, &registrar, contract_ns, payload, 0, None, vec![], 1);
     Fixture {
         store,
         registrar,
@@ -299,7 +290,16 @@ fn verify_all_counts_wasm_contract_failures() {
         serde_json::to_value(&spec).unwrap(),
         &[("issuer", &issuer)],
     );
-    let contract = publish(&store, &registrar, "gov.contracts", payload, 0, None, vec![], 1);
+    let contract = publish(
+        &store,
+        &registrar,
+        "gov.contracts",
+        payload,
+        0,
+        None,
+        vec![],
+        1,
+    );
     let contract_ref = serde_json::json!({
         "id": hex::encode(contract.id().unwrap()),
         "version": CONTRACT_VERSION
@@ -402,8 +402,7 @@ impl Fixture {
         if let Some(contract) = contract {
             doc["contract"] = contract;
         }
-        let payload =
-            signed_doc("land.title.grant", doc, &[("holder", &self.holder.ed)]);
+        let payload = signed_doc("land.title.grant", doc, &[("holder", &self.holder.ed)]);
         let seq = self.registrar_seq;
         let prev = self.registrar_prev;
         self.registrar_seq += 1;
@@ -462,7 +461,10 @@ fn missing_citation_is_denied_and_names_the_kind() {
         message.contains("land.title.inspection"),
         "denial names the required kind: {message}"
     );
-    assert!(message.contains("contract"), "denial says it is the contract: {message}");
+    assert!(
+        message.contains("contract"),
+        "denial says it is the contract: {message}"
+    );
 }
 
 #[test]
@@ -588,7 +590,11 @@ fn check_contract_reports_conditions() {
     let failing = fx.grant_entry(vec![], None, Some(1000), Some(fx.contract_ref()));
     let check = fx.store.check_contract(&failing).unwrap().unwrap();
     assert!(!check.admitted);
-    assert_eq!(check.conditions.len(), 4, "kind, holder party, deadline, refs");
+    assert_eq!(
+        check.conditions.len(),
+        4,
+        "kind, holder party, deadline, refs"
+    );
     let refs_condition = check
         .conditions
         .iter()
@@ -645,7 +651,10 @@ fn min_cosigners_requires_distinct_verified_parties() {
         Some(1000),
         Some(fx.contract_ref()),
     ));
-    assert!(message.contains("found 0"), "one cosigner is not two: {message}");
+    assert!(
+        message.contains("found 0"),
+        "one cosigner is not two: {message}"
+    );
 
     // Two distinct verified parties: satisfies.
     let double = fx.compliance(1000, Some(&witness));
@@ -722,7 +731,10 @@ fn landing_window_denies_late_and_early_documents() {
         fx.store.insert_entry(&entry)
     };
 
-    assert!(grant_with_window(&mut fx, 1500, 2500).is_ok(), "inside the window");
+    assert!(
+        grant_with_window(&mut fx, 1500, 2500).is_ok(),
+        "inside the window"
+    );
     let message = denied_message(grant_with_window(&mut fx, 2500, 9000));
     assert!(
         message.contains("before the window opening"),
@@ -823,7 +835,11 @@ fn outlook_tracks_conditions_outstanding() {
     fx.registrar_prev = Some(anchor.id().unwrap());
 
     // 2. Pending: no compliance yet.
-    let outlook = fx.store.contract_outlook(&anchor.id().unwrap()).unwrap().unwrap();
+    let outlook = fx
+        .store
+        .contract_outlook(&anchor.id().unwrap())
+        .unwrap()
+        .unwrap();
     assert!(!outlook.ready);
     assert_eq!(outlook.admits, "datu.cert.release");
     assert!(outlook.citing.is_empty());
@@ -854,10 +870,17 @@ fn outlook_tracks_conditions_outstanding() {
     fx.inspector_seq += 1;
     fx.inspector_prev = Some(compliance.id().unwrap());
 
-    let outlook = fx.store.contract_outlook(&anchor.id().unwrap()).unwrap().unwrap();
+    let outlook = fx
+        .store
+        .contract_outlook(&anchor.id().unwrap())
+        .unwrap()
+        .unwrap();
     assert!(outlook.ready, "citation side is satisfied");
     assert_eq!(outlook.citing.len(), 1);
-    assert_eq!(outlook.citing[0].kind.as_deref(), Some("datu.compliance.inspection"));
+    assert_eq!(
+        outlook.citing[0].kind.as_deref(),
+        Some("datu.compliance.inspection")
+    );
     assert!(outlook.conditions.iter().all(|c| c.met));
 
     // 4. The release lands in a gated namespace, citing the compliance
@@ -936,9 +959,20 @@ fn outlook_late_compliance_stays_outstanding() {
         vec![anchor.id().unwrap()],
         2000, // after the anchor's declared deadline
     );
-    let outlook = fx.store.contract_outlook(&anchor.id().unwrap()).unwrap().unwrap();
-    assert!(!outlook.ready, "late evidence is visible but does not count");
-    assert_eq!(outlook.citing.len(), 1, "the late entry is still listed as evidence");
+    let outlook = fx
+        .store
+        .contract_outlook(&anchor.id().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(
+        !outlook.ready,
+        "late evidence is visible but does not count"
+    );
+    assert_eq!(
+        outlook.citing.len(),
+        1,
+        "the late entry is still listed as evidence"
+    );
     let refs_condition = outlook
         .conditions
         .iter()
@@ -964,7 +998,16 @@ fn verify_all_counts_contract_failures_as_evidence() {
         serde_json::to_value(&spec).unwrap(),
         &[("issuer", &issuer)],
     );
-    let contract = publish(&store, &registrar, "gov.contracts", payload, 0, None, vec![], 1);
+    let contract = publish(
+        &store,
+        &registrar,
+        "gov.contracts",
+        payload,
+        0,
+        None,
+        vec![],
+        1,
+    );
     let contract_ref = serde_json::json!({
         "id": hex::encode(contract.id().unwrap()),
         "version": CONTRACT_VERSION
@@ -1026,5 +1069,8 @@ fn verify_all_counts_contract_failures_as_evidence() {
         2000,
     );
     let report = store.verify_all().unwrap();
-    assert_eq!(report.contracts_failed, 1, "evidence-grade recount flags it");
+    assert_eq!(
+        report.contracts_failed, 1,
+        "evidence-grade recount flags it"
+    );
 }

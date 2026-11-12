@@ -16,7 +16,10 @@ fn no_false_negatives_and_low_false_positives() {
     let absent: Vec<[u8; 32]> = (10_000..20_000u64)
         .map(|i| blake3::hash(&i.to_le_bytes()).as_bytes().clone())
         .collect();
-    let fp = absent.iter().filter(|id| filter.contains(id.as_slice())).count();
+    let fp = absent
+        .iter()
+        .filter(|id| filter.contains(id.as_slice()))
+        .count();
     let rate = fp as f64 / absent.len() as f64;
     assert!(rate < 0.01, "false-positive rate {rate} far above target");
 }
@@ -42,7 +45,5 @@ fn rejects_malformed_parts() {
     assert!(BloomFilter::from_parts(0, 4, &filter.bit_bytes()).is_none());
     assert!(BloomFilter::from_parts(filter.bit_count(), 0, &filter.bit_bytes()).is_none());
     assert!(BloomFilter::from_parts(filter.bit_count(), 99, &filter.bit_bytes()).is_none());
-    assert!(
-        BloomFilter::from_parts(filter.bit_count(), filter.hash_count(), &[0u8; 3]).is_none()
-    );
+    assert!(BloomFilter::from_parts(filter.bit_count(), filter.hash_count(), &[0u8; 3]).is_none());
 }

@@ -102,7 +102,10 @@ pub fn check_module(bytes: &[u8]) -> Result<Vec<String>, String> {
     let engine = wasmi::Engine::new(&wasmi::Config::default());
     let module = wasmi::Module::new(&engine, bytes)
         .map_err(|e| format!("contract wasm does not parse: {e}"))?;
-    Ok(module.exports().map(|export| export.name().to_string()).collect())
+    Ok(module
+        .exports()
+        .map(|export| export.name().to_string())
+        .collect())
 }
 
 /// Run a WASM contract body over the governed document.
@@ -236,7 +239,11 @@ pub fn evaluate(
             kind: ConditionKind::Wasm,
             requirement: "the wasm predicate admits this document".into(),
             required: "admitted".into(),
-            found: if met { "admitted".into() } else { "denied".into() },
+            found: if met {
+                "admitted".into()
+            } else {
+                "denied".into()
+            },
             met,
         }],
     }
@@ -323,10 +330,8 @@ mod tests {
     }
 
     fn doc_with_parcel(parcel: &str) -> SignedDocument {
-        let mut document = SignedDocument::new(
-            "land.title.grant",
-            serde_json::json!({"parcel": parcel}),
-        );
+        let mut document =
+            SignedDocument::new("land.title.grant", serde_json::json!({"parcel": parcel}));
         document
             .sign("holder", &SigningKey::generate(&mut OsRng), None)
             .unwrap();
@@ -338,30 +343,21 @@ mod tests {
         let report = wasm_spec(SCAN_WAT).evaluate_report(&doc_with_parcel("PH-1"), 2000, &[]);
         assert!(report.admitted, "reasons: {:?}", report.reasons);
         assert_eq!(report.conditions.len(), 2);
-        assert!(
-            report
-                .conditions
-                .iter()
-                .any(|c| c.kind == ConditionKind::Wasm && c.met)
-        );
+        assert!(report
+            .conditions
+            .iter()
+            .any(|c| c.kind == ConditionKind::Wasm && c.met));
     }
 
     #[test]
     fn wasm_denies_when_needle_missing_with_guest_reason() {
         let report = wasm_spec(SCAN_WAT).evaluate_report(&doc_with_parcel("PH-2"), 2000, &[]);
         assert!(!report.admitted);
-        assert!(
-            report
-                .reasons
-                .iter()
-                .any(|r| r.contains("not mentioned"))
-        );
-        assert!(
-            report
-                .conditions
-                .iter()
-                .any(|c| c.kind == ConditionKind::Wasm && !c.met)
-        );
+        assert!(report.reasons.iter().any(|r| r.contains("not mentioned")));
+        assert!(report
+            .conditions
+            .iter()
+            .any(|c| c.kind == ConditionKind::Wasm && !c.met));
     }
 
     #[test]
@@ -383,12 +379,10 @@ mod tests {
 
         let denied = spec.evaluate_report(&doc, 2000, &[]);
         assert!(!denied.admitted);
-        assert!(
-            denied
-                .reasons
-                .iter()
-                .any(|r| r.contains("no inspection citation found"))
-        );
+        assert!(denied
+            .reasons
+            .iter()
+            .any(|r| r.contains("no inspection citation found")));
     }
 
     #[test]
@@ -404,12 +398,10 @@ mod tests {
         );
         let report = spec.evaluate_report(&doc_with_parcel("PH-1"), 2000, &[]);
         assert!(!report.admitted);
-        assert!(
-            report
-                .reasons
-                .iter()
-                .any(|r| r.contains("trapped (or exhausted its fuel)"))
-        );
+        assert!(report
+            .reasons
+            .iter()
+            .any(|r| r.contains("trapped (or exhausted its fuel)")));
     }
 
     #[test]

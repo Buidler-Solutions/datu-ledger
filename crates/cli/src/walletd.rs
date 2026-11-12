@@ -42,8 +42,8 @@
 //!   POST /v1/wallet/sign-entry  {name, passphrase, request}
 
 use crate::serve as ledger_api;
-use datu_wallet::wire::{entry_from_sign_request, SignRequest};
 use datu_core::parties::SignedDocument;
+use datu_wallet::wire::{entry_from_sign_request, SignRequest};
 use datu_wallet::{IdentityBackup, LoadedIdentity, Wallet};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -81,7 +81,10 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
     println!("    {token}");
     println!("  the browser wallet extension can pair itself - no paste needed");
     println!("  (manual fallback: paste the token into the panel's Settings)");
-    println!("  allowed browser origins: chrome-extension://… , {}", origins.join(" , "));
+    println!(
+        "  allowed browser origins: chrome-extension://… , {}",
+        origins.join(" , ")
+    );
     if !addr.starts_with("127.0.0.1") && !addr.starts_with("localhost") {
         println!("  WARNING: bound to a non-loopback address - anyone who can reach");
         println!("  this port with the token can ask for signatures");
@@ -122,7 +125,11 @@ fn handle(
                 &serde_json::json!({ "error": rest.trim() }),
             );
         } else {
-            let _ = respond_json(&mut stream, "400 Bad Request", &serde_json::json!({ "error": e }));
+            let _ = respond_json(
+                &mut stream,
+                "400 Bad Request",
+                &serde_json::json!({ "error": e }),
+            );
         }
     }
     Ok(())
@@ -176,11 +183,7 @@ fn handle_inner(
     }
 
     if let Err((status, message)) = check_access(&headers, token, origins) {
-        return respond_json(
-            stream,
-            status,
-            &serde_json::json!({ "error": message }),
-        );
+        return respond_json(stream, status, &serde_json::json!({ "error": message }));
     }
 
     let wallet = Wallet::open(data_dir);
@@ -225,7 +228,11 @@ fn handle_inner(
                     })
                 })
                 .collect();
-            respond_json(stream, "200 OK", &serde_json::json!({ "identities": items }))
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({ "identities": items }),
+            )
         }
         ("POST", "/v1/wallet/party-sign") => {
             let body_json = parse_body(&body)?;
@@ -344,14 +351,20 @@ fn handle_inner(
         ("POST", "/v1/wallet/release-deferred") => {
             let body_json = parse_body(&body)?;
             let field = str_field(&body_json, "field")?;
-            let document = body_json.get("document").cloned().ok_or("missing 'document'")?;
+            let document = body_json
+                .get("document")
+                .cloned()
+                .ok_or("missing 'document'")?;
             let field_value = document
                 .get(field.as_str())
                 .cloned()
                 .ok_or_else(|| format!("document has no field '{field}'"))?;
             let deferred: datu_wallet::DeferredField = serde_json::from_value(field_value)
                 .map_err(|e| format!("'{field}' is not a deferred-delivery field: {e}"))?;
-            let release = body_json.get("release").cloned().ok_or("missing 'release'")?;
+            let release = body_json
+                .get("release")
+                .cloned()
+                .ok_or("missing 'release'")?;
             let secret_hex = release
                 .get("fields")
                 .and_then(|fields| fields.get(&field))
@@ -415,9 +428,8 @@ fn handle_inner(
             let deferred: datu_wallet::DeferredField = serde_json::from_value(field_value)
                 .map_err(|e| format!("'{field}' is not a deferred-delivery field: {e}"))?;
             let release = body_json.get("release").ok_or("missing 'release'")?;
-            let share = datu_wallet::SealedShare::find(release).ok_or(
-                "release carries no share object (expected a 'datu-share-v2' object)",
-            )?;
+            let share = datu_wallet::SealedShare::find(release)
+                .ok_or("release carries no share object (expected a 'datu-share-v2' object)")?;
             let plaintext = datu_wallet::open_deferred(
                 &deferred,
                 &share,
@@ -451,10 +463,9 @@ fn handle_inner(
         }
         ("POST", "/v1/wallet/import") => {
             let body_json = parse_body(&body)?;
-            let backup: IdentityBackup = serde_json::from_value(
-                body_json.get("backup").cloned().ok_or("missing 'backup'")?,
-            )
-            .map_err(|e| format!("not a datu identity backup: {e}"))?;
+            let backup: IdentityBackup =
+                serde_json::from_value(body_json.get("backup").cloned().ok_or("missing 'backup'")?)
+                    .map_err(|e| format!("not a datu identity backup: {e}"))?;
             let passphrase = str_field(&body_json, "passphrase")?;
             let rename = body_json
                 .get("rename")
@@ -489,16 +500,15 @@ fn handle_inner(
                 .verify()
                 .map_err(|e| format!("signature verification failed: {e}"))?;
             let id = entry.id().map_err(|e| e.to_string())?;
-            let parties: Vec<serde_json::Value> =
-                SignedDocument::from_payload(&entry.body.payload)
-                    .and_then(|doc| doc.verify().ok())
-                    .map(|verified| {
-                        verified
-                            .iter()
-                            .map(|(role, key)| serde_json::json!({"role": role, "key": key}))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+            let parties: Vec<serde_json::Value> = SignedDocument::from_payload(&entry.body.payload)
+                .and_then(|doc| doc.verify().ok())
+                .map(|verified| {
+                    verified
+                        .iter()
+                        .map(|(role, key)| serde_json::json!({"role": role, "key": key}))
+                        .collect()
+                })
+                .unwrap_or_default();
             respond_json(
                 stream,
                 "200 OK",
@@ -520,7 +530,10 @@ fn handle_inner(
             let passphrase = str_field(&body_json, "passphrase")?;
             let identity = load_guarded(&wallet, &name, &passphrase)?;
             let request: SignRequest = serde_json::from_value(
-                body_json.get("request").cloned().ok_or("missing 'request'")?,
+                body_json
+                    .get("request")
+                    .cloned()
+                    .ok_or("missing 'request'")?,
             )
             .map_err(|e| format!("bad sign request: {e}"))?;
             let entry = entry_from_sign_request(&identity, &request)?;
@@ -585,12 +598,14 @@ fn check_access(
     origins: &[String],
 ) -> Result<(), (&'static str, String)> {
     if let Some(origin) = headers.get("origin") {
-        let allowed = origin.starts_with("chrome-extension://")
-            || origins.iter().any(|o| o == origin);
+        let allowed =
+            origin.starts_with("chrome-extension://") || origins.iter().any(|o| o == origin);
         if !allowed {
             return Err((
                 "403 Forbidden",
-                format!("origin '{origin}' is not allowed - restart the bridge with --allow-origin"),
+                format!(
+                    "origin '{origin}' is not allowed - restart the bridge with --allow-origin"
+                ),
             ));
         }
     }
@@ -699,9 +714,7 @@ fn string_list(body: &serde_json::Value, name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn read_request(
-    stream: &TcpStream,
-) -> Option<(String, String, Vec<u8>, HashMap<String, String>)> {
+fn read_request(stream: &TcpStream) -> Option<(String, String, Vec<u8>, HashMap<String, String>)> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
@@ -736,7 +749,12 @@ fn read_request(
     Some((method, path, body, headers))
 }
 
-fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) -> Result<(), String> {
+fn respond(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> Result<(), String> {
     // Access-Control-Allow-Private-Network: modern Chrome (Private Network
     // Access / Local Network Access) sends an OPTIONS preflight carrying
     // `Access-Control-Request-Private-Network: true` before letting an
@@ -754,7 +772,11 @@ fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str)
         .map_err(|e| e.to_string())
 }
 
-fn respond_json(stream: &mut TcpStream, status: &str, value: &serde_json::Value) -> Result<(), String> {
+fn respond_json(
+    stream: &mut TcpStream,
+    status: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
     let body = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     respond(stream, status, "application/json; charset=utf-8", &body)
 }
@@ -788,9 +810,17 @@ mod tests {
     use serde_json::json;
     use std::time::{Duration, Instant};
 
-    fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: &str) -> (String, String) {
+    fn http(
+        port: u16,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: &str,
+    ) -> (String, String) {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let auth = token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
+        let auth = token
+            .map(|t| format!("Authorization: Bearer {t}\r\n"))
+            .unwrap_or_default();
         stream
             .write_all(
                 format!(
@@ -848,7 +878,10 @@ mod tests {
             None,
             &json!({"name": "issuer", "passphrase": "issuer pass"}).to_string(),
         );
-        assert!(status.contains("401"), "unpaired calls are refused: {status}");
+        assert!(
+            status.contains("401"),
+            "unpaired calls are refused: {status}"
+        );
 
         let (status, body) = http(
             port,
@@ -866,8 +899,8 @@ mod tests {
             &json!({"name": "holder", "passphrase": "holder pass"}).to_string(),
         );
         assert!(status.contains("200"), "{status} {body}");
-        let holder_seal = serde_json::from_str::<serde_json::Value>(&body).unwrap()
-            ["identity"]["seal_public"]
+        let holder_seal = serde_json::from_str::<serde_json::Value>(&body).unwrap()["identity"]
+            ["seal_public"]
             .as_str()
             .unwrap()
             .to_string();
@@ -886,9 +919,15 @@ mod tests {
             })
             .to_string(),
         );
-        assert!(status.contains("200"), "seal-deferred failed: {status} {body}");
+        assert!(
+            status.contains("200"),
+            "seal-deferred failed: {status} {body}"
+        );
         let sealed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(sealed["document"]["owner_name"]["sealed"], "datu-sealed-deferred-v2");
+        assert_eq!(
+            sealed["document"]["owner_name"]["sealed"],
+            "datu-sealed-deferred-v2"
+        );
         assert!(sealed["releases"]["owner_name"].as_str().is_some());
 
         // The issuer-side release: the bridge turns the secret into the key
@@ -905,7 +944,10 @@ mod tests {
             })
             .to_string(),
         );
-        assert!(status.contains("200"), "release-deferred failed: {status} {body}");
+        assert!(
+            status.contains("200"),
+            "release-deferred failed: {status} {body}"
+        );
         let released: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(released["share"]["sealed"], "datu-share-v2");
         let release = released["share"].clone();
@@ -924,7 +966,10 @@ mod tests {
             })
             .to_string(),
         );
-        assert!(status.contains("400"), "non-holder refused: {status} {body}");
+        assert!(
+            status.contains("400"),
+            "non-holder refused: {status} {body}"
+        );
         assert!(body.contains("another holder"), "{body}");
 
         // The FFI action name works as a route alias.
@@ -942,7 +987,10 @@ mod tests {
             })
             .to_string(),
         );
-        assert!(status.contains("200"), "holder open failed: {status} {body}");
+        assert!(
+            status.contains("200"),
+            "holder open failed: {status} {body}"
+        );
         let opened: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(opened["value"], json!("Amina"));
     }

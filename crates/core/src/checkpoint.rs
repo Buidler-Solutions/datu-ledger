@@ -1,12 +1,12 @@
 use crate::entry::parse_key;
 use crate::error::{Error, Result};
 use crate::merkle::{merkle_proof, merkle_root, merkle_root_from_proof};
-use serde::{Deserialize, Serialize};
 use crate::pq;
 use blake3;
 use borsh::{BorshDeserialize, BorshSerialize};
 use ed25519_dalek::{Signature, Signer as EdSigner, SigningKey, Verifier};
 use fips204::traits::Signer as PqSigner;
+use serde::{Deserialize, Serialize};
 
 /// Content address of a checkpoint: BLAKE3-256 over the canonical body.
 pub type CheckpointId = [u8; 32];
@@ -101,7 +101,12 @@ impl Checkpoint {
             .verify(&bytes, &signature)
             .map_err(|e| Error::Crypto(format!("bad signature: {e}")))?;
 
-        pq::verify(&self.body.signer_pq, &self.body.pq_alg, &bytes, &self.pq_signature)?;
+        pq::verify(
+            &self.body.signer_pq,
+            &self.body.pq_alg,
+            &bytes,
+            &self.pq_signature,
+        )?;
 
         Ok(())
     }
@@ -179,8 +184,10 @@ impl CoverageProof {
                 self.count, checkpoint.body.entries_count
             )));
         }
-        let index = usize::try_from(self.index).map_err(|_| malformed("proof index out of range"))?;
-        let count = usize::try_from(self.count).map_err(|_| malformed("proof count out of range"))?;
+        let index =
+            usize::try_from(self.index).map_err(|_| malformed("proof index out of range"))?;
+        let count =
+            usize::try_from(self.count).map_err(|_| malformed("proof count out of range"))?;
         let root = merkle_root_from_proof(&entry_id, index, count, &siblings)
             .ok_or_else(|| malformed("proof path does not describe that position"))?;
         if root != checkpoint.body.entry_ids_root {

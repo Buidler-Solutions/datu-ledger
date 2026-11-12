@@ -18,8 +18,7 @@ pub type PqPublicKey = ml_dsa_65::PublicKey;
 pub type PqPrivateKey = ml_dsa_65::PrivateKey;
 
 pub fn keypair() -> Result<(PqPublicKey, PqPrivateKey)> {
-    ml_dsa_65::try_keygen()
-        .map_err(|e| Error::Crypto(format!("ml-dsa-65 keygen failed: {e}")))
+    ml_dsa_65::try_keygen().map_err(|e| Error::Crypto(format!("ml-dsa-65 keygen failed: {e}")))
 }
 
 pub fn pk_to_hex(pk: &PqPublicKey) -> String {
@@ -31,21 +30,19 @@ pub fn sk_to_hex(sk: &PqPrivateKey) -> String {
 }
 
 pub fn pk_from_hex(s: &str) -> Result<PqPublicKey> {
-    let bytes =
-        hex::decode(s).map_err(|e| Error::Crypto(format!("bad pq key hex: {e}")))?;
-    let arr: [u8; PK_LEN] = bytes.try_into().map_err(|_| {
-        Error::Crypto(format!("ml-dsa-65 public key must be {PK_LEN} bytes"))
-    })?;
+    let bytes = hex::decode(s).map_err(|e| Error::Crypto(format!("bad pq key hex: {e}")))?;
+    let arr: [u8; PK_LEN] = bytes
+        .try_into()
+        .map_err(|_| Error::Crypto(format!("ml-dsa-65 public key must be {PK_LEN} bytes")))?;
     PqPublicKey::try_from_bytes(arr)
         .map_err(|e| Error::Crypto(format!("bad ml-dsa-65 public key: {e}")))
 }
 
 pub fn sk_from_hex(s: &str) -> Result<PqPrivateKey> {
-    let bytes =
-        hex::decode(s).map_err(|e| Error::Crypto(format!("bad pq key hex: {e}")))?;
-    let arr: [u8; SK_LEN] = bytes.try_into().map_err(|_| {
-        Error::Crypto(format!("ml-dsa-65 secret key must be {SK_LEN} bytes"))
-    })?;
+    let bytes = hex::decode(s).map_err(|e| Error::Crypto(format!("bad pq key hex: {e}")))?;
+    let arr: [u8; SK_LEN] = bytes
+        .try_into()
+        .map_err(|_| Error::Crypto(format!("ml-dsa-65 secret key must be {SK_LEN} bytes")))?;
     PqPrivateKey::try_from_bytes(arr)
         .map_err(|e| Error::Crypto(format!("bad ml-dsa-65 secret key: {e}")))
 }
@@ -64,9 +61,9 @@ pub fn verify(pk_hex: &str, alg: &str, msg: &[u8], sig_bytes: &[u8]) -> Result<(
         )));
     }
     let pk = pk_from_hex(pk_hex)?;
-    let arr: [u8; SIG_LEN] = sig_bytes.try_into().map_err(|_| {
-        Error::Crypto(format!("ml-dsa-65 signature must be {SIG_LEN} bytes"))
-    })?;
+    let arr: [u8; SIG_LEN] = sig_bytes
+        .try_into()
+        .map_err(|_| Error::Crypto(format!("ml-dsa-65 signature must be {SIG_LEN} bytes")))?;
     if pk.verify(msg, &arr, &[]) {
         Ok(())
     } else {

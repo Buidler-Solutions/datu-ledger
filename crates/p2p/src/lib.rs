@@ -218,7 +218,10 @@ pub fn verify_hello(hello: &NodeHello) -> Result<(), String> {
         VerifyingKey::from_bytes(&key_bytes).map_err(|_| "bad hello node_key".to_string())?;
     let signature = Signature::from_bytes(&hello.signature);
     verifying
-        .verify(&hello_bytes(&hello.node_key, &hello.network_id, hello.timestamp_ms), &signature)
+        .verify(
+            &hello_bytes(&hello.node_key, &hello.network_id, hello.timestamp_ms),
+            &signature,
+        )
         .map_err(|_| "hello signature does not verify".to_string())?;
     let now = now_ms();
     let skew = now.abs_diff(hello.timestamp_ms);
@@ -286,12 +289,9 @@ pub fn answer(request: &PullRequest, store: &Store) -> Result<ServerMessage, Str
     if request.magic != MAGIC {
         return Err("bad protocol magic (this is a DATUP2P1 port)".into());
     }
-    let bloom = datu_core::BloomFilter::from_parts(
-        request.bloom_m,
-        request.bloom_k,
-        &request.bloom_bits,
-    )
-    .ok_or_else(|| "malformed bloom filter".to_string())?;
+    let bloom =
+        datu_core::BloomFilter::from_parts(request.bloom_m, request.bloom_k, &request.bloom_bits)
+            .ok_or_else(|| "malformed bloom filter".to_string())?;
     let limit = request.limit.clamp(1, 2000) as usize;
     let (entries, cursor, more) = store
         .missing_page(&bloom, request.cursor, limit)
@@ -502,7 +502,10 @@ pub fn handle_connection_with_budget(
             }
         }
     } else {
-        refuse(&mut stream, "unknown frame (expected DATUP2P1 or DATUHEL1)".into());
+        refuse(
+            &mut stream,
+            "unknown frame (expected DATUP2P1 or DATUHEL1)".into(),
+        );
     }
 }
 
@@ -598,8 +601,8 @@ pub fn pull_and_merge(
                     Ok(false) => {}
                     Err(e) => {
                         return Err(format!(
-                            "peer {peer_addr} serves a contradictory checkpoint: {e} - fork evidence"
-                        ))
+                        "peer {peer_addr} serves a contradictory checkpoint: {e} - fork evidence"
+                    ))
                     }
                 }
             }
@@ -608,6 +611,6 @@ pub fn pull_and_merge(
             if !response.more || cursor.is_none() {
                 return Ok(stats);
             }
-    }
+        }
     }
 }

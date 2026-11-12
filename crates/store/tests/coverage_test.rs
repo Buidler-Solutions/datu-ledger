@@ -69,7 +69,13 @@ fn proofs_survive_a_growing_ledger() {
     // The witness signs what it has seen, then the ledger grows.
     let checkpoint = checkpoint_over(&server, &store, 0, None);
     store.append_checkpoint(&checkpoint).unwrap();
-    let later = feed(&Keys { ed: SigningKey::from_bytes(&[7u8; 32]), pq: datu_core::pq::keypair().unwrap().1 }, 2);
+    let later = feed(
+        &Keys {
+            ed: SigningKey::from_bytes(&[7u8; 32]),
+            pq: datu_core::pq::keypair().unwrap().1,
+        },
+        2,
+    );
     for e in &later {
         store.insert_entry(e).unwrap();
     }
@@ -103,7 +109,9 @@ fn proofs_survive_a_growing_ledger() {
         &server.pq,
     )
     .unwrap();
-    let err = store.coverage_proof(&early[0].id().unwrap(), &foreign).unwrap_err();
+    let err = store
+        .coverage_proof(&early[0].id().unwrap(), &foreign)
+        .unwrap_err();
     assert!(format!("{err}").contains("cannot reconstruct"), "{err}");
 }
 

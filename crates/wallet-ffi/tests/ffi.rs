@@ -40,8 +40,14 @@ fn create_and_list_identities() {
 #[test]
 fn short_passphrase_is_rejected() {
     let (core, _dir) = temp_core();
-    let out = request(&core, json!({"action": "create", "name": "x", "passphrase": "short"}));
-    assert!(out["error"].as_str().unwrap().contains("at least 8 characters"));
+    let out = request(
+        &core,
+        json!({"action": "create", "name": "x", "passphrase": "short"}),
+    );
+    assert!(out["error"]
+        .as_str()
+        .unwrap()
+        .contains("at least 8 characters"));
 }
 
 #[test]
@@ -57,7 +63,10 @@ fn wrong_passphrase_is_an_error_and_throttles() {
             json!({"action": "party-sign", "name": "amina", "passphrase": "wrong passphrase", "role": "holder", "kind": "land.title.application", "document": {"parcel": "pk-7"}}),
         );
         assert!(out["error"].is_string(), "attempt {i} should fail: {out}");
-        assert!(!out["error"].as_str().unwrap().contains("too many"), "attempt {i} must not be locked out yet");
+        assert!(
+            !out["error"].as_str().unwrap().contains("too many"),
+            "attempt {i} must not be locked out yet"
+        );
     }
     // Sixth attempt - even with the RIGHT passphrase - is locked out.
     let out = request(
@@ -65,7 +74,10 @@ fn wrong_passphrase_is_an_error_and_throttles() {
         json!({"action": "party-sign", "name": "amina", "passphrase": "correct horse battery", "role": "holder", "kind": "land.title.application", "document": {"parcel": "pk-7"}}),
     );
     let err = out["error"].as_str().expect("lockout error");
-    assert!(err.contains("too many wrong passphrases"), "expected lockout, got: {err}");
+    assert!(
+        err.contains("too many wrong passphrases"),
+        "expected lockout, got: {err}"
+    );
 }
 
 #[test]
@@ -86,13 +98,22 @@ fn party_sign_and_verify() {
     let parties = document["parties"].as_array().expect("parties");
     assert_eq!(parties.len(), 1);
     assert_eq!(parties[0]["role"], "holder");
-    assert!(parties[0]["pq_signature"].is_string(), "consent must be hybrid-signed");
+    assert!(
+        parties[0]["pq_signature"].is_string(),
+        "consent must be hybrid-signed"
+    );
 
     // The signed document must verify with the ledger's own verifier.
     let doc: datu_core::parties::SignedDocument =
         serde_json::from_value(document.clone()).expect("deserializes as SignedDocument");
     let verified = doc.verify().expect("signature verifies");
-    assert_eq!(verified, vec![("holder".to_string(), made["identity"]["ed_public"].as_str().unwrap().to_string())]);
+    assert_eq!(
+        verified,
+        vec![(
+            "holder".to_string(),
+            made["identity"]["ed_public"].as_str().unwrap().to_string()
+        )]
+    );
 }
 
 #[test]
@@ -110,8 +131,14 @@ fn seal_and_open_roundtrip() {
     assert_eq!(sealed["ok"], json!(true), "seal failed: {sealed}");
     assert_eq!(sealed["sealed"], json!(2));
     assert_eq!(sealed["readers"], json!(1));
-    assert!(sealed["document"]["holder_name"].is_object(), "field must be replaced by a sealed object");
-    assert_eq!(sealed["document"]["parcel"], "pk-7", "unlisted field stays public");
+    assert!(
+        sealed["document"]["holder_name"].is_object(),
+        "field must be replaced by a sealed object"
+    );
+    assert_eq!(
+        sealed["document"]["parcel"], "pk-7",
+        "unlisted field stays public"
+    );
 
     let opened = request(
         &core,
@@ -145,7 +172,11 @@ fn sign_entry_produces_a_node_submittable_envelope() {
         &core,
         json!({"action": "verify-entry", "entry": signed["entry"].clone()}),
     );
-    assert_eq!(verified["ok"], json!(true), "verify-entry failed: {verified}");
+    assert_eq!(
+        verified["ok"],
+        json!(true),
+        "verify-entry failed: {verified}"
+    );
     assert_eq!(verified["id"], signed["id"]);
     assert_eq!(verified["namespace"], "test.ffi");
 
@@ -161,7 +192,11 @@ fn sign_entry_produces_a_node_submittable_envelope() {
         &core,
         json!({"action": "verify-entry", "entry": chained["entry"].clone()}),
     );
-    assert_eq!(verified["ok"], json!(true), "chained verify failed: {verified}");
+    assert_eq!(
+        verified["ok"],
+        json!(true),
+        "chained verify failed: {verified}"
+    );
 }
 
 #[test]
@@ -192,7 +227,11 @@ fn export_import_roundtrip_across_cores() {
         &core_b,
         json!({"action": "sign-entry", "name": "mover", "passphrase": "travel passphrase", "request": {"namespace": "test.move", "seq": 1, "payload_json": {"moved": true}}}),
     );
-    assert_eq!(signed["ok"], json!(true), "imported identity cannot sign: {signed}");
+    assert_eq!(
+        signed["ok"],
+        json!(true),
+        "imported identity cannot sign: {signed}"
+    );
     assert_eq!(
         signed["entry"]["author"], imported["identity"]["ed_public"],
         "imported keys must match the backup metadata"
@@ -203,11 +242,17 @@ fn export_import_roundtrip_across_cores() {
 fn unknown_action_and_missing_fields_are_json_errors() {
     let (core, _dir) = temp_core();
     let out = request(&core, json!({"action": "nope"}));
-    assert!(out["error"].as_str().unwrap().contains("unknown action 'nope'"));
+    assert!(out["error"]
+        .as_str()
+        .unwrap()
+        .contains("unknown action 'nope'"));
     let out = request(&core, json!({"action": "create"}));
     assert_eq!(out["error"], "missing 'name'");
     let out = ffi::process(&core, "not json");
-    assert!(out.contains("\"error\""), "bad JSON must be a JSON error: {out}");
+    assert!(
+        out.contains("\"error\""),
+        "bad JSON must be a JSON error: {out}"
+    );
 }
 
 #[test]
@@ -221,22 +266,36 @@ fn raw_c_abi_smoke() {
         let c_body = CString::new(body).unwrap();
         let raw = unsafe { ffi::datu_wallet_request(core, c_body.as_ptr()) };
         assert!(!raw.is_null(), "request must return a string");
-        let text = unsafe { CStr::from_ptr(raw) }.to_string_lossy().into_owned();
+        let text = unsafe { CStr::from_ptr(raw) }
+            .to_string_lossy()
+            .into_owned();
         unsafe { ffi::datu_string_free(raw) };
         text
     };
 
-    let made = ask(core, r#"{"action":"create","name":"ffi","passphrase":"correct horse battery"}"#);
-    assert!(made.contains("\"ok\":true"), "create via ABI failed: {made}");
+    let made = ask(
+        core,
+        r#"{"action":"create","name":"ffi","passphrase":"correct horse battery"}"#,
+    );
+    assert!(
+        made.contains("\"ok\":true"),
+        "create via ABI failed: {made}"
+    );
     let listed = ask(core, r#"{"action":"identities"}"#);
-    assert!(listed.contains("\"name\":\"ffi\""), "list via ABI failed: {listed}");
+    assert!(
+        listed.contains("\"name\":\"ffi\""),
+        "list via ABI failed: {listed}"
+    );
 
     unsafe { ffi::datu_wallet_close(core) };
 
     // Null arguments must not crash, and still answer JSON.
-    let raw: *mut c_char = unsafe { ffi::datu_wallet_request(std::ptr::null_mut(), std::ptr::null()) };
+    let raw: *mut c_char =
+        unsafe { ffi::datu_wallet_request(std::ptr::null_mut(), std::ptr::null()) };
     assert!(!raw.is_null());
-    let text = unsafe { CStr::from_ptr(raw) }.to_string_lossy().into_owned();
+    let text = unsafe { CStr::from_ptr(raw) }
+        .to_string_lossy()
+        .into_owned();
     unsafe { ffi::datu_string_free(raw) };
     assert!(text.contains("null handle"), "unexpected: {text}");
 }
@@ -271,7 +330,10 @@ fn deferred_delivery_roundtrip() {
         }),
     );
     assert_eq!(sealed["ok"], json!(true), "seal-deferred failed: {sealed}");
-    assert_eq!(sealed["document"]["owner_name"]["sealed"], "datu-sealed-deferred-v2");
+    assert_eq!(
+        sealed["document"]["owner_name"]["sealed"],
+        "datu-sealed-deferred-v2"
+    );
     assert!(sealed["releases"]["owner_name"].as_str().is_some());
 
     let released = request(
@@ -299,7 +361,10 @@ fn deferred_delivery_roundtrip() {
         }),
     );
     assert!(
-        denied["error"].as_str().unwrap_or("").contains("another holder"),
+        denied["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("another holder"),
         "{denied}"
     );
 

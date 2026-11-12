@@ -191,7 +191,10 @@ where
 /// ejection path for explicit `members`/`writers` keys, which hold no
 /// attestation for [`revoked_by`] to name. Same trust stance - only
 /// revocations authored by a configured root count.
-pub fn revoked_keys_by<'a, I>(entries: I, attestors: &[String]) -> std::collections::BTreeSet<String>
+pub fn revoked_keys_by<'a, I>(
+    entries: I,
+    attestors: &[String],
+) -> std::collections::BTreeSet<String>
 where
     I: IntoIterator<Item = &'a Entry>,
 {
@@ -215,7 +218,13 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
-    fn signed(ns: &str, payload: &[u8], key: &SigningKey, pq: &crate::pq::PqPrivateKey, seq: u64) -> Entry {
+    fn signed(
+        ns: &str,
+        payload: &[u8],
+        key: &SigningKey,
+        pq: &crate::pq::PqPrivateKey,
+        seq: u64,
+    ) -> Entry {
         let body = crate::EntryBody {
             version: crate::ENTRY_VERSION,
             author: String::new(),
@@ -270,7 +279,10 @@ mod tests {
         ];
         let revoked = revoked_by(entries.iter(), &trusted);
         assert!(revoked.contains(&revoked_id));
-        assert!(!revoked.contains(&other_id), "untrusted revokers do not count");
+        assert!(
+            !revoked.contains(&other_id),
+            "untrusted revokers do not count"
+        );
         assert_eq!(revoked.len(), 1, "malformed ids revoke nothing");
     }
 
@@ -294,11 +306,20 @@ mod tests {
         };
         let entries = vec![
             signed(NS_REVOKE, &make(&subject), &root, &root_pq, 0),
-            signed(NS_REVOKE, &make(&hex::encode([4u8; 32])), &stranger, &stranger_pq, 0),
+            signed(
+                NS_REVOKE,
+                &make(&hex::encode([4u8; 32])),
+                &stranger,
+                &stranger_pq,
+                0,
+            ),
         ];
         let revoked = revoked_keys_by(entries.iter(), &trusted);
         assert!(revoked.contains(&hex::encode([3u8; 32])));
-        assert!(!revoked.contains(&hex::encode([4u8; 32])), "untrusted revokers do not count");
+        assert!(
+            !revoked.contains(&hex::encode([4u8; 32])),
+            "untrusted revokers do not count"
+        );
         assert_eq!(revoked.len(), 1);
     }
 

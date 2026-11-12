@@ -6,15 +6,15 @@ use base64::Engine;
 use borsh::BorshDeserialize;
 use clap::{Parser, Subcommand};
 use datu_core::attest::{self, AttestationDoc, CosignDoc};
-use datu_core::contract::{self, ContractSpec};
 use datu_core::checkpoint::CoverageProof;
+use datu_core::contract::{self, ContractSpec};
 use datu_core::fork::{self, ForkEvidence};
 use datu_core::merkle::merkle_root;
 use datu_core::parties::SignedDocument;
 use datu_core::{BloomFilter, Checkpoint, CheckpointBody, Entry, EntryBody};
+use datu_p2p::{sign_hello, NetworkPolicy, NodeHello, NETWORK_POLICY_VERSION};
 use datu_store::{decode_witness_stream, Store, WritePolicy};
 use datu_wallet::wire::{entry_from_sign_request, SignRequest};
-use datu_p2p::{sign_hello, NetworkPolicy, NodeHello, NETWORK_POLICY_VERSION};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::fmt::Display;
@@ -757,7 +757,8 @@ fn cmd_wallet_import(
 fn write_output(out: &Option<PathBuf>, text: &str) -> Result<(), String> {
     match out {
         Some(path) => {
-            std::fs::write(path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            std::fs::write(path, text)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
             println!("written: {}", path.display());
         }
         None => println!("{text}"),
@@ -796,14 +797,10 @@ pub(crate) fn effective_policy(
     let network = read_network(data_dir)?;
     if let Some(net) = &network {
         if let Some(root) = &net.manifest_root {
-            let store =
-                Store::open(&data_dir.join("node.db")).map_err(|e| e.to_string())?;
-            let compiled = datu_store::manifest::compile(
-                &store,
-                &net.network_id,
-                std::slice::from_ref(root),
-            )
-            .map_err(|e| format!("governance manifest: {e}"))?;
+            let store = Store::open(&data_dir.join("node.db")).map_err(|e| e.to_string())?;
+            let compiled =
+                datu_store::manifest::compile(&store, &net.network_id, std::slice::from_ref(root))
+                    .map_err(|e| format!("governance manifest: {e}"))?;
             if let Some(compiled) = compiled {
                 return Ok(match read_only {
                     true => Some(WritePolicy::readonly()),
@@ -883,8 +880,8 @@ fn load_or_wrap_document(input: &Path, kind: Option<&str>) -> Result<SignedDocum
     if !value.is_object() {
         return Err("document must be a JSON object".into());
     }
-    let kind = kind
-        .ok_or("pass --kind (e.g. land.title.application) or an already-signed document")?;
+    let kind =
+        kind.ok_or("pass --kind (e.g. land.title.application) or an already-signed document")?;
     Ok(SignedDocument::new(kind, value))
 }
 
@@ -895,16 +892,28 @@ fn print_policy(policy: &WritePolicy) {
         println!("  mode: validator gate");
         println!(
             "  gated namespaces: {}",
-            if policy.gated.is_empty() { "(none)".to_string() } else { policy.gated.join(", ") }
+            if policy.gated.is_empty() {
+                "(none)".to_string()
+            } else {
+                policy.gated.join(", ")
+            }
         );
     }
     println!(
         "  trust roots:      {}",
-        if policy.attestors.is_empty() { "(none)".to_string() } else { policy.attestors.join(", ") }
+        if policy.attestors.is_empty() {
+            "(none)".to_string()
+        } else {
+            policy.attestors.join(", ")
+        }
     );
     println!(
         "  explicit writers: {}",
-        if policy.writers.is_empty() { "(none)".to_string() } else { policy.writers.join(", ") }
+        if policy.writers.is_empty() {
+            "(none)".to_string()
+        } else {
+            policy.writers.join(", ")
+        }
     );
     if !policy.allow.is_empty() {
         println!(
@@ -916,7 +925,10 @@ fn print_policy(policy: &WritePolicy) {
         println!("  min cosigners:    {}", policy.min_cosigners);
     }
     if !policy.required_roles.is_empty() {
-        println!("  required roles:   {} (party signature required, any key)", policy.required_roles.join(", "));
+        println!(
+            "  required roles:   {} (party signature required, any key)",
+            policy.required_roles.join(", ")
+        );
     }
     for rule in &policy.rules {
         let parts: Vec<String> = rule
@@ -946,7 +958,9 @@ fn print_policy(policy: &WritePolicy) {
         println!("{line}");
     }
     if !policy.readonly {
-        println!("  observers:        unencumbered - a node with no policy.json accepts everything");
+        println!(
+            "  observers:        unencumbered - a node with no policy.json accepts everything"
+        );
     }
 }
 
@@ -1015,10 +1029,13 @@ fn parse_rule(spec: &str) -> Result<datu_store::NamespaceRule, String> {
         None => (rest, None),
     };
     if ns.trim().is_empty() || role.trim().is_empty() {
-        return Err(format!("bad rule '{spec}': namespace and role must be non-empty"));
+        return Err(format!(
+            "bad rule '{spec}': namespace and role must be non-empty"
+        ));
     }
     if let Some(key) = &key {
-        parse_id(key).map_err(|_| format!("rule key '{key}' is not a 32-byte Ed25519 key (hex)"))?;
+        parse_id(key)
+            .map_err(|_| format!("rule key '{key}' is not a 32-byte Ed25519 key (hex)"))?;
     }
     Ok(datu_store::NamespaceRule {
         ns: ns.trim().to_string(),
@@ -1038,7 +1055,9 @@ fn parse_max_per_author(spec: &str) -> Result<(String, u32), String> {
         .split_once(':')
         .ok_or_else(|| format!("bad --max-per-author '{spec}': expected NS:N"))?;
     if ns.trim().is_empty() {
-        return Err(format!("bad --max-per-author '{spec}': namespace must be non-empty"));
+        return Err(format!(
+            "bad --max-per-author '{spec}': namespace must be non-empty"
+        ));
     }
     let cap: u32 = n
         .trim()
@@ -1062,16 +1081,15 @@ fn parse_seal_field(spec: &str) -> Result<(String, String), String> {
     }
 }
 
-fn cmd_wallet_create(
-    data_dir: &Path,
-    name: &str,
-    passphrase: &str,
-) -> Result<(), String> {
+fn cmd_wallet_create(data_dir: &Path, name: &str, passphrase: &str) -> Result<(), String> {
     let wallet = datu_wallet::Wallet::open(data_dir);
     let public = wallet.create(name, passphrase)?;
     println!("identity created: {}", public.name);
     println!("  author  (ed25519):  {}", public.ed_public);
-    println!("  pq      (mldsa65):  {}…", &public.pq_public[..16.min(public.pq_public.len())]);
+    println!(
+        "  pq      (mldsa65):  {}…",
+        &public.pq_public[..16.min(public.pq_public.len())]
+    );
     println!("  seal    (x25519):   {}", public.seal_public);
     println!("keystore encrypted with your passphrase - keys never leave this wallet unencrypted");
     Ok(())
@@ -1084,7 +1102,10 @@ fn cmd_wallet_list(data_dir: &Path) -> Result<(), String> {
         println!("no identities - run `datu wallet create --name NAME`");
         return Ok(());
     }
-    println!("{:<12}  {:<16}  {:<8}  {}", "name", "author(ed)", "created", "seal key (x25519)");
+    println!(
+        "{:<12}  {:<16}  {:<8}  {}",
+        "name", "author(ed)", "created", "seal key (x25519)"
+    );
     for id in identities {
         println!(
             "{:<12}  {:<16}  {:<8}  {}",
@@ -1106,7 +1127,10 @@ fn cmd_wallet_show(data_dir: &Path, name: &str) -> Result<(), String> {
         .ok_or_else(|| format!("identity '{name}' not found"))?;
     println!("name:            {}", identity.name);
     println!("author (ed25519): {}", identity.ed_public);
-    println!("pq (mldsa65):     {}…", &identity.pq_public[..16.min(identity.pq_public.len())]);
+    println!(
+        "pq (mldsa65):     {}…",
+        &identity.pq_public[..16.min(identity.pq_public.len())]
+    );
     println!("seal (x25519):    {}", identity.seal_public);
     println!("publish this seal key so others can encrypt fields to you");
     Ok(())
@@ -1121,8 +1145,8 @@ fn cmd_wallet_sign(
 ) -> Result<(), String> {
     let wallet = datu_wallet::Wallet::open(data_dir);
     let identity = wallet.load(name, passphrase)?;
-    let text =
-        std::fs::read_to_string(request_path).map_err(|e| format!("cannot read {}: {e}", request_path.display()))?;
+    let text = std::fs::read_to_string(request_path)
+        .map_err(|e| format!("cannot read {}: {e}", request_path.display()))?;
     let request: SignRequest =
         serde_json::from_str(&text).map_err(|e| format!("bad sign request: {e}"))?;
     let entry = entry_from_sign_request(&identity, &request)?;
@@ -1130,7 +1154,12 @@ fn cmd_wallet_sign(
     let json = serde_json::to_string_pretty(&s(serve::entry_full_json(&entry))?)
         .map_err(|e| e.to_string())?;
     write_output(out, &json)?;
-    println!("signed as {} seq {} → entry {}", short(&identity.public.ed_public), entry.body.seq, hex::encode(id));
+    println!(
+        "signed as {} seq {} → entry {}",
+        short(&identity.public.ed_public),
+        entry.body.seq,
+        hex::encode(id)
+    );
     println!("submit: POST /v1/entries to any node");
     Ok(())
 }
@@ -1147,8 +1176,8 @@ fn cmd_wallet_seal(
 ) -> Result<(), String> {
     let wallet = datu_wallet::Wallet::open(data_dir);
     let identity = wallet.load(name, passphrase)?;
-    let text =
-        std::fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let text = std::fs::read_to_string(input)
+        .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let mut document: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("input must be a JSON object: {e}"))?;
     // Readers = explicit --to keys plus seal keys published inside the
@@ -1201,8 +1230,8 @@ fn cmd_wallet_open(
 ) -> Result<(), String> {
     let wallet = datu_wallet::Wallet::open(data_dir);
     let identity = wallet.load(name, passphrase)?;
-    let text =
-        std::fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let text = std::fs::read_to_string(input)
+        .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let mut document: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("input must be a JSON object: {e}"))?;
     let mut opened = identity.open_fields(&mut document)?;
@@ -1220,7 +1249,10 @@ fn cmd_wallet_open(
     let (opened, skipped) = opened;
     let json = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
     write_output(out, &json)?;
-    println!("{opened} field(s) decrypted for {}, {skipped} sealed for other readers", identity.public.name);
+    println!(
+        "{opened} field(s) decrypted for {}, {skipped} sealed for other readers",
+        identity.public.name
+    );
     Ok(())
 }
 
@@ -1240,8 +1272,8 @@ fn cmd_wallet_seal_deferred(
 ) -> Result<(), String> {
     let wallet = datu_wallet::Wallet::open(data_dir);
     let identity = wallet.load(name, passphrase)?;
-    let text =
-        std::fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let text = std::fs::read_to_string(input)
+        .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let mut document: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("input must be a JSON object: {e}"))?;
     let holder_key = match (to, to_field) {
@@ -1305,8 +1337,8 @@ fn cmd_wallet_release_deferred(
     passphrase: Option<&str>,
     out: &Option<PathBuf>,
 ) -> Result<(), String> {
-    let text =
-        std::fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let text = std::fs::read_to_string(input)
+        .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let document: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("input must be a JSON object: {e}"))?;
     let field_value = document
@@ -1363,8 +1395,8 @@ fn cmd_wallet_open_deferred(
 ) -> Result<(), String> {
     let wallet = datu_wallet::Wallet::open(data_dir);
     let identity = wallet.load(name, passphrase)?;
-    let text =
-        std::fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let text = std::fs::read_to_string(input)
+        .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let document: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("input must be a JSON object: {e}"))?;
     let field_value = document
@@ -1375,8 +1407,8 @@ fn cmd_wallet_open_deferred(
         .map_err(|e| format!("'{field}' is not a deferred-delivery field: {e}"))?;
     let release_text = std::fs::read_to_string(release)
         .map_err(|e| format!("cannot read {}: {e}", release.display()))?;
-    let release_doc: serde_json::Value = serde_json::from_str(&release_text)
-        .map_err(|e| format!("release must be JSON: {e}"))?;
+    let release_doc: serde_json::Value =
+        serde_json::from_str(&release_text).map_err(|e| format!("release must be JSON: {e}"))?;
     let share = datu_wallet::SealedShare::find(&release_doc)
         .ok_or("release file carries no share object (expected a 'datu-share-v2' object)")?;
     let plaintext = datu_wallet::open_deferred(
@@ -1427,8 +1459,7 @@ fn open_node(dir: &Path, policy: Option<WritePolicy>) -> Result<Node, String> {
         ));
     }
     let hex_secret = std::fs::read_to_string(&secret_path).map_err(|e| e.to_string())?;
-    let bytes =
-        hex::decode(hex_secret.trim()).map_err(|_| "corrupt secret.key".to_string())?;
+    let bytes = hex::decode(hex_secret.trim()).map_err(|_| "corrupt secret.key".to_string())?;
     let arr: [u8; 32] = bytes
         .try_into()
         .map_err(|_| "corrupt secret.key".to_string())?;
@@ -1440,8 +1471,7 @@ fn open_node(dir: &Path, policy: Option<WritePolicy>) -> Result<Node, String> {
             dir.display()
         ));
     }
-    let pq_hex =
-        std::fs::read_to_string(&pq_secret_path).map_err(|e| e.to_string())?;
+    let pq_hex = std::fs::read_to_string(&pq_secret_path).map_err(|e| e.to_string())?;
     let pq_key = s(datu_core::pq::sk_from_hex(pq_hex.trim()))?;
     let identity = hex::encode(key.verifying_key().as_bytes());
     let store = s(Store::open_with_policy(&dir.join("node.db"), policy))?;
@@ -1463,11 +1493,8 @@ fn cmd_init(dir: &Path) -> Result<(), String> {
     let pq_secret_path = dir.join("secret.mldsa65");
     let (_pq_pk, pq_key) = s(datu_core::pq::keypair())?;
     std::fs::write(&secret_path, hex::encode(key.to_bytes())).map_err(|e| e.to_string())?;
-    std::fs::write(
-        &pq_secret_path,
-        datu_core::pq::sk_to_hex(&pq_key),
-    )
-    .map_err(|e| e.to_string())?;
+    std::fs::write(&pq_secret_path, datu_core::pq::sk_to_hex(&pq_key))
+        .map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1500,8 +1527,12 @@ fn cmd_genesis(data_dir: &Path) -> Result<(), String> {
     );
     println!("founder:        {}", datu_core::genesis::GENESIS_FOUNDER);
     println!("author key:     {}", genesis.body.author);
-    println!("namespace:      {} (seq 0, the first entry of every ledger)", genesis.body.namespace);
-    let payload: serde_json::Value = s(serde_json::from_slice(&genesis.body.payload).map_err(|e| e.to_string()))?;
+    println!(
+        "namespace:      {} (seq 0, the first entry of every ledger)",
+        genesis.body.namespace
+    );
+    let payload: serde_json::Value =
+        s(serde_json::from_slice(&genesis.body.payload).map_err(|e| e.to_string()))?;
     if let Some(statement) = payload["statement"].as_str() {
         println!();
         for line in statement.lines() {
@@ -1598,8 +1629,7 @@ fn cmd_log(
 
 fn cmd_get(node: &Node, id_hex: String) -> Result<(), String> {
     let id = parse_id(&id_hex)?;
-    let e = s(node.store.get_entry(&id))?
-        .ok_or_else(|| format!("entry {id_hex} not found"))?;
+    let e = s(node.store.get_entry(&id))?.ok_or_else(|| format!("entry {id_hex} not found"))?;
     let json = serde_json::json!({
         "id": hex::encode(s(e.id())?),
         "author": e.body.author,
@@ -1614,7 +1644,10 @@ fn cmd_get(node: &Node, id_hex: String) -> Result<(), String> {
         "signature": hex::encode(e.signature),
         "pq_signature": format!("{}…", hex::encode(&e.pq_signature)[..32].to_string()),
     });
-    println!("{}", serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?
+    );
     Ok(())
 }
 
@@ -1702,13 +1735,10 @@ fn cmd_contract_show(node: &Node, id: String, wasm_out: Option<PathBuf>) -> Resu
     let mut json = serde_json::to_value(&spec).map_err(|e| e.to_string())?;
     // Elide the wasm body: it can be hundreds of KB of base64. `check`
     // executes the rule; `show` describes it.
-    if let (Some(size), Some(serde_json::Value::String(wasm))) = (
-        spec.wasm.as_ref().map(|b| b.len()),
-        json.get_mut("wasm"),
-    ) {
-        *wasm = format!(
-            "<{size} bytes of base64 (elided; 'datu contract check' executes it)>"
-        );
+    if let (Some(size), Some(serde_json::Value::String(wasm))) =
+        (spec.wasm.as_ref().map(|b| b.len()), json.get_mut("wasm"))
+    {
+        *wasm = format!("<{size} bytes of base64 (elided; 'datu contract check' executes it)>");
     }
     println!(
         "{}",
@@ -1729,8 +1759,8 @@ fn cmd_contract_new(
 ) -> Result<(), String> {
     let wasm = match (wasm_file, wasm_b64) {
         (Some(path), None) => {
-            let bytes = std::fs::read(&path)
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             let exports = contract::wasm::check_module(&bytes)?;
             let missing: Vec<&str> = ["memory", "alloc", "evaluate"]
                 .into_iter()
@@ -1805,11 +1835,7 @@ fn cmd_contract_check(node: &Node, id: String) -> Result<(), String> {
             );
             println!(
                 "verdict     {}",
-                if check.admitted {
-                    "ADMITTED"
-                } else {
-                    "DENIED"
-                }
+                if check.admitted { "ADMITTED" } else { "DENIED" }
             );
             if !check.conditions.is_empty() {
                 println!("conditions:");
@@ -1854,7 +1880,10 @@ fn cmd_contract_status(node: &Node, id: String) -> Result<(), String> {
                 outlook.version
             );
             if !outlook.admits.is_empty() {
-                println!("awaits      a '{}' document citing this anchor", outlook.admits);
+                println!(
+                    "awaits      a '{}' document citing this anchor",
+                    outlook.admits
+                );
             }
             println!(
                 "evidence    {} citing entries on this node",
@@ -1905,8 +1934,7 @@ fn cmd_contract_status(node: &Node, id: String) -> Result<(), String> {
 
 fn cmd_checkpoint(node: &Node) -> Result<(), String> {
     let ids = s(node.store.entry_ids())?;
-    let (id, height) =
-        sign_checkpoint_into(&node.store, &node.key, &node.pq_key, &node.identity)?;
+    let (id, height) = sign_checkpoint_into(&node.store, &node.key, &node.pq_key, &node.identity)?;
     let root = merkle_root(&ids);
     println!(
         "checkpoint {} (height {height}) over {} entries, root {}",
@@ -1984,7 +2012,8 @@ fn cmd_bundle_export(node: &Node, mesh: &str, out: &Path) -> Result<(), String> 
 }
 
 fn cmd_bundle_import(node: &Node, mesh: &str, input: &Path) -> Result<(), String> {
-    let bytes = std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let bytes =
+        std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let summary = s(node.store.import_bundle(&bytes, mesh))?;
     println!(
         "imported: {} new entries ({} already present{}), {} new checkpoints ({} already present)",
@@ -2018,7 +2047,10 @@ fn cmd_witness_list(node: &Node) -> Result<(), String> {
             latest.insert(cp.body.signer.clone(), cp);
         }
     }
-    println!("{:<16}  {:>6}  {:>8}  {}", "signer", "height", "entries", "merkle root");
+    println!(
+        "{:<16}  {:>6}  {:>8}  {}",
+        "signer", "height", "entries", "merkle root"
+    );
     for (signer, cp) in &latest {
         println!(
             "{}  {:>6}  {:>8}  {}",
@@ -2044,7 +2076,8 @@ fn cmd_witness_export(node: &Node, mesh: &str, out: &Path) -> Result<(), String>
 }
 
 fn cmd_witness_import(node: &Node, mesh: &str, input: &Path) -> Result<(), String> {
-    let bytes = std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let bytes =
+        std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let summary = s(node.store.import_witness_stream(&bytes, mesh))?;
     println!(
         "imported checkpoints: {} new, {} already present",
@@ -2158,8 +2191,7 @@ fn cmd_witness_verify_proof(input: &Path) -> Result<(), String> {
 }
 
 fn read_witness_stream(path: &Path) -> Result<Vec<Checkpoint>, String> {
-    let bytes =
-        std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let stream = s(decode_witness_stream(&bytes))?;
     Ok(stream.checkpoints)
 }
@@ -2290,9 +2322,10 @@ fn cmd_attest_create(
     claims: String,
     label: Option<String>,
 ) -> Result<(), String> {
-    parse_id(&subject).map_err(|_| "subject must be a 32-byte Ed25519 public key (hex)".to_string())?;
-    let claims: serde_json::Value =
-        serde_json::from_str(&claims).map_err(|e| format!("--claims must be a JSON object: {e}"))?;
+    parse_id(&subject)
+        .map_err(|_| "subject must be a 32-byte Ed25519 public key (hex)".to_string())?;
+    let claims: serde_json::Value = serde_json::from_str(&claims)
+        .map_err(|e| format!("--claims must be a JSON object: {e}"))?;
     if !claims.is_object() {
         return Err("--claims must be a JSON object".into());
     }
@@ -2329,9 +2362,15 @@ fn cmd_attest_create(
         "  attestor: {}  subject: {}{}",
         node.identity,
         short(&subject),
-        label.as_deref().map(|l| format!(" ({l})")).unwrap_or_default()
+        label
+            .as_deref()
+            .map(|l| format!(" ({l})"))
+            .unwrap_or_default()
     );
-    println!("  others can add weight: datu attest cosign --id {}", hex::encode(id));
+    println!(
+        "  others can add weight: datu attest cosign --id {}",
+        hex::encode(id)
+    );
     Ok(())
 }
 
@@ -2368,7 +2407,11 @@ fn cmd_attest_cosign(node: &Node, id_hex: String) -> Result<(), String> {
     if !s(node.store.insert_entry(&entry))? {
         return Err("cosign unexpectedly already present".into());
     }
-    println!("cosigned {id_hex} as {} ({})", short(&node.identity), hex::encode(cosign_id));
+    println!(
+        "cosigned {id_hex} as {} ({})",
+        short(&node.identity),
+        hex::encode(cosign_id)
+    );
     Ok(())
 }
 
@@ -2457,8 +2500,11 @@ fn cmd_attest_revoke(
     Ok(())
 }
 
-
-fn cmd_attest_status(node: &Node, subject: Option<String>, id: Option<String>) -> Result<(), String> {
+fn cmd_attest_status(
+    node: &Node,
+    subject: Option<String>,
+    id: Option<String>,
+) -> Result<(), String> {
     let entries = s(node.store.all_entries())?;
     if let Some(id_hex) = id {
         let id = parse_id(&id_hex)?;
@@ -2470,7 +2516,14 @@ fn cmd_attest_status(node: &Node, subject: Option<String>, id: Option<String>) -
             .ok_or_else(|| format!("{id_hex} is not an identity.attest entry"))?;
         println!("attestation {}", id_hex);
         println!("  attestor: {}", entry.body.author);
-        println!("  subject:  {}{}", doc.subject, doc.label.as_deref().map(|l| format!(" ({l})")).unwrap_or_default());
+        println!(
+            "  subject:  {}{}",
+            doc.subject,
+            doc.label
+                .as_deref()
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default()
+        );
         println!("  claims:   {}", doc.claims);
         let cosigners = attest::cosigners_for(entries.iter(), &id);
         println!("  cosigners ({} distinct):", cosigners.len());
@@ -2505,7 +2558,10 @@ fn cmd_attest_status(node: &Node, subject: Option<String>, id: Option<String>) -
     }
     println!("subject: {subject}");
     let has_feed = s(node.store.latest(&subject))?.is_some();
-    println!("  published on this node: {}", if has_feed { "yes" } else { "no entries seen" });
+    println!(
+        "  published on this node: {}",
+        if has_feed { "yes" } else { "no entries seen" }
+    );
     for (entry, doc) in found {
         let id = s(entry.id())?;
         let cosigners = attest::cosigners_for(entries.iter(), &id);
@@ -2515,7 +2571,11 @@ fn cmd_attest_status(node: &Node, subject: Option<String>, id: Option<String>) -
             short(&hex::encode(id)),
             short(&entry.body.author),
             cosigners.len(),
-            if revoked.is_empty() { "" } else { "  [REVOKED]" }
+            if revoked.is_empty() {
+                ""
+            } else {
+                "  [REVOKED]"
+            }
         );
         if let Some(label) = &doc.label {
             println!("    label: {label}");
@@ -2546,8 +2606,9 @@ fn http_post_json(
         "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         payload.len()
     );
-    let mut stream = TcpStream::connect(host)
-        .map_err(|e| format!("cannot connect to {host}: {e} (is the peer running `datu serve`?)"))?;
+    let mut stream = TcpStream::connect(host).map_err(|e| {
+        format!("cannot connect to {host}: {e} (is the peer running `datu serve`?)")
+    })?;
     stream
         .write_all(request.as_bytes())
         .and_then(|_| stream.write_all(&payload))
@@ -2687,11 +2748,9 @@ fn http_get_json(peer: &str, path: &str) -> Result<serde_json::Value, String> {
         .strip_prefix("http://")
         .unwrap_or(peer)
         .trim_end_matches('/');
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    );
-    let mut stream = TcpStream::connect(host)
-        .map_err(|e| format!("cannot connect to {host}: {e}"))?;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    let mut stream =
+        TcpStream::connect(host).map_err(|e| format!("cannot connect to {host}: {e}"))?;
     stream
         .write_all(request.as_bytes())
         .and_then(|_| stream.flush())
@@ -2775,10 +2834,7 @@ fn pull_peer_http(store: &Store, peer: &str, page: usize) -> Result<SyncStats, S
                 Err(e) => return Err(e.to_string()),
             }
         }
-        for item in response["checkpoints"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-        {
+        for item in response["checkpoints"].as_array().unwrap_or(&Vec::new()) {
             let checkpoint = serve::checkpoint_from_json(item)?;
             match store.append_checkpoint(&checkpoint) {
                 Ok(true) => stats.new_checkpoints += 1,
@@ -2812,7 +2868,8 @@ fn cmd_delta_make(node: &Node, mesh: &str, out: &Path) -> Result<(), String> {
 }
 
 fn cmd_delta_answer(node: &Node, mesh: &str, input: &Path, out: &Path) -> Result<(), String> {
-    let request = std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let request =
+        std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let (bytes, suppressed) = s(node.store.answer_delta(&request, mesh))?;
     std::fs::write(out, &bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
     println!(
@@ -2824,7 +2881,8 @@ fn cmd_delta_answer(node: &Node, mesh: &str, input: &Path, out: &Path) -> Result
 }
 
 fn cmd_delta_merge(node: &Node, mesh: &str, input: &Path) -> Result<(), String> {
-    let bytes = std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let bytes =
+        std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let summary = s(node.store.merge_delta(&bytes, mesh))?;
     println!(
         "merged: {} new entries ({} already present{}), {} new checkpoints ({} already present) - every record verified",
@@ -2928,7 +2986,7 @@ fn cmd_policy_show(data_dir: &Path) -> Result<(), String> {
         }
         None => {
             println!("no policy file - this is a free, open observer node:");
-            println!(  "  it accepts every validly-signed entry, syncs, reads and witnesses.");
+            println!("  it accepts every validly-signed entry, syncs, reads and witnesses.");
             println!("  gate this node with: datu policy init --attestor KEY --ns 'gov.*'");
         }
     }
@@ -2986,8 +3044,7 @@ fn cmd_network_init(
     }
     if mode == "permissioned" && members.is_empty() && roots.is_empty() {
         return Err(
-            "a permissioned network needs at least one --member or --root (who may join?)"
-                .into(),
+            "a permissioned network needs at least one --member or --root (who may join?)".into(),
         );
     }
     let net = NetworkPolicy {
@@ -3020,7 +3077,11 @@ fn cmd_network_init(
 
 fn cmd_manifest_init(data_dir: &Path, network_id: String, out: PathBuf) -> Result<(), String> {
     let node = load_node_bootstrap(data_dir)?;
-    if network_id.is_empty() || !network_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    if network_id.is_empty()
+        || !network_id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
         return Err(
             "--network-id must be 1+ chars of [a-z0-9-] (the chain lives at gov.mesh.<id>.policy)"
                 .into(),
@@ -3031,28 +3092,46 @@ fn cmd_manifest_init(data_dir: &Path, network_id: String, out: PathBuf) -> Resul
     policy.gated = vec!["gov.*".into()];
     policy.attestors = vec![node.identity.clone()];
     let mut doc = datu_store::ManifestDoc::new(&network_id, vec![node.identity.clone()], policy);
-    doc.note = Some("founding manifest - edit the policy, keep the roots, then `datu manifest publish`".into());
+    doc.note = Some(
+        "founding manifest - edit the policy, keep the roots, then `datu manifest publish`".into(),
+    );
     let json = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     std::fs::write(&out, &json).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
     println!("manifest template: {}", out.display());
-    println!("  network:  {} (chain namespace: {})", network_id, datu_store::manifest_namespace(&network_id));
-    println!("  founder:  {} (this node - signs the first entry)", short(&node.identity));
-    println!("next: edit the template, `datu manifest publish --file {}`, then pin the root", out.display());
+    println!(
+        "  network:  {} (chain namespace: {})",
+        network_id,
+        datu_store::manifest_namespace(&network_id)
+    );
+    println!(
+        "  founder:  {} (this node - signs the first entry)",
+        short(&node.identity)
+    );
+    println!(
+        "next: edit the template, `datu manifest publish --file {}`, then pin the root",
+        out.display()
+    );
     println!("      on every member: `datu network init --mode permissioned --network-id {network_id} --manifest-root {}`", node.identity);
     Ok(())
 }
 
 fn cmd_manifest_publish(data_dir: &Path, file: PathBuf, accept_stale: bool) -> Result<(), String> {
     let node = load_node_bootstrap(data_dir)?;
-    let text =
-        std::fs::read_to_string(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    let text = std::fs::read_to_string(&file)
+        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let mut doc: datu_store::ManifestDoc =
         serde_json::from_str(&text).map_err(|e| format!("bad manifest JSON: {e}"))?;
     if doc.version != 1 {
-        return Err(format!("unsupported manifest version {} (expected 1)", doc.version));
+        return Err(format!(
+            "unsupported manifest version {} (expected 1)",
+            doc.version
+        ));
     }
     if doc.network_id.is_empty()
-        || !doc.network_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || !doc
+            .network_id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
         return Err("manifest network_id must be 1+ chars of [a-z0-9-]".into());
     }
@@ -3131,7 +3210,12 @@ fn cmd_manifest_publish(data_dir: &Path, file: PathBuf, accept_stale: bool) -> R
         namespace: ns.clone(),
         seq,
         prev,
-        refs: supersedes.as_ref().map(|p| parse_id(p)).transpose()?.into_iter().collect(),
+        refs: supersedes
+            .as_ref()
+            .map(|p| parse_id(p))
+            .transpose()?
+            .into_iter()
+            .collect(),
         timestamp_ms: now_ms(),
         payload,
     };
@@ -3141,7 +3225,14 @@ fn cmd_manifest_publish(data_dir: &Path, file: PathBuf, accept_stale: bool) -> R
         return Err("manifest unexpectedly already present".into());
     }
     println!("manifest published {} ({} seq {seq})", hex::encode(id), ns);
-    println!("  roots:       {}", doc.roots.iter().map(|k| short(k).to_string()).collect::<Vec<_>>().join(", "));
+    println!(
+        "  roots:       {}",
+        doc.roots
+            .iter()
+            .map(|k| short(k).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     match &doc.supersedes {
         Some(prev_id) => println!("  supersedes:  {prev_id}"),
         None => println!("  founding manifest - pin its root in every member's network.json:"),
@@ -3222,14 +3313,20 @@ fn print_manifest_status(st: &datu_store::ManifestStatus, network_id: &str, root
             "  manifest:   {} by {}{}",
             short(id),
             short(author),
-            st.published_ms.map(|t| format!(" (published {t})")).unwrap_or_default()
+            st.published_ms
+                .map(|t| format!(" (published {t})"))
+                .unwrap_or_default()
         ),
         _ => println!("  manifest:   none verified"),
     }
     if !st.roots.is_empty() {
         println!(
             "  roots:      {} (they may sign the next manifest)",
-            st.roots.iter().map(|k| short(k).to_string()).collect::<Vec<_>>().join(", ")
+            st.roots
+                .iter()
+                .map(|k| short(k).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
     if !st.chain_ids.is_empty() {
@@ -3237,10 +3334,14 @@ fn print_manifest_status(st: &datu_store::ManifestStatus, network_id: &str, root
     }
     match &st.corroborated_by {
         Some(signer) => println!("  evidence:   independent checkpoint by {}", short(signer)),
-        None => println!("  evidence:   none - no independent checkpoint at or after this manifest"),
+        None => {
+            println!("  evidence:   none - no independent checkpoint at or after this manifest")
+        }
     }
     for id in &st.missing_predecessors {
-        println!("  missing:    {id} - a manifest this node holds supersedes it (this view is behind)");
+        println!(
+            "  missing:    {id} - a manifest this node holds supersedes it (this view is behind)"
+        );
     }
     for (id, author) in &st.conflicts {
         println!("  claim:      {} by {}", short(id), short(author));
@@ -3276,11 +3377,8 @@ fn cmd_manifest_history(data_dir: &Path) -> Result<(), String> {
     let Some((network_id, root)) = manifest_pin(data_dir)? else {
         return no_pin_hint();
     };
-    let Some(compiled) = datu_store::manifest::compile(
-        &node.store,
-        &network_id,
-        std::slice::from_ref(&root),
-    )?
+    let Some(compiled) =
+        datu_store::manifest::compile(&node.store, &network_id, std::slice::from_ref(&root))?
     else {
         return Err(format!(
             "no verified manifest chain for {network_id} - `datu manifest status` says why"
@@ -3290,7 +3388,11 @@ fn cmd_manifest_history(data_dir: &Path) -> Result<(), String> {
         "manifest history: {} ({} entr{}, oldest first)",
         datu_store::manifest_namespace(&network_id),
         compiled.chain.len(),
-        if compiled.chain.len() == 1 { "y" } else { "ies" }
+        if compiled.chain.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        }
     );
     for (i, (id, author, note)) in compiled.chain.iter().enumerate() {
         let published = parse_id(id)
@@ -3307,7 +3409,13 @@ fn cmd_manifest_history(data_dir: &Path) -> Result<(), String> {
     }
     println!(
         "  head roots: {}",
-        compiled.doc.roots.iter().map(|k| short(k).to_string()).collect::<Vec<_>>().join(", ")
+        compiled
+            .doc
+            .roots
+            .iter()
+            .map(|k| short(k).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     Ok(())
 }
@@ -3325,7 +3433,10 @@ fn cmd_manifest_conflicts(data_dir: &Path) -> Result<(), String> {
         Some(&node.identity),
     )?;
     if st.conflicts.is_empty() && st.missing_predecessors.is_empty() {
-        println!("no competing manifest claims on this node ({})", st.freshness.as_str());
+        println!(
+            "no competing manifest claims on this node ({})",
+            st.freshness.as_str()
+        );
         return Ok(());
     }
     println!(
@@ -3335,7 +3446,12 @@ fn cmd_manifest_conflicts(data_dir: &Path) -> Result<(), String> {
         st.reason
     );
     for (id, author) in &st.conflicts {
-        println!("  competing claim: {} by {} ({})", id, author, short(author));
+        println!(
+            "  competing claim: {} by {} ({})",
+            id,
+            author,
+            short(author)
+        );
     }
     for id in &st.missing_predecessors {
         println!("  unlinked: a held manifest supersedes {id}, which this node does not have");
@@ -3379,7 +3495,9 @@ fn cmd_manifest_verify(data_dir: &Path, file: Option<PathBuf>) -> Result<(), Str
                     .ok_or_else(|| format!("manifest entry {id} is missing from this store"))?;
                 s(entry.verify())?;
                 if hex::encode(s(entry.id())?) != *id {
-                    return Err(format!("manifest entry {id} does not match its content address"));
+                    return Err(format!(
+                        "manifest entry {id} does not match its content address"
+                    ));
                 }
                 println!(
                     "  #{i} {} ok - signatures valid, content-addressed, by {}",
@@ -3387,28 +3505,33 @@ fn cmd_manifest_verify(data_dir: &Path, file: Option<PathBuf>) -> Result<(), Str
                     short(&entry.body.author)
                 );
             }
-            println!("  result: chain verifies; freshness is {}", st.freshness.as_str());
+            println!(
+                "  result: chain verifies; freshness is {}",
+                st.freshness.as_str()
+            );
             Ok(())
         }
         Some(path) => cmd_manifest_verify_file(&node, data_dir, &path),
     }
 }
 
-fn cmd_manifest_verify_file(
-    node: &Node,
-    data_dir: &Path,
-    path: &Path,
-) -> Result<(), String> {
+fn cmd_manifest_verify_file(node: &Node, data_dir: &Path, path: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let doc: datu_store::ManifestDoc =
         serde_json::from_str(&text).map_err(|e| format!("bad manifest JSON: {e}"))?;
     println!("manifest file: {}", path.display());
     if doc.version != 1 {
-        return Err(format!("unsupported manifest version {} (expected 1)", doc.version));
+        return Err(format!(
+            "unsupported manifest version {} (expected 1)",
+            doc.version
+        ));
     }
     if doc.network_id.is_empty()
-        || !doc.network_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || !doc
+            .network_id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
         return Err("manifest network_id must be 1+ chars of [a-z0-9-]".into());
     }
@@ -3431,7 +3554,11 @@ fn cmd_manifest_verify_file(
     println!("  network:     {}", doc.network_id);
     println!(
         "  roots:       {}",
-        doc.roots.iter().map(|k| short(k).to_string()).collect::<Vec<_>>().join(", ")
+        doc.roots
+            .iter()
+            .map(|k| short(k).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     if let Some((pinned_net, _)) = manifest_pin(data_dir)? {
         if pinned_net != doc.network_id {
@@ -3475,7 +3602,10 @@ fn cmd_manifest_verify_file(
     if !authorized {
         return Err("this node cannot publish this manifest as it stands".into());
     }
-    println!("  result:      publishable from here (`datu manifest publish --file {}`)", path.display());
+    println!(
+        "  result:      publishable from here (`datu manifest publish --file {}`)",
+        path.display()
+    );
     Ok(())
 }
 
@@ -3493,7 +3623,12 @@ fn cmd_disputes(data_dir: &Path) -> Result<(), String> {
         .filter(|e| e.body.namespace.starts_with("gov.dispute."))
         .collect();
     for c in &conflicts {
-        println!("dispute: {} seq {} by {}", c.namespace, c.seq, short(&c.author));
+        println!(
+            "dispute: {} seq {} by {}",
+            c.namespace,
+            c.seq,
+            short(&c.author)
+        );
         println!("  stored:      {}", hex::encode(c.stored_id));
         println!("  conflicting: {}", hex::encode(c.id));
         let sides = [c.id, c.stored_id];
@@ -3510,7 +3645,10 @@ fn cmd_disputes(data_dir: &Path) -> Result<(), String> {
                 hex::encode(s(e.id())?),
                 e.body.namespace,
                 short(&e.body.author),
-                String::from_utf8_lossy(&e.body.payload).chars().take(80).collect::<String>()
+                String::from_utf8_lossy(&e.body.payload)
+                    .chars()
+                    .take(80)
+                    .collect::<String>()
             );
         }
     }
@@ -3538,7 +3676,9 @@ fn cmd_network_clear(data_dir: &Path) -> Result<(), String> {
     if path.exists() {
         std::fs::remove_file(&path)
             .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
-        println!("network policy removed: this node is the open network (permissionless, no walls)");
+        println!(
+            "network policy removed: this node is the open network (permissionless, no walls)"
+        );
     } else {
         println!("no network policy - already the open network");
     }
@@ -3567,8 +3707,7 @@ fn cmd_parties_sign(
 
 fn cmd_parties_show(node: &Node, id_hex: String) -> Result<(), String> {
     let id = parse_id(&id_hex)?;
-    let entry = s(node.store.get_entry(&id))?
-        .ok_or_else(|| format!("entry {id_hex} not found"))?;
+    let entry = s(node.store.get_entry(&id))?.ok_or_else(|| format!("entry {id_hex} not found"))?;
     let document = SignedDocument::from_payload(&entry.body.payload)
         .ok_or_else(|| format!("{id_hex} payload is not a party-signed document"))?;
     println!("entry:  {id_hex}");
@@ -3624,7 +3763,13 @@ fn run(cli: Cli) -> Result<(), String> {
             refs,
         } => {
             let node = load_node(&cli.data_dir)?;
-            cmd_publish(&node, ns.clone(), payload.clone(), file.clone(), refs.clone())
+            cmd_publish(
+                &node,
+                ns.clone(),
+                payload.clone(),
+                file.clone(),
+                refs.clone(),
+            )
         }
         Commands::Log { ns, author, limit } => {
             let node = load_node_reader(&cli.data_dir)?;
@@ -3675,12 +3820,13 @@ fn run(cli: Cli) -> Result<(), String> {
                 WitnessCmd::VerifyProof { input } => cmd_witness_verify_proof(&input),
             }
         }
-        Commands::ProveFork {
-            a,
-            b,
-            against,
-            out,
-        } => cmd_prove_fork(&cli.data_dir, a.clone(), b.clone(), against.clone(), out.clone()),
+        Commands::ProveFork { a, b, against, out } => cmd_prove_fork(
+            &cli.data_dir,
+            a.clone(),
+            b.clone(),
+            against.clone(),
+            out.clone(),
+        ),
         Commands::Serve {
             addr,
             read_only,
@@ -3694,10 +3840,7 @@ fn run(cli: Cli) -> Result<(), String> {
             *haves_per_min as usize,
         ),
         Commands::Signet { cmd } => match cmd {
-            WalletCmd::Create {
-                name,
-                passphrase,
-            } => {
+            WalletCmd::Create { name, passphrase } => {
                 let pass = get_passphrase(passphrase.clone())?;
                 cmd_wallet_create(&cli.data_dir, name, &pass)
             }
@@ -3722,7 +3865,16 @@ fn run(cli: Cli) -> Result<(), String> {
                 out,
             } => {
                 let pass = get_passphrase(passphrase.clone())?;
-                cmd_wallet_seal(&cli.data_dir, name, &pass, to, to_fields, &input, &fields, &out)
+                cmd_wallet_seal(
+                    &cli.data_dir,
+                    name,
+                    &pass,
+                    to,
+                    to_fields,
+                    &input,
+                    &fields,
+                    &out,
+                )
             }
             WalletCmd::SealDeferred {
                 name,
@@ -3810,9 +3962,10 @@ fn run(cli: Cli) -> Result<(), String> {
                 let backup_pass = get_backup_passphrase(backup_passphrase.clone())?;
                 cmd_wallet_import(&cli.data_dir, input, &backup_pass, rename.clone())
             }
-            WalletCmd::Serve { addr, allow_origins } => {
-                walletd::serve(&cli.data_dir, addr, allow_origins.clone())
-            }
+            WalletCmd::Serve {
+                addr,
+                allow_origins,
+            } => walletd::serve(&cli.data_dir, addr, allow_origins.clone()),
             WalletCmd::CosignDoc {
                 name,
                 passphrase,
@@ -3845,9 +3998,11 @@ fn run(cli: Cli) -> Result<(), String> {
                 key.clone(),
                 reason.clone(),
             ),
-            AttestCmd::Status { subject, id } => {
-                cmd_attest_status(&load_node_reader(&cli.data_dir)?, subject.clone(), id.clone())
-            }
+            AttestCmd::Status { subject, id } => cmd_attest_status(
+                &load_node_reader(&cli.data_dir)?,
+                subject.clone(),
+                id.clone(),
+            ),
         },
         Commands::Policy { cmd } => match cmd {
             PolicyCmd::Init {
@@ -4335,8 +4490,7 @@ mod tests {
             .to_string();
         let mut chars: Vec<char> = sibling.chars().collect();
         chars[0] = if chars[0] == '0' { '1' } else { '0' };
-        artifact["proof"]["siblings"][0] =
-            serde_json::Value::String(chars.into_iter().collect());
+        artifact["proof"]["siblings"][0] = serde_json::Value::String(chars.into_iter().collect());
         let tampered = d.join("tampered.json");
         std::fs::write(&tampered, serde_json::to_string(&artifact).unwrap()).unwrap();
         let err = run(cli(
@@ -4384,9 +4538,7 @@ mod tests {
         let doc = d.join("escrow.json");
         std::fs::write(
             &doc,
-            format!(
-                r#"{{"cert_id":"C-7","owner_name":"Amina","holder_seal":"{holder_seal}"}}"#
-            ),
+            format!(r#"{{"cert_id":"C-7","owner_name":"Amina","holder_seal":"{holder_seal}"}}"#),
         )
         .unwrap();
 
@@ -4411,7 +4563,10 @@ mod tests {
 
         let sealed_doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&sealed_path).unwrap()).unwrap();
-        assert_eq!(sealed_doc["owner_name"]["sealed"], "datu-sealed-deferred-v2");
+        assert_eq!(
+            sealed_doc["owner_name"]["sealed"],
+            "datu-sealed-deferred-v2"
+        );
 
         // Opening without a release object has nothing to open with.
         let err = run(cli(
@@ -4428,7 +4583,10 @@ mod tests {
             },
         ))
         .unwrap_err();
-        assert!(err.contains("no share object"), "locked before release: {err}");
+        assert!(
+            err.contains("no share object"),
+            "locked before release: {err}"
+        );
 
         let share_path = d.join("share.json");
         run(cli(
@@ -4578,6 +4736,3 @@ mod tests {
         assert!(err.contains("does not parse"), "typo caught early: {err}");
     }
 }
-
-
-

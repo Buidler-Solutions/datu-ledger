@@ -23,9 +23,9 @@
 //! still verify and remain attributable elsewhere (open mirrors keep them),
 //! so nothing is censored - it just never counts as official.
 
+use crate::{Store, StoreError, StoreResult};
 use datu_core::parties::SignedDocument;
 use datu_core::Entry;
-use crate::{Store, StoreError, StoreResult};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -139,10 +139,16 @@ impl WritePolicy {
     }
 
     fn namespace_gated(&self, namespace: &str) -> bool {
-        if self.allow.iter().any(|pattern| ns_matches(pattern, namespace)) {
+        if self
+            .allow
+            .iter()
+            .any(|pattern| ns_matches(pattern, namespace))
+        {
             return false;
         }
-        self.gated.iter().any(|pattern| ns_matches(pattern, namespace))
+        self.gated
+            .iter()
+            .any(|pattern| ns_matches(pattern, namespace))
     }
 
     /// The policy a node runs while it holds a pin but no verifiable chain:
@@ -238,7 +244,11 @@ impl Store {
                 key: None,
                 bind_field: None,
             })
-            .chain(matching.iter().flat_map(|rule| rule.require.iter().cloned()))
+            .chain(
+                matching
+                    .iter()
+                    .flat_map(|rule| rule.require.iter().cloned()),
+            )
             .collect();
         let sealed_fields: Vec<&String> = matching
             .iter()
@@ -367,8 +377,10 @@ impl Store {
             return Ok(false);
         }
         let entries = self.all_entries()?;
-        Ok(datu_core::attest::revoked_keys_by(entries.iter(), attestors)
-            .contains(&subject.to_lowercase()))
+        Ok(
+            datu_core::attest::revoked_keys_by(entries.iter(), attestors)
+                .contains(&subject.to_lowercase()),
+        )
     }
 
     /// Is `subject` (a node or writer key) vouched for by any of `attestors`
@@ -382,9 +394,7 @@ impl Store {
     pub fn key_attested_by(&self, subject: &str, attestors: &[String]) -> StoreResult<bool> {
         let entries = self.all_entries()?;
         let revoked = datu_core::attest::revoked_by(entries.iter(), attestors);
-        for (attestation, _doc) in
-            datu_core::attest::attestations_for(entries.iter(), subject)
-        {
+        for (attestation, _doc) in datu_core::attest::attestations_for(entries.iter(), subject) {
             if !attestors.contains(&attestation.body.author) {
                 continue;
             }

@@ -54,7 +54,7 @@ fn main() {
         "founder": FOUNDER,
         "statement": statement,
         "charter": "Every ledger seeded from this code begins with this record. \
-Forks that keep it descend from this lineage; forks that mint their own genesis walk their own.",
+    Forks that keep it descend from this lineage; forks that mint their own genesis walk their own.",
     });
 
     let body = EntryBody {
@@ -72,7 +72,9 @@ Forks that keep it descend from this lineage; forks that mint their own genesis 
             .as_millis() as u64,
         payload: serde_json::to_vec(&payload).unwrap(),
     };
-    let entry = Entry::sign(body, &ed, &pq).map_err(|e: Error| e.to_string()).unwrap();
+    let entry = Entry::sign(body, &ed, &pq)
+        .map_err(|e: Error| e.to_string())
+        .unwrap();
     entry.verify().unwrap();
     let id = entry.id().unwrap();
 

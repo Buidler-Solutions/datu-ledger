@@ -175,7 +175,9 @@ mod tests {
     fn random_sets_roundtrip_and_do_not_cross_verify() {
         let mut state = 0x9e3779b97f4a7c15u64;
         let mut next = move || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 33) as u32
         };
         for _ in 0..64 {

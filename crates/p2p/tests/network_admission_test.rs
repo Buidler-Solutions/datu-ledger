@@ -5,7 +5,9 @@
 use datu_core::attest::{AttestationDoc, NS_ATTEST};
 use datu_core::pq::PqPrivateKey;
 use datu_core::{Entry, EntryBody};
-use datu_p2p::{handle_connection, pull_and_merge, sign_hello, NetworkPolicy, PullRequest, ServerMessage, MAGIC};
+use datu_p2p::{
+    handle_connection, pull_and_merge, sign_hello, NetworkPolicy, PullRequest, ServerMessage, MAGIC,
+};
 use datu_store::Store;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -175,7 +177,10 @@ fn network_policy_json_roundtrip_and_validation() {
     );
     assert!(walled.is_permissioned());
 
-    let bad_version = walled.to_json().unwrap().replace("\"version\": 1", "\"version\": 2");
+    let bad_version = walled
+        .to_json()
+        .unwrap()
+        .replace("\"version\": 1", "\"version\": 2");
     let err = NetworkPolicy::from_json(&bad_version).unwrap_err();
     assert!(err.contains("version"), "{err}");
 
@@ -268,7 +273,9 @@ fn revoked_attestation_no_longer_admits() {
     let attest = attestation(&root, &hex_key(&client_keys.ed));
     let attestation_id = attest.id().unwrap();
     store.insert_entry(&attest).unwrap();
-    store.insert_entry(&revocation(&root, attestation_id)).unwrap();
+    store
+        .insert_entry(&revocation(&root, attestation_id))
+        .unwrap();
     let network = permissioned("gov-mesh", vec![], vec![hex_key(&root.ed)]);
     let addr = spawn(store, Some(network));
 
@@ -357,7 +364,9 @@ fn walled_server_answers_hello_required_to_plain_request() {
     };
     let bytes = borsh::to_vec(&request).unwrap();
     use std::io::Write;
-    stream.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
+    stream
+        .write_all(&(bytes.len() as u32).to_le_bytes())
+        .unwrap();
     stream.write_all(&bytes).unwrap();
     stream.flush().unwrap();
 

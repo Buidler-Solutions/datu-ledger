@@ -53,8 +53,7 @@ pub struct Entry {
 }
 
 pub fn parse_key(hex_str: &str) -> Result<VerifyingKey> {
-    let bytes =
-        hex::decode(hex_str).map_err(|e| Error::Crypto(format!("bad key hex: {e}")))?;
+    let bytes = hex::decode(hex_str).map_err(|e| Error::Crypto(format!("bad key hex: {e}")))?;
     let arr: [u8; 32] = bytes
         .try_into()
         .map_err(|_| Error::Crypto("key must be 32 bytes".into()))?;
@@ -80,11 +79,7 @@ impl Entry {
 
     /// Hybrid-sign a body with an Ed25519 key and an ML-DSA-65 key; stamps
     /// version, author and author_pq from the keys.
-    pub fn sign(
-        mut body: EntryBody,
-        key: &SigningKey,
-        pq_key: &pq::PqPrivateKey,
-    ) -> Result<Entry> {
+    pub fn sign(mut body: EntryBody, key: &SigningKey, pq_key: &pq::PqPrivateKey) -> Result<Entry> {
         body.version = ENTRY_VERSION;
         body.author = hex::encode(key.verifying_key().as_bytes());
         body.author_pq = pq::pk_to_hex(&pq_key.get_public_key());
@@ -117,7 +112,9 @@ impl Entry {
             return Err(Error::InvalidEntry("payload exceeds size limit".into()));
         }
         if self.body.seq == 0 && self.body.prev.is_some() {
-            return Err(Error::Chain("first entry (seq 0) must have prev = None".into()));
+            return Err(Error::Chain(
+                "first entry (seq 0) must have prev = None".into(),
+            ));
         }
         if self.body.seq > 0 && self.body.prev.is_none() {
             return Err(Error::Chain(
@@ -132,7 +129,12 @@ impl Entry {
             .verify(&bytes, &signature)
             .map_err(|e| Error::Crypto(format!("bad signature: {e}")))?;
 
-        pq::verify(&self.body.author_pq, &self.body.pq_alg, &bytes, &self.pq_signature)?;
+        pq::verify(
+            &self.body.author_pq,
+            &self.body.pq_alg,
+            &bytes,
+            &self.pq_signature,
+        )?;
 
         Ok(())
     }

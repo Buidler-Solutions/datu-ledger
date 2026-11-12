@@ -185,21 +185,17 @@ fn checkpoint_sign_verify_and_tamper() {
 
     let mut bad_height = cp_body(0, Some([5u8; 32]));
     bad_height.entry_ids_root = Checkpoint::root_for(&ids);
-    assert!(
-        Checkpoint::sign(bad_height, &k.ed, &k.pq)
-            .unwrap()
-            .verify()
-            .is_err()
-    );
+    assert!(Checkpoint::sign(bad_height, &k.ed, &k.pq)
+        .unwrap()
+        .verify()
+        .is_err());
 
     let mut orphan = cp_body(1, None);
     orphan.entry_ids_root = Checkpoint::root_for(&ids);
-    assert!(
-        Checkpoint::sign(orphan, &k.ed, &k.pq)
-            .unwrap()
-            .verify()
-            .is_err()
-    );
+    assert!(Checkpoint::sign(orphan, &k.ed, &k.pq)
+        .unwrap()
+        .verify()
+        .is_err());
 }
 
 #[test]

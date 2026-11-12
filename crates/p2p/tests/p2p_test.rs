@@ -113,7 +113,9 @@ fn bad_magic_is_refused_not_crashed() {
     };
     let bytes = borsh::to_vec(&request).unwrap();
     use std::io::Write;
-    stream.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
+    stream
+        .write_all(&(bytes.len() as u32).to_le_bytes())
+        .unwrap();
     stream.write_all(&bytes).unwrap();
     stream.flush().unwrap();
 
@@ -124,8 +126,7 @@ fn bad_magic_is_refused_not_crashed() {
     let len = u32::from_le_bytes(len_buf) as usize;
     let mut buf = vec![0u8; len];
     assert!(stream.read_exact(&mut buf).is_ok());
-    let message: datu_p2p::ServerMessage =
-        borsh::BorshDeserialize::try_from_slice(&buf).unwrap();
+    let message: datu_p2p::ServerMessage = borsh::BorshDeserialize::try_from_slice(&buf).unwrap();
     match message {
         datu_p2p::ServerMessage::Error(m) => assert!(m.contains("unknown frame")),
         other => panic!("expected error, got {other:?}"),
@@ -152,7 +153,10 @@ fn pull_budget_resumes_transparently() {
 
     let client = Store::open_in_memory().unwrap();
     let stats = pull_and_merge(&addr.to_string(), &client, 2, None).unwrap();
-    assert_eq!(stats.entries_new, 9, "every record arrived across reconnects");
+    assert_eq!(
+        stats.entries_new, 9,
+        "every record arrived across reconnects"
+    );
     assert_eq!(client.entry_count().unwrap(), 10); // genesis + 9 records
     client.verify_all().unwrap();
 }

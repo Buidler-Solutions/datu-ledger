@@ -109,15 +109,17 @@ fn sealed_field_tamper_detected() {
     .unwrap();
 
     // Flip a byte in the first recipient's ciphertext.
-    let ct_b64 = doc["secret"]["recipients"][0]["ct"].as_str().unwrap().to_string();
+    let ct_b64 = doc["secret"]["recipients"][0]["ct"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let mut ct = base64::engine::general_purpose::STANDARD
         .decode(&ct_b64)
         .unwrap();
     let len = ct.len();
     ct[len - 1] ^= 0xFF;
-    doc["secret"]["recipients"][0]["ct"] = serde_json::Value::String(
-        base64::engine::general_purpose::STANDARD.encode(&ct),
-    );
+    doc["secret"]["recipients"][0]["ct"] =
+        serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(&ct));
     assert!(b.open_fields(&mut doc).is_err() || doc["secret"]["sealed"].is_string());
 }
 
@@ -208,8 +210,16 @@ fn export_import_moves_identity_to_another_wallet() {
         timestamp_ms: 1,
         payload: b"same bytes".to_vec(),
     };
-    let from_a = a.load("alice", "alice-pass").unwrap().sign_entry(body.clone()).unwrap();
-    let from_b = b.load("alice", "backup-pass").unwrap().sign_entry(body).unwrap();
+    let from_a = a
+        .load("alice", "alice-pass")
+        .unwrap()
+        .sign_entry(body.clone())
+        .unwrap();
+    let from_b = b
+        .load("alice", "backup-pass")
+        .unwrap()
+        .sign_entry(body)
+        .unwrap();
     assert_eq!(from_a.signature, from_b.signature);
 
     let _ = source;
@@ -222,25 +232,35 @@ fn backup_needs_both_the_identity_and_backup_passphrases() {
     wallet.create("bob", "bob-pass-1").unwrap();
 
     // Wrong identity passphrase: no backup is produced.
-    assert!(wallet.export_identity("bob", "wrong-pass", "backup-pass").is_err());
+    assert!(wallet
+        .export_identity("bob", "wrong-pass", "backup-pass")
+        .is_err());
 
-    let backup = wallet.export_identity("bob", "bob-pass-1", "backup-pass").unwrap();
+    let backup = wallet
+        .export_identity("bob", "bob-pass-1", "backup-pass")
+        .unwrap();
 
     // Wrong backup passphrase: import refuses.
     let target = tmpdir();
     let other = Wallet::open(target.path());
-    assert!(other.import_identity(&backup, "not-the-pass", None).is_err());
+    assert!(other
+        .import_identity(&backup, "not-the-pass", None)
+        .is_err());
 
     // Tampered public metadata no longer matches the restored keys.
     let mut tampered = backup.clone();
     tampered.ed_public = "00".repeat(32);
-    assert!(other.import_identity(&tampered, "backup-pass", None).is_err());
+    assert!(other
+        .import_identity(&tampered, "backup-pass", None)
+        .is_err());
 
     // The clean import works, a second identical one collides, rename fixes it.
     let first = other.import_identity(&backup, "backup-pass", None).unwrap();
     assert_eq!(first.name, "bob");
     assert!(other.import_identity(&backup, "backup-pass", None).is_err());
-    let renamed = other.import_identity(&backup, "backup-pass", Some("bob-2")).unwrap();
+    let renamed = other
+        .import_identity(&backup, "backup-pass", Some("bob-2"))
+        .unwrap();
     assert_eq!(renamed.name, "bob-2");
     assert_eq!(renamed.ed_public, backup.ed_public);
 }
@@ -299,13 +319,9 @@ fn deferred_delivery_withholds_the_key_until_release() {
     .is_err());
 
     // The holder opens it, and the reveal matches the signed commitment.
-    let plaintext = datu_wallet::open_deferred(
-        &field,
-        &share,
-        &holder.public.seal_public,
-        &holder.seal,
-    )
-    .unwrap();
+    let plaintext =
+        datu_wallet::open_deferred(&field, &share, &holder.public.seal_public, &holder.seal)
+            .unwrap();
     let restored: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
     assert_eq!(restored, json!("Amina Yusuf"));
 
@@ -366,38 +382,26 @@ fn a_lost_secrets_file_is_recoverable_by_the_issuer() {
 
     // The issuer recovers the release half from its own sealed copy and the
     // deferred loop still closes.
-    let secret = datu_wallet::recover_release_secret(
-        &field,
-        &issuer.public.seal_public,
-        &issuer.seal,
-    )
-    .unwrap();
+    let secret =
+        datu_wallet::recover_release_secret(&field, &issuer.public.seal_public, &issuer.seal)
+            .unwrap();
     let share = datu_wallet::attach_release(&field, &secret).unwrap();
-    let plaintext = datu_wallet::open_deferred(
-        &field,
-        &share,
-        &holder.public.seal_public,
-        &holder.seal,
-    )
-    .unwrap();
+    let plaintext =
+        datu_wallet::open_deferred(&field, &share, &holder.public.seal_public, &holder.seal)
+            .unwrap();
     let restored: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
     assert_eq!(restored, json!("Amina"));
 
     // The holder cannot open the issuer's custody copy, and fields sealed
     // before custody copies existed say so instead of failing weirdly.
-    assert!(datu_wallet::recover_release_secret(
-        &field,
-        &holder.public.seal_public,
-        &holder.seal
-    )
-    .is_err());
+    assert!(
+        datu_wallet::recover_release_secret(&field, &holder.public.seal_public, &holder.seal)
+            .is_err()
+    );
     let mut legacy = field.clone();
     legacy.recovery = None;
-    let err = datu_wallet::recover_release_secret(
-        &legacy,
-        &issuer.public.seal_public,
-        &issuer.seal,
-    )
-    .unwrap_err();
+    let err =
+        datu_wallet::recover_release_secret(&legacy, &issuer.public.seal_public, &issuer.seal)
+            .unwrap_err();
     assert!(err.contains("no recovery copy"));
 }

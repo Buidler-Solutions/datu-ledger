@@ -51,8 +51,7 @@ pub fn entry_from_sign_request(
         return Err("sign request needs payload_base64 or payload_json".into());
     }
     let payload = if let Some(b64) = &request.payload_base64 {
-        B64
-            .decode(b64)
+        B64.decode(b64)
             .map_err(|_| "bad payload_base64".to_string())?
     } else {
         let value = request.payload_json.as_ref().expect("checked above");
@@ -141,12 +140,16 @@ pub fn entry_from_submission(value: &Value) -> Result<Entry, String> {
                 .ok_or("bad ref id")?,
         );
     }
-    let payload = B64.decode(&sub.payload_base64).map_err(|_| "bad payload_base64")?;
+    let payload = B64
+        .decode(&sub.payload_base64)
+        .map_err(|_| "bad payload_base64")?;
     let signature_arr: [u8; 64] = hex::decode(&sub.signature)
         .ok()
         .and_then(|b| <[u8; 64]>::try_from(b).ok())
         .ok_or("bad signature")?;
-    let pq_signature = B64.decode(&sub.pq_signature).map_err(|_| "bad pq_signature")?;
+    let pq_signature = B64
+        .decode(&sub.pq_signature)
+        .map_err(|_| "bad pq_signature")?;
     Ok(Entry {
         body: EntryBody {
             version: datu_core::ENTRY_VERSION,

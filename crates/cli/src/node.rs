@@ -13,7 +13,10 @@
 //! The same store also syncs with zero network at all: `datu delta` files
 //! and `datu bundle` travel by USB, email, or any channel that moves bytes.
 
-use crate::{effective_policy, load_node_reader, network_hello, our_network_id, pull_peer, read_network, short, sign_checkpoint_into};
+use crate::{
+    effective_policy, load_node_reader, network_hello, our_network_id, pull_peer, read_network,
+    short, sign_checkpoint_into,
+};
 
 /// The policy to apply *right now*: recomputed per connection and per sync
 /// cycle, so a node that bootstrapped on a pinned-but-chainless mesh promotes
@@ -163,12 +166,8 @@ pub fn run(
         }
     }
     let db = data_dir.join("node.db");
-    let listener =
-        TcpListener::bind(addr).map_err(|e| format!("cannot bind {addr}: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| e.to_string())?
-        .port();
+    let listener = TcpListener::bind(addr).map_err(|e| format!("cannot bind {addr}: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
     // Optional HTTP explorer/API - a frontend, never a sync dependency.
     if let Some(http_addr) = &http {
@@ -190,7 +189,10 @@ pub fn run(
     let mdns = ServiceDaemon::new().ok();
     if let Some(daemon) = &mdns {
         match announce(daemon, &node.identity, port, &our_id) {
-            Ok(()) => println!("announcing on the LAN as datu-{} (_datu-sync._tcp)", short(&node.identity)),
+            Ok(()) => println!(
+                "announcing on the LAN as datu-{} (_datu-sync._tcp)",
+                short(&node.identity)
+            ),
             Err(e) => println!("mDNS announce skipped: {e}"),
         }
     }
@@ -219,9 +221,15 @@ pub fn run(
     println!("datu node {} is running", node.identity);
     println!("  native p2p sync:  {addr} (any node, any network, no HTTP)");
     println!("  configured peers: {}", peers.len());
-    println!("  lan discovery:    {}   witness checkpoints: {}", if discover { "on" } else { "off" }, if witness { "on" } else { "off" });
+    println!(
+        "  lan discovery:    {}   witness checkpoints: {}",
+        if discover { "on" } else { "off" },
+        if witness { "on" } else { "off" }
+    );
     match &policy {
-        None => println!("  writer policy:    none - free observer (accepts everything, views everything)"),
+        None => println!(
+            "  writer policy:    none - free observer (accepts everything, views everything)"
+        ),
         Some(p) if p.readonly => {
             println!("  writer policy:    read-only mirror (view + witness only, no new entries)")
         }
@@ -297,7 +305,10 @@ pub fn run(
                         );
                     }
                     if stats.denied > 0 {
-                        println!("[sync] {peer}: {} entries skipped by local policy", stats.denied);
+                        println!(
+                            "[sync] {peer}: {} entries skipped by local policy",
+                            stats.denied
+                        );
                     }
                 }
                 Err(e) => println!("[sync] {peer}: {e}"),

@@ -223,28 +223,26 @@ impl ContractSpec {
                         .bind_field
                         .as_ref()
                         .map(|field| {
-                            document.doc.get(field).and_then(|v| v.as_str())
-                                == Some(key.as_str())
+                            document.doc.get(field).and_then(|v| v.as_str()) == Some(key.as_str())
                         })
                         .unwrap_or(true)
             });
             let mut describe = format!("a verified '{}' party signature", req.role);
             if let Some(key) = &req.key {
-                describe.push_str(&format!(
-                    " by key {}",
-                    &key[..16.min(key.len())]
-                ));
+                describe.push_str(&format!(" by key {}", &key[..16.min(key.len())]));
             }
             if let Some(field) = &req.bind_field {
-                describe.push_str(&format!(
-                    " whose key equals the document's '{field}' field"
-                ));
+                describe.push_str(&format!(" whose key equals the document's '{field}' field"));
             }
             conditions.push(ConditionStatus {
                 kind: ConditionKind::Party,
                 requirement: describe.clone(),
                 required: "verified".into(),
-                found: if satisfied { "present".into() } else { "missing".into() },
+                found: if satisfied {
+                    "present".into()
+                } else {
+                    "missing".into()
+                },
                 met: satisfied,
             });
             if !satisfied {
@@ -255,9 +253,10 @@ impl ContractSpec {
         // Deadline: citations stamped after it do not count. A contract
         // that names a deadline field fails closed on documents that do
         // not carry a number there.
-        let deadline = self.deadline_from_field.as_ref().and_then(|field| {
-            document.doc.get(field).and_then(|v| v.as_u64())
-        });
+        let deadline = self
+            .deadline_from_field
+            .as_ref()
+            .and_then(|field| document.doc.get(field).and_then(|v| v.as_u64()));
         if let Some(field) = &self.deadline_from_field {
             let met = deadline.is_some();
             conditions.push(ConditionStatus {
@@ -313,9 +312,7 @@ impl ContractSpec {
                         format!("entry ts {entry_ts} is before the window opening {b}")
                     }
                     Some(b) => format!("entry ts {entry_ts} is after the window closing {b}"),
-                    None => format!(
-                        "document does not carry a number in '{field}' (fail-closed)"
-                    ),
+                    None => format!("document does not carry a number in '{field}' (fail-closed)"),
                 };
                 reasons.push(format!("contract landing window: {why}"));
             }
@@ -329,7 +326,10 @@ impl ContractSpec {
                 None => ("absent".to_string(), true),
                 Some(value) => {
                     let sealed = is_sealed(value);
-                    (if sealed { "sealed" } else { "plaintext" }.to_string(), sealed)
+                    (
+                        if sealed { "sealed" } else { "plaintext" }.to_string(),
+                        sealed,
+                    )
                 }
             };
             conditions.push(ConditionStatus {
@@ -383,7 +383,10 @@ impl ContractSpec {
             }
             conditions.push(ConditionStatus {
                 kind: ConditionKind::Refs,
-                requirement: format!("{} cited ref(s) of kind '{}'{}", req.count, req.kind, qualifiers),
+                requirement: format!(
+                    "{} cited ref(s) of kind '{}'{}",
+                    req.count, req.kind, qualifiers
+                ),
                 required: req.count.to_string(),
                 found: found.to_string(),
                 met,
@@ -435,8 +438,7 @@ impl RefRequirement {
             }
         }
         if let Some(min) = self.min_cosigners {
-            let distinct: BTreeSet<&String> =
-                parties.iter().map(|(_, key)| key).collect();
+            let distinct: BTreeSet<&String> = parties.iter().map(|(_, key)| key).collect();
             if distinct.len() < min {
                 return false;
             }
@@ -487,7 +489,9 @@ impl ContractRef {
     }
 
     pub fn parse_id(&self) -> Option<[u8; 32]> {
-        hex::decode(&self.id).ok().and_then(|bytes| bytes.try_into().ok())
+        hex::decode(&self.id)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
     }
 }
 
@@ -567,7 +571,11 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
-    fn signed_doc(kind: &str, doc: serde_json::Value, roles: &[(&str, SigningKey)]) -> SignedDocument {
+    fn signed_doc(
+        kind: &str,
+        doc: serde_json::Value,
+        roles: &[(&str, SigningKey)],
+    ) -> SignedDocument {
         let mut document = SignedDocument::new(kind, doc);
         for (role, key) in roles {
             document.sign(role, key, None).unwrap();
@@ -647,7 +655,7 @@ mod tests {
         let doc = signed_doc(
             "land.title.grant",
             serde_json::json!({"holder_key": format!("{}0", "0".repeat(63)), "deadline_ms": 1000}),
-            &[("holder", holder)],  // signed by holder, but doc names another key
+            &[("holder", holder)], // signed by holder, but doc names another key
         );
         let report = spec().evaluate_report(&doc, 2000, &[]);
         assert!(!report.admitted);
@@ -736,8 +744,8 @@ mod tests {
         let payload = serde_json::to_vec(&document).unwrap();
         let parsed = ContractSpec::from_payload(&payload).unwrap();
         assert_eq!(parsed, spec());
-        let not_a_contract = serde_json::to_vec(&signed_doc("other.kind", serde_json::json!({}), &[]))
-            .unwrap();
+        let not_a_contract =
+            serde_json::to_vec(&signed_doc("other.kind", serde_json::json!({}), &[])).unwrap();
         assert!(ContractSpec::from_payload(&not_a_contract).is_none());
     }
 
@@ -798,10 +806,16 @@ mod tests {
         ));
         let early = s.evaluate_report(&doc, 500, &closure);
         assert!(!early.admitted);
-        assert!(early.reasons.iter().any(|r| r.contains("before the window opening")));
+        assert!(early
+            .reasons
+            .iter()
+            .any(|r| r.contains("before the window opening")));
         let late = s.evaluate_report(&doc, 4000, &closure);
         assert!(!late.admitted);
-        assert!(late.reasons.iter().any(|r| r.contains("after the window closing")));
+        assert!(late
+            .reasons
+            .iter()
+            .any(|r| r.contains("after the window closing")));
     }
 
     #[test]

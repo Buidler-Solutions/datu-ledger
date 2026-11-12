@@ -12,13 +12,13 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
 
-mod policy;
-pub mod manifest;
 mod contract;
+pub mod manifest;
+mod policy;
 
 pub use contract::{CitedEntry, ContractCheck, ContractOutlook};
 pub use manifest::{manifest_namespace, CompiledManifest, Freshness, ManifestDoc, ManifestStatus};
-pub use policy::{NamespaceRule, RoleRule, POLICY_VERSION, WritePolicy};
+pub use policy::{NamespaceRule, RoleRule, WritePolicy, POLICY_VERSION};
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -409,17 +409,26 @@ fn row_to_entry_at(row: &rusqlite::Row<'_>, off: usize) -> rusqlite::Result<Entr
     let signature: Vec<u8> = row.get(off + 6)?;
     let pq_signature: Vec<u8> = row.get(off + 7)?;
     let body = EntryBody::try_from_slice(&body)
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-            off + 5,
-            rusqlite::types::Type::Blob,
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
-        ))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                off + 5,
+                rusqlite::types::Type::Blob,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    e.to_string(),
+                )),
+            )
+        })
         .map_err(|_| sql_invalid(off + 5))?;
     let signature: [u8; 64] = signature
         .as_slice()
         .try_into()
         .map_err(|_| sql_invalid(off + 6))?;
-    Ok(Entry { body, signature, pq_signature })
+    Ok(Entry {
+        body,
+        signature,
+        pq_signature,
+    })
 }
 
 pub struct Store {
@@ -435,10 +444,7 @@ impl Store {
     }
 
     /// Open (or create) a store under a writer policy. `None` = observer.
-    pub fn open_with_policy(
-        path: &Path,
-        policy: Option<WritePolicy>,
-    ) -> StoreResult<Store> {
+    pub fn open_with_policy(path: &Path, policy: Option<WritePolicy>) -> StoreResult<Store> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -451,9 +457,7 @@ impl Store {
     }
 
     /// In-memory store under a policy (tests, ephemeral validators).
-    pub fn open_in_memory_with_policy(
-        policy: Option<WritePolicy>,
-    ) -> StoreResult<Store> {
+    pub fn open_in_memory_with_policy(policy: Option<WritePolicy>) -> StoreResult<Store> {
         Self::init(Connection::open_in_memory()?, policy)
     }
 
@@ -520,9 +524,9 @@ impl Store {
     }
 
     fn entry_by_author_seq(&self, author: &str, seq: u64) -> StoreResult<Option<Entry>> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!("SELECT {ENTRY_COLS} FROM entries WHERE author = ?1 AND seq = ?2"))?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ENTRY_COLS} FROM entries WHERE author = ?1 AND seq = ?2"
+        ))?;
         let mut rows = stmt.query(params![author, seq as i64])?;
         match rows.next()? {
             Some(row) => Ok(Some(row_to_entry(row)?)),
@@ -548,17 +552,14 @@ impl Store {
             "SELECT {ENTRY_COLS} FROM entries WHERE author = ?1 ORDER BY seq ASC"
         ))?;
         let rows = stmt.query_map(params![author], row_to_entry)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// How many entries this author already has in this exact namespace -
     /// the basis for `max_entries_per_author` policy caps (one ballot per
     /// voter in an election namespace).
-    pub fn count_by_author_in_namespace(
-        &self,
-        namespace: &str,
-        author: &str,
-    ) -> StoreResult<u64> {
+    pub fn count_by_author_in_namespace(&self, namespace: &str, author: &str) -> StoreResult<u64> {
         let mut stmt = self
             .conn
             .prepare("SELECT COUNT(*) FROM entries WHERE namespace = ?1 AND author = ?2")?;
@@ -573,15 +574,17 @@ impl Store {
             let arr: [u8; 32] = blob.as_slice().try_into().map_err(|_| sql_invalid(0))?;
             Ok(arr)
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn all_entries(&self) -> StoreResult<Vec<Entry>> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!("SELECT {ENTRY_COLS} FROM entries ORDER BY ord ASC"))?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ENTRY_COLS} FROM entries ORDER BY ord ASC"
+        ))?;
         let rows = stmt.query_map([], row_to_entry)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn list(
@@ -616,7 +619,8 @@ impl Store {
         };
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(binds.iter()), row_to_entry)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// The single write path for entries. Fully verifies the entry, applies
@@ -698,7 +702,12 @@ impl Store {
     /// Best-effort by design - a recording failure must never mask the
     /// `Conflict` error that fork handling depends on. Replays of the same
     /// conflicting entry are deduplicated by id.
-    fn record_conflict(&self, entry: &Entry, id: &[u8; 32], stored_id: &[u8; 32]) -> StoreResult<()> {
+    fn record_conflict(
+        &self,
+        entry: &Entry,
+        id: &[u8; 32],
+        stored_id: &[u8; 32],
+    ) -> StoreResult<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO conflicts (id, author, namespace, seq, stored_id, ts, body, signature, pq_signature)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -734,7 +743,10 @@ impl Store {
                 author: row.get(1)?,
                 namespace: row.get(2)?,
                 seq: row.get::<_, i64>(3)? as u64,
-                stored_id: stored_id.as_slice().try_into().map_err(|_| sql_invalid(4))?,
+                stored_id: stored_id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| sql_invalid(4))?,
                 timestamp_ms: row.get::<_, i64>(5)? as u64,
             });
         }
@@ -761,9 +773,15 @@ impl Store {
                 let signature: Vec<u8> = row.get(1)?;
                 let pq_signature: Vec<u8> = row.get(2)?;
                 let body = EntryBody::try_from_slice(&body).map_err(|_| sql_invalid(0))?;
-                let signature: [u8; 64] =
-                    signature.as_slice().try_into().map_err(|_| sql_invalid(1))?;
-                Ok(Some(Entry { body, signature, pq_signature }))
+                let signature: [u8; 64] = signature
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| sql_invalid(1))?;
+                Ok(Some(Entry {
+                    body,
+                    signature,
+                    pq_signature,
+                }))
             }
             None => Ok(None),
         }
@@ -855,14 +873,16 @@ impl Store {
             "SELECT id, signer, height, body, signature, pq_signature FROM checkpoints ORDER BY ord ASC",
         )?;
         let rows = stmt.query_map([], row_to_checkpoint)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn checkpoint_count(&self) -> StoreResult<u64> {
         Ok(self
             .conn
-            .query_row("SELECT COUNT(*) FROM checkpoints", [], |r| r.get::<_, i64>(0))?
-            as u64)
+            .query_row("SELECT COUNT(*) FROM checkpoints", [], |r| {
+                r.get::<_, i64>(0)
+            })? as u64)
     }
 
     /// Build the inclusion proof that `checkpoint` covered `entry_id`: the
@@ -932,10 +952,9 @@ impl Store {
             });
         }
         if checkpoint.body.height > 0 {
-            if let Some(prev) = self.checkpoint_by_signer_height(
-                &checkpoint.body.signer,
-                checkpoint.body.height - 1,
-            )? {
+            if let Some(prev) = self
+                .checkpoint_by_signer_height(&checkpoint.body.signer, checkpoint.body.height - 1)?
+            {
                 if checkpoint.body.prev != Some(prev.id().map_err(StoreError::Core)?) {
                     return Err(StoreError::Chain(
                         "checkpoint does not chain to the signer's previous checkpoint".into(),
@@ -1043,8 +1062,7 @@ impl Store {
             bloom_bits: bloom.bit_bytes(),
             network_id: Some(network_id.to_string()),
         };
-        borsh::to_vec(&request)
-            .map_err(|e| StoreError::Core(CoreError::Encoding(e.to_string())))
+        borsh::to_vec(&request).map_err(|e| StoreError::Core(CoreError::Encoding(e.to_string())))
     }
 
     /// Answer a request file with everything the requester (probably) lacks:
@@ -1126,9 +1144,9 @@ impl Store {
         let mut pending_links: u64 = 0;
         let mut contracts_failed: u64 = 0;
 
-        let mut stmt = self
-            .conn
-            .prepare(&format!("SELECT {ENTRY_COLS} FROM entries ORDER BY ord ASC"))?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ENTRY_COLS} FROM entries ORDER BY ord ASC"
+        ))?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let entry = row_to_entry(row)?;
@@ -1232,11 +1250,14 @@ fn row_to_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<Checkpoint> {
     let body: Vec<u8> = row.get(3)?;
     let signature: Vec<u8> = row.get(4)?;
     let pq_signature: Vec<u8> = row.get(5)?;
-    let body = CheckpointBody::try_from_slice(&body)
-        .map_err(|_| sql_invalid(3))?;
+    let body = CheckpointBody::try_from_slice(&body).map_err(|_| sql_invalid(3))?;
     let signature: [u8; 64] = signature
         .as_slice()
         .try_into()
         .map_err(|_| sql_invalid(4))?;
-    Ok(Checkpoint { body, signature, pq_signature })
+    Ok(Checkpoint {
+        body,
+        signature,
+        pq_signature,
+    })
 }

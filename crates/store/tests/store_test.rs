@@ -145,12 +145,7 @@ fn verify_all_over_multi_author_feed_with_refs() {
     let b0 = Entry::sign(b_body, &k2.ed, &k2.pq).unwrap();
     store.insert_entry(&b0).unwrap();
 
-    let a1 = Entry::sign(
-        body(1, Some(a0.id().unwrap()), b"a1"),
-        &k1.ed,
-        &k1.pq,
-    )
-    .unwrap();
+    let a1 = Entry::sign(body(1, Some(a0.id().unwrap()), b"a1"), &k1.ed, &k1.pq).unwrap();
     store.insert_entry(&a1).unwrap();
 
     let report = store.verify_all().unwrap();
@@ -288,7 +283,8 @@ fn referencing_finds_cosign_style_links() {
     let refs = store.referencing(&target_id).unwrap();
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].id().unwrap(), cosign.id().unwrap());
-    assert!(store.referencing(&feed_entries[1].id().unwrap())
+    assert!(store
+        .referencing(&feed_entries[1].id().unwrap())
         .unwrap()
         .is_empty());
 }
@@ -355,9 +351,12 @@ fn delta_request_response_offline_roundtrip() {
     for e in &entries {
         alice.insert_entry(e).unwrap();
     }
-    let cps = vec![
-        cp(&a, 0, None, &entries.iter().map(|e| e.id().unwrap()).collect::<Vec<_>>()),
-    ];
+    let cps = vec![cp(
+        &a,
+        0,
+        None,
+        &entries.iter().map(|e| e.id().unwrap()).collect::<Vec<_>>(),
+    )];
     alice.append_checkpoint(&cps[0]).unwrap();
     // Bob already has 3 of Alice's 6 entries.
     for e in [&entries[0], &entries[2], &entries[4]] {
@@ -390,7 +389,10 @@ fn genesis_is_seeded_below_the_policy_in_every_store() {
     let store = Store::open_in_memory().unwrap();
     let genesis = datu_core::genesis::genesis_entry().unwrap();
     let id = genesis.id().unwrap();
-    assert!(store.has_entry(&id).unwrap(), "genesis is present from open");
+    assert!(
+        store.has_entry(&id).unwrap(),
+        "genesis is present from open"
+    );
     assert_eq!(
         store.get_entry(&id).unwrap().unwrap(),
         *genesis,
@@ -452,10 +454,16 @@ fn conflict_evidence_is_recorded_and_listed() {
 
     // The recorded side re-verifies standalone: both hybrid signatures over
     // the exact bytes, zero other context needed.
-    let evidence = store.conflict_entry(&rewrite.id().unwrap()).unwrap().unwrap();
+    let evidence = store
+        .conflict_entry(&rewrite.id().unwrap())
+        .unwrap()
+        .unwrap();
     assert_eq!(evidence, rewrite);
     evidence.verify().unwrap();
-    assert!(store.conflict_entry(&original.id().unwrap()).unwrap().is_none());
+    assert!(store
+        .conflict_entry(&original.id().unwrap())
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -491,10 +499,7 @@ fn trigger_removal_and_row_splicing_is_detected_by_verify() {
 
     // Content addressing catches it: the stored id no longer matches the
     // recomputed id of the bytes in the row. Nothing accepted the splice.
-    assert!(matches!(
-        store.verify_all(),
-        Err(StoreError::Chain(_))
-    ));
+    assert!(matches!(store.verify_all(), Err(StoreError::Chain(_))));
 }
 
 #[test]

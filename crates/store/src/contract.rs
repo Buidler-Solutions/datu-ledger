@@ -136,12 +136,15 @@ impl Store {
             .refs
             .iter()
             .filter_map(|id| {
-                self.get_entry(id).ok().flatten().map(|referenced| ClosureEntry {
-                    id: *id,
-                    author: referenced.body.author.clone(),
-                    timestamp_ms: referenced.body.timestamp_ms,
-                    document: SignedDocument::from_payload(&referenced.body.payload),
-                })
+                self.get_entry(id)
+                    .ok()
+                    .flatten()
+                    .map(|referenced| ClosureEntry {
+                        id: *id,
+                        author: referenced.body.author.clone(),
+                        timestamp_ms: referenced.body.timestamp_ms,
+                        document: SignedDocument::from_payload(&referenced.body.payload),
+                    })
             })
             .collect()
     }
@@ -185,9 +188,7 @@ impl Store {
         let declared = match ContractRef::from_doc(&document.doc) {
             Ok(None) => return Ok(None),
             Ok(Some(declared)) => declared,
-            Err(reason) => {
-                return Ok(Some(ContractOutlook::unresolved(&document, vec![reason])))
-            }
+            Err(reason) => return Ok(Some(ContractOutlook::unresolved(&document, vec![reason]))),
         };
         let contract_id = declared.parse_id().unwrap_or([0u8; 32]);
         let outlook = match self.resolve_contract(&declared) {

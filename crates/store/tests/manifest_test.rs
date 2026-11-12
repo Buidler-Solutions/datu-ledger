@@ -1,6 +1,6 @@
-use datu_core::{Entry, EntryBody};
 use datu_core::merkle::merkle_root;
 use datu_core::{Checkpoint, CheckpointBody};
+use datu_core::{Entry, EntryBody};
 use datu_store::manifest::{compile, head, manifest_namespace, status, Freshness};
 use datu_store::{ManifestDoc, Store, WritePolicy};
 use ed25519_dalek::SigningKey;
@@ -24,7 +24,13 @@ fn keys() -> Keys {
 
 /// Publish `doc` as a manifest entry authored by `k`. Seq/prev chain per
 /// author is global, so each publisher tracks its own feed position.
-fn publish_manifest(store: &Store, k: &Keys, doc: &ManifestDoc, seq: u64, prev: Option<[u8; 32]>) -> Entry {
+fn publish_manifest(
+    store: &Store,
+    k: &Keys,
+    doc: &ManifestDoc,
+    seq: u64,
+    prev: Option<[u8; 32]>,
+) -> Entry {
     let body = EntryBody {
         version: datu_core::ENTRY_VERSION,
         author: k.author.clone(),
@@ -80,7 +86,9 @@ fn manifest_chain_compiles_and_gates() {
     );
     let e1 = publish_manifest(&store, &root, &m1, 0, None);
 
-    let compiled = compile(&store, "gov-mesh", &[root.author.clone()]).unwrap().unwrap();
+    let compiled = compile(&store, "gov-mesh", &[root.author.clone()])
+        .unwrap()
+        .unwrap();
     assert_eq!(compiled.manifest_id, hex::encode(e1.id().unwrap()));
     assert_eq!(compiled.chain.len(), 1);
 
@@ -88,13 +96,31 @@ fn manifest_chain_compiles_and_gates() {
     // always admitted (governance can always govern).
     let gated = Store::open_in_memory_with_policy(Some(compiled.policy.clone())).unwrap();
     assert!(gated
-        .insert_entry(&writer_entry(&old_writer, "gov.titles.application", b"t1", 0, None))
+        .insert_entry(&writer_entry(
+            &old_writer,
+            "gov.titles.application",
+            b"t1",
+            0,
+            None
+        ))
         .is_ok());
     assert!(gated
-        .insert_entry(&writer_entry(&root, "gov.titles.application", b"governance writes fine", 0, None))
+        .insert_entry(&writer_entry(
+            &root,
+            "gov.titles.application",
+            b"governance writes fine",
+            0,
+            None
+        ))
         .is_ok());
     assert!(gated
-        .insert_entry(&writer_entry(&new_writer, "gov.titles.application", b"stranger denied", 0, None))
+        .insert_entry(&writer_entry(
+            &new_writer,
+            "gov.titles.application",
+            b"stranger denied",
+            0,
+            None
+        ))
         .is_err());
 
     // Rotation + revocation: the successor (a current root) publishes m2
@@ -108,23 +134,43 @@ fn manifest_chain_compiles_and_gates() {
     };
     let e2 = publish_manifest(&store, &successor, &m2, 0, None);
 
-    let compiled2 = compile(&store, "gov-mesh", &[root.author.clone()]).unwrap().unwrap();
+    let compiled2 = compile(&store, "gov-mesh", &[root.author.clone()])
+        .unwrap()
+        .unwrap();
     assert_eq!(compiled2.manifest_id, hex::encode(e2.id().unwrap()));
     assert_eq!(compiled2.chain.len(), 2, "genesis + rotation");
 
     let gated2 = Store::open_in_memory_with_policy(Some(compiled2.policy.clone())).unwrap();
     assert!(gated2
-        .insert_entry(&writer_entry(&new_writer, "gov.titles.application", b"new regime", 0, None))
+        .insert_entry(&writer_entry(
+            &new_writer,
+            "gov.titles.application",
+            b"new regime",
+            0,
+            None
+        ))
         .is_ok());
     assert!(
         gated2
-            .insert_entry(&writer_entry(&old_writer, "gov.titles.application", b"old writer retired", 0, None))
+            .insert_entry(&writer_entry(
+                &old_writer,
+                "gov.titles.application",
+                b"old writer retired",
+                0,
+                None
+            ))
             .is_err(),
         "the manifest revoked the old writer's admission"
     );
     assert!(
         gated2
-            .insert_entry(&writer_entry(&root, "gov.titles.application", b"retired root cannot write", 0, None))
+            .insert_entry(&writer_entry(
+                &root,
+                "gov.titles.application",
+                b"retired root cannot write",
+                0,
+                None
+            ))
             .is_err(),
         "the retired root lost its auto-admission too"
     );
@@ -132,11 +178,17 @@ fn manifest_chain_compiles_and_gates() {
     // The retired root can no longer continue the chain…
     let m3_by_retired = ManifestDoc {
         supersedes: Some(hex::encode(e2.id().unwrap())),
-        ..ManifestDoc::new("gov-mesh", vec![root.author.clone()], WritePolicy::default())
+        ..ManifestDoc::new(
+            "gov-mesh",
+            vec![root.author.clone()],
+            WritePolicy::default(),
+        )
     };
     publish_manifest(&store, &root, &m3_by_retired, 1, Some(e1.id().unwrap()));
     // …so compile still ends at m2: the rogue entry is never linked.
-    let compiled3 = compile(&store, "gov-mesh", &[root.author.clone()]).unwrap().unwrap();
+    let compiled3 = compile(&store, "gov-mesh", &[root.author.clone()])
+        .unwrap()
+        .unwrap();
     assert_eq!(compiled3.manifest_id, hex::encode(e2.id().unwrap()));
 
     // And `head` agrees for the next publisher.
@@ -174,7 +226,10 @@ fn manifest_split_is_fail_visible() {
     publish_manifest(&store, &b, &m2b, 0, None);
 
     let err = compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap_err();
-    assert!(err.contains("split"), "a split must be an error, not a pick: {err}");
+    assert!(
+        err.contains("split"),
+        "a split must be an error, not a pick: {err}"
+    );
     assert!(head(&store, "gov-mesh").is_err());
 }
 
@@ -186,9 +241,19 @@ fn junk_and_foreign_manifests_are_ignored() {
 
     // Junk in the manifest namespace: unparseable payload, wrong network id,
     // and a "founding" manifest by a non-pinned key. None of it is authority.
-    let junk = writer_entry(&nobody, &manifest_namespace("gov-mesh"), b"not json", 0, None);
+    let junk = writer_entry(
+        &nobody,
+        &manifest_namespace("gov-mesh"),
+        b"not json",
+        0,
+        None,
+    );
     store.insert_entry(&junk).unwrap();
-    let foreign = ManifestDoc::new("other-mesh", vec![nobody.author.clone()], WritePolicy::default());
+    let foreign = ManifestDoc::new(
+        "other-mesh",
+        vec![nobody.author.clone()],
+        WritePolicy::default(),
+    );
     let foreign_entry = writer_entry(
         &nobody,
         &manifest_namespace("gov-mesh"),
@@ -197,8 +262,11 @@ fn junk_and_foreign_manifests_are_ignored() {
         Some(junk.id().unwrap()),
     );
     store.insert_entry(&foreign_entry).unwrap();
-    let fake_genesis =
-        ManifestDoc::new("gov-mesh", vec![nobody.author.clone()], WritePolicy::default());
+    let fake_genesis = ManifestDoc::new(
+        "gov-mesh",
+        vec![nobody.author.clone()],
+        WritePolicy::default(),
+    );
     store
         .insert_entry(&writer_entry(
             &nobody,
@@ -210,17 +278,27 @@ fn junk_and_foreign_manifests_are_ignored() {
         .unwrap();
 
     assert!(
-        compile(&store, "gov-mesh", &[root.author.clone()]).unwrap().is_none(),
+        compile(&store, "gov-mesh", &[root.author.clone()])
+            .unwrap()
+            .is_none(),
         "no pinned-root genesis exists yet"
     );
 
-    let real = ManifestDoc::new("gov-mesh", vec![root.author.clone()], WritePolicy::default());
+    let real = ManifestDoc::new(
+        "gov-mesh",
+        vec![root.author.clone()],
+        WritePolicy::default(),
+    );
     let e = publish_manifest(&store, &root, &real, 0, None);
-    let compiled = compile(&store, "gov-mesh", &[root.author.clone()]).unwrap().unwrap();
+    let compiled = compile(&store, "gov-mesh", &[root.author.clone()])
+        .unwrap()
+        .unwrap();
     assert_eq!(compiled.chain.len(), 1);
     assert_eq!(compiled.manifest_id, hex::encode(e.id().unwrap()));
     assert!(
-        compile(&store, "unknown-mesh", &[root.author.clone()]).unwrap().is_none(),
+        compile(&store, "unknown-mesh", &[root.author.clone()])
+            .unwrap()
+            .is_none(),
         "empty namespace compiles to None, not an error"
     );
 }
@@ -244,11 +322,17 @@ fn unauthorized_continuation_cannot_manufacture_a_split() {
     // neither capture the chain nor force a split that would block publishing.
     let rogue = ManifestDoc {
         supersedes: Some(hex::encode(e1.id().unwrap())),
-        ..ManifestDoc::new("gov-mesh", vec![stranger.author.clone()], WritePolicy::default())
+        ..ManifestDoc::new(
+            "gov-mesh",
+            vec![stranger.author.clone()],
+            WritePolicy::default(),
+        )
     };
     publish_manifest(&store, &stranger, &rogue, 0, None);
 
-    let compiled = compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().unwrap();
+    let compiled = compile(&store, "gov-mesh", &[founder.author.clone()])
+        .unwrap()
+        .unwrap();
     assert_eq!(compiled.manifest_id, hex::encode(e1.id().unwrap()));
     assert_eq!(compiled.chain.len(), 1);
     let (head_id, _) = head(&store, "gov-mesh").unwrap().unwrap();
@@ -257,10 +341,16 @@ fn unauthorized_continuation_cannot_manufacture_a_split() {
     // The real successor still extends the chain, with the spam still present.
     let m2 = ManifestDoc {
         supersedes: Some(hex::encode(e1.id().unwrap())),
-        ..ManifestDoc::new("gov-mesh", vec![successor.author.clone()], WritePolicy::default())
+        ..ManifestDoc::new(
+            "gov-mesh",
+            vec![successor.author.clone()],
+            WritePolicy::default(),
+        )
     };
     let e2 = publish_manifest(&store, &successor, &m2, 0, None);
-    let compiled2 = compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().unwrap();
+    let compiled2 = compile(&store, "gov-mesh", &[founder.author.clone()])
+        .unwrap()
+        .unwrap();
     assert_eq!(compiled2.manifest_id, hex::encode(e2.id().unwrap()));
     assert_eq!(compiled2.chain.len(), 2);
 }
@@ -296,7 +386,11 @@ fn freshness_requires_independent_evidence() {
     let founder = keys();
     let witness = keys();
 
-    let m1 = ManifestDoc::new("gov-mesh", vec![founder.author.clone()], WritePolicy::default());
+    let m1 = ManifestDoc::new(
+        "gov-mesh",
+        vec![founder.author.clone()],
+        WritePolicy::default(),
+    );
     publish_manifest(&store, &founder, &m1, 0, None);
 
     // A chain that verifies is still not "current": nothing but its own
@@ -313,8 +407,18 @@ fn freshness_requires_independent_evidence() {
 
     // The node asking is not independent of itself either.
     checkpoint(&store, &witness);
-    let st = status(&store, "gov-mesh", &[founder.author.clone()], Some(&witness.author)).unwrap();
-    assert_eq!(st.freshness, Freshness::Stale, "a node cannot corroborate itself");
+    let st = status(
+        &store,
+        "gov-mesh",
+        &[founder.author.clone()],
+        Some(&witness.author),
+    )
+    .unwrap();
+    assert_eq!(
+        st.freshness,
+        Freshness::Stale,
+        "a node cannot corroborate itself"
+    );
     let third = keys();
     checkpoint(&store, &third);
     let st = status(
@@ -326,16 +430,19 @@ fn freshness_requires_independent_evidence() {
     .unwrap();
     assert_eq!(st.freshness, Freshness::Current, "reason: {}", st.reason);
     assert_eq!(st.corroborated_by.as_deref(), Some(third.author.as_str()));
-    assert_eq!(st.manifest_id.as_deref(), Some(
-        hex::encode(
-            store
-                .list(Some(&manifest_namespace("gov-mesh")), None, 10)
-                .unwrap()[0]
-                .id()
-                .unwrap(),
+    assert_eq!(
+        st.manifest_id.as_deref(),
+        Some(
+            hex::encode(
+                store
+                    .list(Some(&manifest_namespace("gov-mesh")), None, 10)
+                    .unwrap()[0]
+                    .id()
+                    .unwrap(),
+            )
+            .as_str()
         )
-        .as_str()
-    ));
+    );
 }
 
 #[test]
@@ -364,11 +471,19 @@ fn revoked_writer_under_stale_policy_is_reported_not_hidden() {
     let e2 = publish_manifest(&store, &successor, &m2, 0, None);
 
     // …and it applies…
-    let compiled = compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().unwrap();
+    let compiled = compile(&store, "gov-mesh", &[founder.author.clone()])
+        .unwrap()
+        .unwrap();
     assert_eq!(compiled.manifest_id, hex::encode(e2.id().unwrap()));
     let gated = Store::open_in_memory_with_policy(Some(compiled.policy.clone())).unwrap();
     assert!(gated
-        .insert_entry(&writer_entry(&writer, "gov.titles.application", b"x", 0, None))
+        .insert_entry(&writer_entry(
+            &writer,
+            "gov.titles.application",
+            b"x",
+            0,
+            None
+        ))
         .is_err());
 
     // …but this node cannot claim its authorization is current: nothing
@@ -376,8 +491,14 @@ fn revoked_writer_under_stale_policy_is_reported_not_hidden() {
     // *further* revocation may exist that this node never received.
     let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
     assert_eq!(st.freshness, Freshness::Stale, "reason: {}", st.reason);
-    assert_eq!(st.manifest_id.as_deref(), Some(hex::encode(e2.id().unwrap()).as_str()));
-    assert!(st.roots.contains(&successor.author), "the stale policy is still the newest known one");
+    assert_eq!(
+        st.manifest_id.as_deref(),
+        Some(hex::encode(e2.id().unwrap()).as_str())
+    );
+    assert!(
+        st.roots.contains(&successor.author),
+        "the stale policy is still the newest known one"
+    );
 }
 
 #[test]
@@ -386,7 +507,11 @@ fn rollback_leaves_evidence_and_is_stale() {
     let founder = keys();
     let successor = keys();
 
-    let m1 = ManifestDoc::new("gov-mesh", vec![successor.author.clone()], WritePolicy::default());
+    let m1 = ManifestDoc::new(
+        "gov-mesh",
+        vec![successor.author.clone()],
+        WritePolicy::default(),
+    );
     let e1 = publish_manifest(&store, &founder, &m1, 0, None);
 
     // This node only holds m1. The world moved on: another replica's manifest
@@ -395,12 +520,18 @@ fn rollback_leaves_evidence_and_is_stale() {
     let missing = "ab".repeat(32);
     let orphan = ManifestDoc {
         supersedes: Some(missing.clone()),
-        ..ManifestDoc::new("gov-mesh", vec![successor.author.clone()], WritePolicy::default())
+        ..ManifestDoc::new(
+            "gov-mesh",
+            vec![successor.author.clone()],
+            WritePolicy::default(),
+        )
     };
     publish_manifest(&store, &successor, &orphan, 0, None);
 
     // The chain still verifies up to m1 - old evidence stays usable…
-    let compiled = compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().unwrap();
+    let compiled = compile(&store, "gov-mesh", &[founder.author.clone()])
+        .unwrap()
+        .unwrap();
     assert_eq!(compiled.manifest_id, hex::encode(e1.id().unwrap()));
     // …and the node says out loud that it is behind.
     let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
@@ -413,12 +544,18 @@ fn conflicting_policy_versions_are_never_applied() {
     let store = Store::open_in_memory().unwrap();
     let founder = keys();
 
-    let mut future = ManifestDoc::new("gov-mesh", vec![founder.author.clone()], WritePolicy::default());
+    let mut future = ManifestDoc::new(
+        "gov-mesh",
+        vec![founder.author.clone()],
+        WritePolicy::default(),
+    );
     future.policy.version = 99;
     publish_manifest(&store, &founder, &future, 0, None);
 
     // Not authority: this build cannot evaluate it, so nothing verifies…
-    assert!(compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().is_none());
+    assert!(compile(&store, "gov-mesh", &[founder.author.clone()])
+        .unwrap()
+        .is_none());
     let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
     assert_eq!(st.freshness, Freshness::Unverified);
     assert!(st.reason.contains("99"), "{}", st.reason);
@@ -432,11 +569,20 @@ fn invalid_genesis_claims_stay_unverified() {
 
     // A stranger founds a chain for the mesh: structurally perfect, but not
     // signed by the key this node pinned.
-    let fake = ManifestDoc::new("gov-mesh", vec![impostor.author.clone()], WritePolicy::default());
+    let fake = ManifestDoc::new(
+        "gov-mesh",
+        vec![impostor.author.clone()],
+        WritePolicy::default(),
+    );
     publish_manifest(&store, &impostor, &fake, 0, None);
 
-    assert!(compile(&store, "gov-mesh", &[founder.author.clone()]).unwrap().is_none());
-    assert!(head(&store, "gov-mesh").unwrap().is_some(), "the impostor can see its own chain");
+    assert!(compile(&store, "gov-mesh", &[founder.author.clone()])
+        .unwrap()
+        .is_none());
+    assert!(
+        head(&store, "gov-mesh").unwrap().is_some(),
+        "the impostor can see its own chain"
+    );
     let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();
     assert_eq!(st.freshness, Freshness::Unverified);
     assert!(st.manifest_id.is_none());
@@ -449,7 +595,11 @@ fn status_reports_a_conflict_with_both_sides() {
     let a = keys();
     let b = keys();
 
-    let m1 = ManifestDoc::new("gov-mesh", vec![a.author.clone(), b.author.clone()], WritePolicy::default());
+    let m1 = ManifestDoc::new(
+        "gov-mesh",
+        vec![a.author.clone(), b.author.clone()],
+        WritePolicy::default(),
+    );
     let e1 = publish_manifest(&store, &founder, &m1, 0, None);
 
     let mut ids = Vec::new();
@@ -459,7 +609,9 @@ fn status_reports_a_conflict_with_both_sides() {
             note: Some(note.into()),
             ..ManifestDoc::new("gov-mesh", vec![k.author.clone()], WritePolicy::default())
         };
-        ids.push(hex::encode(publish_manifest(&store, k, &m, 0, None).id().unwrap()));
+        ids.push(hex::encode(
+            publish_manifest(&store, k, &m, 0, None).id().unwrap(),
+        ));
     }
 
     let st = status(&store, "gov-mesh", &[founder.author.clone()], None).unwrap();

@@ -110,12 +110,8 @@ fn governance(data_dir: &Path) -> Result<Option<Governance>, String> {
         return Ok(None);
     };
     let store = Store::open(&data_dir.join("node.db")).map_err(|e| e.to_string())?;
-    let st = datu_store::manifest::status(
-        &store,
-        &net.network_id,
-        std::slice::from_ref(&root),
-        None,
-    )?;
+    let st =
+        datu_store::manifest::status(&store, &net.network_id, std::slice::from_ref(&root), None)?;
     Ok(Some(Governance {
         freshness: st.freshness.as_str().to_string(),
         reason: st.reason,
@@ -142,12 +138,19 @@ pub fn serve(
         None => println!("  network:   open (permissionless - any node may join and sync)"),
         Some(n) if n.is_permissioned() => println!(
             "  network:   permissioned mesh '{}' ({} member(s), {} attestation root(s))",
-            if n.network_id.is_empty() { "(unnamed)" } else { &n.network_id },
+            if n.network_id.is_empty() {
+                "(unnamed)"
+            } else {
+                &n.network_id
+            },
             n.members.len(),
             n.roots.len()
         ),
         Some(n) if !n.network_id.is_empty() => {
-            println!("  network:   walled mesh '{}' (permissionless mirror)", n.network_id)
+            println!(
+                "  network:   walled mesh '{}' (permissionless mirror)",
+                n.network_id
+            )
         }
         Some(_) => println!("  network:   open (permissionless - any node may join and sync)"),
     }
@@ -167,15 +170,24 @@ pub fn serve(
         None => {}
         Some(g) => println!(
             "  governance: manifest {} - {}{}",
-            g.manifest_id.as_deref().map(crate::short).unwrap_or("(none)"),
+            g.manifest_id
+                .as_deref()
+                .map(crate::short)
+                .unwrap_or("(none)"),
             g.freshness,
-            if g.freshness == "current" { String::new() } else { format!(" ({})", g.reason) }
+            if g.freshness == "current" {
+                String::new()
+            } else {
+                format!(" ({})", g.reason)
+            }
         ),
     }
     println!("  explorer:  http://{addr}/");
     println!("  submit:    POST http://{addr}/v1/entries   (signed entry JSON)");
     if submit_per_min > 0 {
-        println!("  limits:    {submit_per_min} submissions/min per peer IP (--submit-per-min, 0 = off)");
+        println!(
+            "  limits:    {submit_per_min} submissions/min per peer IP (--submit-per-min, 0 = off)"
+        );
     }
     if haves_per_min > 0 {
         println!("  sync:      {haves_per_min} haves requests/min per peer IP (--haves-per-min, 0 = off)");
@@ -197,7 +209,15 @@ pub fn serve(
         let haves_limiter = haves_limiter.clone();
         let governance = governance.clone();
         std::thread::spawn(move || {
-            let _ = handle(stream, &dir, policy, network, limiter, haves_limiter, governance);
+            let _ = handle(
+                stream,
+                &dir,
+                policy,
+                network,
+                limiter,
+                haves_limiter,
+                governance,
+            );
         });
     }
     Ok(())
@@ -222,7 +242,11 @@ fn handle(
         haves_limiter,
         governance,
     ) {
-        let _ = respond_json(&mut stream, "400 Bad Request", &serde_json::json!({ "error": e }));
+        let _ = respond_json(
+            &mut stream,
+            "400 Bad Request",
+            &serde_json::json!({ "error": e }),
+        );
     }
     Ok(())
 }
@@ -249,19 +273,15 @@ fn handle_inner(
         return Ok(());
     }
 
-    let store = Store::open_with_policy(&data_dir.join("node.db"), policy)
-        .map_err(|e| e.to_string())?;
+    let store =
+        Store::open_with_policy(&data_dir.join("node.db"), policy).map_err(|e| e.to_string())?;
 
     match (method.as_str(), route.as_str()) {
         ("GET", "/") => respond(stream, "200 OK", "text/html; charset=utf-8", EXPLORER_HTML),
         // Locally-verifying pages share one implementation of BLAKE3 and the
         // coverage-path check with the wallet extension.
-        ("GET", "/blake3.js") => {
-            respond(stream, "200 OK", "application/javascript", BLAKE3_JS)
-        }
-        ("GET", "/coverage.js") => {
-            respond(stream, "200 OK", "application/javascript", COVERAGE_JS)
-        }
+        ("GET", "/blake3.js") => respond(stream, "200 OK", "application/javascript", BLAKE3_JS),
+        ("GET", "/coverage.js") => respond(stream, "200 OK", "application/javascript", COVERAGE_JS),
         ("GET", "/v1/status") => {
             let report = store.verify_all().map_err(|e| e.to_string())?;
             let policy = match store.policy() {
@@ -317,9 +337,11 @@ fn handle_inner(
                 .collect::<Result<_, _>>()?;
             respond_json(stream, "200 OK", &serde_json::json!({ "entries": items }))
         }
-        ("GET", "/v1/entry") | ("GET", "/v1/entry/") => {
-            respond_json(stream, "400 Bad Request", &serde_json::json!({"error":"missing entry id"}))
-        }
+        ("GET", "/v1/entry") | ("GET", "/v1/entry/") => respond_json(
+            stream,
+            "400 Bad Request",
+            &serde_json::json!({"error":"missing entry id"}),
+        ),
         ("GET", e) if e.starts_with("/v1/entry/") => {
             let id_hex = &e["/v1/entry/".len()..];
             match hex::decode(id_hex)
@@ -328,9 +350,17 @@ fn handle_inner(
             {
                 Some(id) => match store.get_entry(&id).map_err(|e| e.to_string())? {
                     Some(entry) => respond_json(stream, "200 OK", &entry_full_json(&entry)?),
-                    None => respond_json(stream, "404 Not Found", &serde_json::json!({"error":"entry not found"})),
+                    None => respond_json(
+                        stream,
+                        "404 Not Found",
+                        &serde_json::json!({"error":"entry not found"}),
+                    ),
                 },
-                None => respond_json(stream, "400 Bad Request", &serde_json::json!({"error":"bad entry id"})),
+                None => respond_json(
+                    stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error":"bad entry id"}),
+                ),
             }
         }
         // Pending view of a governed agreement: the contract an anchor
@@ -344,14 +374,22 @@ fn handle_inner(
             {
                 Some(id) => id,
                 None => {
-                    respond_json(stream, "400 Bad Request", &serde_json::json!({"error":"bad entry id"}))?;
+                    respond_json(
+                        stream,
+                        "400 Bad Request",
+                        &serde_json::json!({"error":"bad entry id"}),
+                    )?;
                     return Ok(());
                 }
             };
             match store.contract_outlook(&id).map_err(|e| e.to_string())? {
-                None => respond_json(stream, "404 Not Found", &serde_json::json!({
-                    "error": "entry declares no contract"
-                })),
+                None => respond_json(
+                    stream,
+                    "404 Not Found",
+                    &serde_json::json!({
+                        "error": "entry declares no contract"
+                    }),
+                ),
                 Some(outlook) => {
                     let conditions: Vec<serde_json::Value> = outlook
                         .conditions
@@ -379,30 +417,38 @@ fn handle_inner(
                             })
                         })
                         .collect();
-                    respond_json(stream, "200 OK", &serde_json::json!({
-                        "ok": true,
-                        "anchor": hex::encode(id),
-                        "contract_id": hex::encode(outlook.contract_id),
-                        "version": outlook.version,
-                        "kind": outlook.kind,
-                        "admits": outlook.admits,
-                        "ready": outlook.ready,
-                        "reasons": outlook.reasons,
-                        "conditions": conditions,
-                        "citing": citing,
-                    }))
+                    respond_json(
+                        stream,
+                        "200 OK",
+                        &serde_json::json!({
+                            "ok": true,
+                            "anchor": hex::encode(id),
+                            "contract_id": hex::encode(outlook.contract_id),
+                            "version": outlook.version,
+                            "kind": outlook.kind,
+                            "admits": outlook.admits,
+                            "ready": outlook.ready,
+                            "reasons": outlook.reasons,
+                            "conditions": conditions,
+                            "citing": citing,
+                        }),
+                    )
                 }
             }
         }
         ("GET", f) if f.starts_with("/v1/feed/") => {
             let author = &f["/v1/feed/".len()..];
             let feed = store.feed(author).map_err(|e| e.to_string())?;
-            let head = feed.last().map(|e| {
-                Ok::<_, String>(serde_json::json!({
-                    "seq": e.body.seq,
-                    "id": hex::encode(e.id().map_err(|e| e.to_string())?),
-                }))
-            }).transpose()?.unwrap_or(serde_json::Value::Null);
+            let head = feed
+                .last()
+                .map(|e| {
+                    Ok::<_, String>(serde_json::json!({
+                        "seq": e.body.seq,
+                        "id": hex::encode(e.id().map_err(|e| e.to_string())?),
+                    }))
+                })
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
             // Next-entry guidance for dApps building a sign request:
             let next = match feed.last() {
                 Some(e) => serde_json::json!({
@@ -415,9 +461,13 @@ fn handle_inner(
                 .iter()
                 .map(|e| entry_summary_json(e).map_err(|e| e.to_string()))
                 .collect::<Result<_, _>>()?;
-            respond_json(stream, "200 OK", &serde_json::json!({
-                "author": author, "head": head, "next": next, "entries": items,
-            }))
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({
+                    "author": author, "head": head, "next": next, "entries": items,
+                }),
+            )
         }
         ("GET", "/v1/checkpoints") => {
             let mut latest: std::collections::BTreeMap<String, datu_core::Checkpoint> =
@@ -500,16 +550,15 @@ fn handle_inner(
             for cp in candidates {
                 match store.coverage_proof(&entry_id, &cp) {
                     Ok(proof) => {
-                        let checkpoint_b64 = B64
-                            .encode(borsh::to_vec(&cp).map_err(|e| e.to_string())?);
+                        let checkpoint_b64 =
+                            B64.encode(borsh::to_vec(&cp).map_err(|e| e.to_string())?);
                         // The pieces a browser needs to verify locally: the
                         // exact signed body bytes (Ed25519 via WebCrypto), the
                         // root and set size the Merkle path must reach, and the
                         // signature over those bytes. ML-DSA-65 stays a CLI
                         // check (no browser verifier).
-                        let body_b64 = B64.encode(
-                            Checkpoint::body_bytes(&cp.body).map_err(|e| e.to_string())?,
-                        );
+                        let body_b64 = B64
+                            .encode(Checkpoint::body_bytes(&cp.body).map_err(|e| e.to_string())?);
                         witnesses.push(serde_json::json!({
                             "signer": cp.body.signer,
                             "checkpoint_id": hex::encode(cp.id().map_err(|e| e.to_string())?),
@@ -595,9 +644,13 @@ fn handle_inner(
                     })
                 })
                 .collect();
-            respond_json(stream, "200 OK", &serde_json::json!({
-                "conflicts": items, "count": count,
-            }))
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({
+                    "conflicts": items, "count": count,
+                }),
+            )
         }
         ("GET", c) if c.starts_with("/v1/conflict/") => {
             let id_hex = &c["/v1/conflict/".len()..];
@@ -616,9 +669,17 @@ fn handle_inner(
                         }
                         respond_json(stream, "200 OK", &json)
                     }
-                    None => respond_json(stream, "404 Not Found", &serde_json::json!({"error":"no recorded conflict with that id"})),
+                    None => respond_json(
+                        stream,
+                        "404 Not Found",
+                        &serde_json::json!({"error":"no recorded conflict with that id"}),
+                    ),
                 },
-                None => respond_json(stream, "400 Bad Request", &serde_json::json!({"error":"bad conflict id"})),
+                None => respond_json(
+                    stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error":"bad conflict id"}),
+                ),
             }
         }
         ("POST", "/v1/entries") => {
@@ -646,21 +707,34 @@ fn handle_inner(
             match store.insert_entry(&entry) {
                 Ok(true) => {
                     let id = entry.id().map_err(|e| e.to_string())?;
-                    respond_json(stream, "201 Created", &serde_json::json!({
-                        "ok": true, "id": hex::encode(id), "seq": entry.body.seq,
-                        "policy_freshness": governance.as_ref().as_ref().map(|g| &g.freshness),
-                    }))
+                    respond_json(
+                        stream,
+                        "201 Created",
+                        &serde_json::json!({
+                            "ok": true, "id": hex::encode(id), "seq": entry.body.seq,
+                            "policy_freshness": governance.as_ref().as_ref().map(|g| &g.freshness),
+                        }),
+                    )
                 }
-                Ok(false) => respond_json(stream, "200 OK", &serde_json::json!({
-                    "ok": true, "duplicate": true,
-                    "policy_freshness": governance.as_ref().as_ref().map(|g| &g.freshness),
-                })),
+                Ok(false) => respond_json(
+                    stream,
+                    "200 OK",
+                    &serde_json::json!({
+                        "ok": true, "duplicate": true,
+                        "policy_freshness": governance.as_ref().as_ref().map(|g| &g.freshness),
+                    }),
+                ),
                 Err(StoreError::Denied(m)) => respond_json(
                     stream,
                     "403 Forbidden",
                     &serde_json::json!({ "ok": false, "denied": m }),
                 ),
-                Err(StoreError::Conflict { author, seq, existing, incoming }) => respond_json(
+                Err(StoreError::Conflict {
+                    author,
+                    seq,
+                    existing,
+                    incoming,
+                }) => respond_json(
                     stream,
                     "409 Conflict",
                     &serde_json::json!({
@@ -677,9 +751,13 @@ fn handle_inner(
                         },
                     }),
                 ),
-                Err(e) => respond_json(stream, "409 Conflict", &serde_json::json!({
-                    "ok": false, "rejected": e.to_string(),
-                })),
+                Err(e) => respond_json(
+                    stream,
+                    "409 Conflict",
+                    &serde_json::json!({
+                        "ok": false, "rejected": e.to_string(),
+                    }),
+                ),
             }
         }
         ("POST", "/v1/sync/haves") => {
@@ -718,9 +796,13 @@ fn handle_inner(
             let have = match BloomFilter::from_parts(m, k, &bits) {
                 Some(f) => f,
                 None => {
-                    return respond_json(stream, "400 Bad Request", &serde_json::json!({
-                        "error": "malformed bloom filter (m, k, bits_b64)"
-                    }))
+                    return respond_json(
+                        stream,
+                        "400 Bad Request",
+                        &serde_json::json!({
+                            "error": "malformed bloom filter (m, k, bits_b64)"
+                        }),
+                    )
                 }
             };
             let (entries, next_cursor, more) = store
@@ -740,12 +822,16 @@ fn handle_inner(
             } else {
                 Vec::new()
             };
-            respond_json(stream, "200 OK", &serde_json::json!({
-                "entries": items,
-                "cursor": next_cursor,
-                "more": more,
-                "checkpoints": checkpoints,
-            }))
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({
+                    "entries": items,
+                    "cursor": next_cursor,
+                    "more": more,
+                    "checkpoints": checkpoints,
+                }),
+            )
         }
         (m, _) => respond_json(
             stream,
@@ -777,7 +863,10 @@ fn parse_list_query(query: &str) -> (Option<String>, Option<String>, usize) {
 }
 
 fn payload_preview(entry: &Entry) -> String {
-    String::from_utf8_lossy(&entry.body.payload).chars().take(120).collect()
+    String::from_utf8_lossy(&entry.body.payload)
+        .chars()
+        .take(120)
+        .collect()
 }
 
 fn entry_summary_json(entry: &Entry) -> Result<serde_json::Value, String> {
@@ -838,7 +927,10 @@ pub fn checkpoint_from_json(value: &serde_json::Value) -> Result<Checkpoint, Str
     Ok(Checkpoint {
         body: CheckpointBody {
             version: num("version")? as u8,
-            signer: value["signer"].as_str().ok_or("missing signer")?.to_string(),
+            signer: value["signer"]
+                .as_str()
+                .ok_or("missing signer")?
+                .to_string(),
             signer_pq: value["signer_pq"].as_str().unwrap_or("").to_string(),
             pq_alg: value["pq_alg"].as_str().unwrap_or("").to_string(),
             height: num("height")?,
@@ -885,7 +977,12 @@ fn read_request(stream: &TcpStream) -> Option<(String, String, Vec<u8>)> {
     Some((method, path, body))
 }
 
-fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) -> Result<(), String> {
+fn respond(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> Result<(), String> {
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -897,7 +994,11 @@ fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str)
         .map_err(|e| e.to_string())
 }
 
-fn respond_json(stream: &mut TcpStream, status: &str, value: &serde_json::Value) -> Result<(), String> {
+fn respond_json(
+    stream: &mut TcpStream,
+    status: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
     let body = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     respond(stream, status, "application/json; charset=utf-8", &body)
 }
@@ -1125,7 +1226,10 @@ mod tests {
         let limiter = PeerLimiter::new(2);
         assert_eq!(limiter.check("a", 1_000), None);
         assert_eq!(limiter.check("a", 2_000), None);
-        assert!(limiter.check("a", 3_000).is_some(), "third hit in window denied");
+        assert!(
+            limiter.check("a", 3_000).is_some(),
+            "third hit in window denied"
+        );
         assert_eq!(limiter.check("b", 3_000), None, "budget is per peer");
         assert_eq!(limiter.check("a", 61_500), None, "window has slid");
         let off = PeerLimiter::new(0);
@@ -1148,7 +1252,10 @@ mod tests {
         // conflict listing links them at read time - ordering never matters.
         let resolution_id = {
             let store = Store::open(&data.join("node.db")).unwrap();
-            let r = resolution(vec![rewrite.id().unwrap()], b"{\"verdict\":\"stored history stands\"}");
+            let r = resolution(
+                vec![rewrite.id().unwrap()],
+                b"{\"verdict\":\"stored history stands\"}",
+            );
             store.insert_entry(&r).unwrap();
             hex::encode(r.id().unwrap())
         };
@@ -1175,7 +1282,10 @@ mod tests {
         let conflicting = serde_json::to_string(&entry_full_json(&rewrite).unwrap()).unwrap();
         let (status, body) = http(port, "POST", "/v1/entries", &conflicting);
         assert!(status.contains("409"), "conflict rejected: {status}");
-        assert!(body.contains("evidence_recorded"), "409 body names the evidence");
+        assert!(
+            body.contains("evidence_recorded"),
+            "409 body names the evidence"
+        );
 
         let (status, body) = http(port, "GET", "/v1/conflicts", "");
         assert!(status.contains("200"));
@@ -1183,7 +1293,9 @@ mod tests {
         assert_eq!(listing["count"].as_u64(), Some(1));
         let conflict_id = listing["conflicts"][0]["id"].as_str().unwrap().to_string();
         assert_eq!(
-            listing["conflicts"][0]["stored_id"].as_str().map(str::to_string),
+            listing["conflicts"][0]["stored_id"]
+                .as_str()
+                .map(str::to_string),
             Some(hex::encode(original.id().unwrap()))
         );
         assert_eq!(
@@ -1357,4 +1469,3 @@ mod tests {
         assert!(body.contains("stale"), "{body}");
     }
 }
-

@@ -164,9 +164,9 @@ fn seal_symmetric(key: &[u8; 32], plaintext: &[u8]) -> WResult<(Vec<u8>, Vec<u8>
 
 fn open_symmetric(key: &[u8; 32], nonce: &[u8], ct: &[u8]) -> WResult<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
-    cipher
-        .decrypt(XNonce::from_slice(nonce), ct)
-        .map_err(|_| "decryption failed (wrong key, wrong passphrase, or tampered data)".to_string())
+    cipher.decrypt(XNonce::from_slice(nonce), ct).map_err(|_| {
+        "decryption failed (wrong key, wrong passphrase, or tampered data)".to_string()
+    })
 }
 
 pub struct Wallet {
@@ -234,8 +234,7 @@ impl Wallet {
             pq_hex: datu_core::pq::sk_to_hex(&pq_secret),
             seal: seal.to_bytes(),
         };
-        let plaintext =
-            borsh::to_vec(&bundle).map_err(|e| format!("encode failed: {e}"))?;
+        let plaintext = borsh::to_vec(&bundle).map_err(|e| format!("encode failed: {e}"))?;
         let mut salt = [0u8; 16];
         use rand::RngCore;
         OsRng.fill_bytes(&mut salt);
@@ -292,17 +291,13 @@ impl Wallet {
         } else {
             // v1 keystores: BLAKE3-derived key (not memory-hard; readable for
             // backward compatibility, never written anymore).
-            derive_key(
-                "datu-wallet-keystore-v1",
-                &[passphrase.as_bytes(), &salt],
-            )
+            derive_key("datu-wallet-keystore-v1", &[passphrase.as_bytes(), &salt])
         };
         let plaintext = open_symmetric(&kek, &nonce, &ct)?;
         let bundle = SecretBundle::try_from_slice(&plaintext)
             .map_err(|e| format!("corrupt keystore: {e}"))?;
         let ed = SigningKey::from_bytes(&bundle.ed);
-        let pq_secret = datu_core::pq::sk_from_hex(&bundle.pq_hex)
-            .map_err(|e| e.to_string())?;
+        let pq_secret = datu_core::pq::sk_from_hex(&bundle.pq_hex).map_err(|e| e.to_string())?;
         let seal = StaticSecret::from(bundle.seal);
         let public = self
             .list()?
@@ -335,8 +330,7 @@ impl Wallet {
             pq_hex: datu_core::pq::sk_to_hex(&loaded.pq),
             seal: loaded.seal.to_bytes(),
         };
-        let plaintext =
-            borsh::to_vec(&bundle).map_err(|e| format!("encode failed: {e}"))?;
+        let plaintext = borsh::to_vec(&bundle).map_err(|e| format!("encode failed: {e}"))?;
         let kdf_params = KdfParams {
             m_kib: ARGON2_M_KIB,
             t: ARGON2_T,
@@ -391,16 +385,14 @@ impl Wallet {
         let ct = B64
             .decode(&backup.ct_b64)
             .map_err(|_| "corrupt backup (ciphertext)".to_string())?;
-        let kek =
-            derive_key_argon2id(backup_passphrase.as_bytes(), &salt, &backup.kdf_params)?;
+        let kek = derive_key_argon2id(backup_passphrase.as_bytes(), &salt, &backup.kdf_params)?;
         let plaintext = open_symmetric(&kek, &nonce, &ct)?;
-        let bundle = SecretBundle::try_from_slice(&plaintext)
-            .map_err(|e| format!("corrupt backup: {e}"))?;
+        let bundle =
+            SecretBundle::try_from_slice(&plaintext).map_err(|e| format!("corrupt backup: {e}"))?;
 
         // The restored keys must match the public metadata in the file.
         let ed = SigningKey::from_bytes(&bundle.ed);
-        let pq_secret =
-            datu_core::pq::sk_from_hex(&bundle.pq_hex).map_err(|e| e.to_string())?;
+        let pq_secret = datu_core::pq::sk_from_hex(&bundle.pq_hex).map_err(|e| e.to_string())?;
         let seal = StaticSecret::from(bundle.seal);
         if hex::encode(ed.verifying_key().as_bytes()) != backup.ed_public
             || datu_core::pq::pk_to_hex(&pq_secret.get_public_key()) != backup.pq_public
@@ -551,10 +543,7 @@ impl LoadedIdentity {
     /// Decrypt every sealed field addressed to this identity's sealing key
     /// (v1 single-reader and v2 multi-reader formats). Returns
     /// (opened, skipped_for_other_readers).
-    pub fn open_fields(
-        &self,
-        document: &mut serde_json::Value,
-    ) -> WResult<(usize, usize)> {
+    pub fn open_fields(&self, document: &mut serde_json::Value) -> WResult<(usize, usize)> {
         let map = document
             .as_object_mut()
             .ok_or("document must be a JSON object")?;
@@ -579,7 +568,8 @@ impl LoadedIdentity {
                         .find(|r| r.to == self.public.seal_public)
                     {
                         Some(recipient) => {
-                            let plaintext = open_recipient(recipient, &sealed.commitment, &self.seal)?;
+                            let plaintext =
+                                open_recipient(recipient, &sealed.commitment, &self.seal)?;
                             *value = serde_json::from_slice(&plaintext)
                                 .map_err(|e| format!("decrypted field is not valid JSON: {e}"))?;
                             opened += 1;
@@ -679,8 +669,7 @@ fn open_recipient_raw(recipient: &Recipient, my_seal: &StaticSecret) -> WResult<
         .try_into()
         .map_err(|_| "eph key must be 32 bytes".to_string())?;
     let shared = my_seal.diffie_hellman(&XPublicKey::from(eph));
-    let reader_bytes =
-        hex::decode(&recipient.to).map_err(|_| "bad reader key".to_string())?;
+    let reader_bytes = hex::decode(&recipient.to).map_err(|_| "bad reader key".to_string())?;
     let key = derive_key(
         "datu-seal-v1",
         &[shared.as_bytes(), &eph, reader_bytes.as_slice()],
@@ -688,7 +677,9 @@ fn open_recipient_raw(recipient: &Recipient, my_seal: &StaticSecret) -> WResult<
     let nonce = B64
         .decode(&recipient.nonce)
         .map_err(|_| "bad nonce".to_string())?;
-    let ct = B64.decode(&recipient.ct).map_err(|_| "bad ct".to_string())?;
+    let ct = B64
+        .decode(&recipient.ct)
+        .map_err(|_| "bad ct".to_string())?;
     open_symmetric(&key, &nonce, &ct)
 }
 
@@ -876,9 +867,7 @@ pub fn open_deferred(
     let nonce = B64
         .decode(&deferred.nonce)
         .map_err(|_| "bad nonce".to_string())?;
-    let ct = B64
-        .decode(&deferred.ct)
-        .map_err(|_| "bad ct".to_string())?;
+    let ct = B64.decode(&deferred.ct).map_err(|_| "bad ct".to_string())?;
     let plaintext = open_symmetric(&key, &nonce, &ct)?;
     let computed = hex::encode(blake3::hash(&plaintext).as_bytes());
     if computed != deferred.commitment {
@@ -893,8 +882,7 @@ fn open_field(sealed: &SealedField, my_seal: &StaticSecret) -> WResult<Vec<u8>> 
         .try_into()
         .map_err(|_| "eph key must be 32 bytes".to_string())?;
     let shared = my_seal.diffie_hellman(&XPublicKey::from(eph));
-    let reader_bytes =
-        hex::decode(&sealed.to).map_err(|_| "bad reader key".to_string())?;
+    let reader_bytes = hex::decode(&sealed.to).map_err(|_| "bad reader key".to_string())?;
     let key = derive_key(
         "datu-seal-v1",
         &[shared.as_bytes(), &eph, reader_bytes.as_slice()],
@@ -995,7 +983,11 @@ mod tests {
         let shared = eph_secret.diffie_hellman(&reader_public);
         let key = derive_key(
             "datu-seal-v1",
-            &[shared.as_bytes(), eph_public.as_bytes(), reader_public.as_bytes()],
+            &[
+                shared.as_bytes(),
+                eph_public.as_bytes(),
+                reader_public.as_bytes(),
+            ],
         );
         let (nonce, ct) = seal_symmetric(&key, plaintext).unwrap();
         let v1_field = SealedField {
@@ -1006,7 +998,8 @@ mod tests {
             ct: B64.encode(&ct),
             commitment: hex::encode(blake3::hash(plaintext).as_bytes()),
         };
-        let mut doc = serde_json::json!({ "old": serde_json::to_value(&v1_field).unwrap(), "plain": 1 });
+        let mut doc =
+            serde_json::json!({ "old": serde_json::to_value(&v1_field).unwrap(), "plain": 1 });
         let (opened, skipped) = identity.open_fields(&mut doc).unwrap();
         assert_eq!((opened, skipped), (1, 0));
         assert_eq!(doc["old"]["secret"], 42);

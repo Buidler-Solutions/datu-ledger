@@ -83,8 +83,7 @@ impl SignedDocument {
             "role": role,
             "key": key,
         });
-        let bytes =
-            serde_json::to_vec(&canonical).map_err(|e| Error::Encoding(e.to_string()))?;
+        let bytes = serde_json::to_vec(&canonical).map_err(|e| Error::Encoding(e.to_string()))?;
         Ok(*blake3::hash(&bytes).as_bytes())
     }
 
@@ -141,10 +140,12 @@ impl SignedDocument {
                 .try_into()
                 .map_err(|_| Error::Crypto("ed25519 signature must be 64 bytes".into()))?;
             vk.verify(&digest, &Signature::from_bytes(&sig))
-                .map_err(|_| Error::Crypto(format!(
-                    "party signature for role '{}' does not verify",
-                    party.role
-                )))?;
+                .map_err(|_| {
+                    Error::Crypto(format!(
+                        "party signature for role '{}' does not verify",
+                        party.role
+                    ))
+                })?;
             if let (Some(sig_b64), Some(pq_key)) = (&party.pq_signature, &party.pq_key) {
                 let alg = party.pq_alg.as_deref().unwrap_or("");
                 let sig = B64
