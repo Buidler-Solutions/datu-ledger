@@ -14,7 +14,9 @@ use std::path::Path;
 
 mod policy;
 pub mod manifest;
+mod contract;
 
+pub use contract::ContractCheck;
 pub use manifest::{manifest_namespace, CompiledManifest, Freshness, ManifestDoc, ManifestStatus};
 pub use policy::{NamespaceRule, RoleRule, POLICY_VERSION, WritePolicy};
 
@@ -310,6 +312,12 @@ pub struct VerifyReport {
     /// - the stored one in `entries`, the incoming one in `conflicts` - so
     /// the dispute is visible, not silently resolved.
     pub conflicts: u64,
+    /// Entries declaring a document contract their document does not (or
+    /// cannot) satisfy, recounted by the same pure predicate admission
+    /// used. Evidence-grade, not fatal: enforcement is admission-time; this
+    /// count tells auditors what a stricter node would have refused - or
+    /// what arrived on this node against a rule it had not seen yet.
+    pub contracts_failed: u64,
 }
 
 /// One preserved side of a feed dispute: the incoming entry (id, its bytes
@@ -1070,6 +1078,7 @@ impl Store {
         let mut authors: BTreeSet<String> = BTreeSet::new();
         let mut entries: u64 = 0;
         let mut pending_links: u64 = 0;
+        let mut contracts_failed: u64 = 0;
 
         let mut stmt = self
             .conn
@@ -1097,6 +1106,11 @@ impl Store {
             for r in &entry.body.refs {
                 if !self.has_entry(r)? {
                     pending_links += 1;
+                }
+            }
+            if let Some(check) = self.check_contract(&entry)? {
+                if !check.admitted {
+                    contracts_failed += 1;
                 }
             }
         }
@@ -1156,6 +1170,7 @@ impl Store {
             checkpoints,
             pending_links,
             conflicts: self.conflicts_count()?,
+            contracts_failed,
             lineage: match datu_core::genesis::genesis_entry() {
                 Ok(genesis) => match genesis.id() {
                     Ok(id) => self.has_entry(&id).unwrap_or(false),

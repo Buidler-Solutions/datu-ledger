@@ -6,6 +6,7 @@ use base64::Engine;
 use borsh::BorshDeserialize;
 use clap::{Parser, Subcommand};
 use datu_core::attest::{self, AttestationDoc, CosignDoc};
+use datu_core::contract::{self, ContractSpec};
 use datu_core::fork::{self, ForkEvidence};
 use datu_core::merkle::merkle_root;
 use datu_core::parties::SignedDocument;
@@ -129,6 +130,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: PartiesCmd,
     },
+    /// Document contracts: predicate rules governed documents must satisfy
+    Contract {
+        #[command(subcommand)]
+        cmd: ContractCmd,
+    },
     /// Pull missing entries from peer node(s) - bloom-filter reconciliation
     Sync {
         /// Peer: bare host:port (native p2p protocol) or http://host:port
@@ -193,6 +199,22 @@ enum Commands {
     Bundle {
         #[command(subcommand)]
         cmd: BundleCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContractCmd {
+    /// Show a contract entry's spec (the rule itself)
+    Show {
+        /// Contract entry id (hex)
+        #[arg(long)]
+        id: String,
+    },
+    /// Evaluate the contract an entry's document declares, condition by condition
+    Check {
+        /// Entry id (hex) of the governed document
+        #[arg(long)]
+        id: String,
     },
 }
 
@@ -1302,9 +1324,19 @@ fn cmd_get(node: &Node, id_hex: String) -> Result<(), String> {
 fn cmd_verify(node: &Node) -> Result<(), String> {
     let report = s(node.store.verify_all())?;
     println!(
-        "OK: {} entries, {} feeds, {} checkpoints, {} pending links (unseen references, not errors)",
-        report.entries, report.feeds, report.checkpoints, report.pending_links
+        "OK: {} entries, {} feeds, {} checkpoints, {} pending links (unseen references, not errors), {} contract failures",
+        report.entries,
+        report.feeds,
+        report.checkpoints,
+        report.pending_links,
+        report.contracts_failed
     );
+    if report.contracts_failed > 0 {
+        println!(
+            "contracts: {} governed entries do not (or cannot) satisfy the contract they declare - evidence-grade here; `datu contract check --id` shows why",
+            report.contracts_failed
+        );
+    }
     println!(
         "lineage: {}",
         if report.lineage {
@@ -1313,6 +1345,91 @@ fn cmd_verify(node: &Node) -> Result<(), String> {
             "FOREIGN - the code's genesis record is missing: this ledger was built by genesis-stripped code"
         }
     );
+    Ok(())
+}
+
+/// Show the rule itself: a contract entry's spec.
+fn cmd_contract_show(node: &Node, id: String) -> Result<(), String> {
+    let entry_id = parse_id(&id)?;
+    let entry = s(node.store.get_entry(&entry_id))?
+        .ok_or_else(|| format!("entry {id} is not on this node"))?;
+    if !contract::is_contracts_namespace(&entry.body.namespace) {
+        return Err(format!(
+            "entry {id} is in namespace '{}', not a contract (contracts live in {} or its sub-namespaces)",
+            entry.body.namespace,
+            contract::CONTRACTS_NAMESPACE
+        ));
+    }
+    let spec = ContractSpec::from_payload(&entry.body.payload).ok_or_else(|| {
+        format!(
+            "entry {id} is in the contracts namespace but carries no contract spec (expected a '{}' document holding the rule)",
+            contract::CONTRACT_KIND
+        )
+    })?;
+    println!(
+        "contract {}  v{}  ns={}  author {} seq {}",
+        short(&id),
+        spec.version,
+        entry.body.namespace,
+        short(&entry.body.author),
+        entry.body.seq
+    );
+    let json = serde_json::to_value(&spec).map_err(|e| e.to_string())?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+/// Re-run the contract an entry declares, condition by condition. The same
+/// pure predicate admission uses, so open observers can evaluate what
+/// validators enforce.
+fn cmd_contract_check(node: &Node, id: String) -> Result<(), String> {
+    let entry_id = parse_id(&id)?;
+    let entry = s(node.store.get_entry(&entry_id))?
+        .ok_or_else(|| format!("entry {id} is not on this node"))?;
+    match s(node.store.check_contract(&entry))? {
+        None => println!(
+            "entry {} declares no contract (nothing to evaluate)",
+            short(&id)
+        ),
+        Some(check) => {
+            println!("entry       {}", short(&id));
+            println!("document    kind '{}'", check.kind);
+            println!(
+                "contract    {} v{}",
+                short(&hex::encode(check.contract_id)),
+                check.version
+            );
+            println!(
+                "verdict     {}",
+                if check.admitted {
+                    "ADMITTED"
+                } else {
+                    "DENIED"
+                }
+            );
+            if !check.conditions.is_empty() {
+                println!("conditions:");
+                for condition in &check.conditions {
+                    println!(
+                        "  [{}] {} (required: {}, found: {})",
+                        if condition.met { "met    " } else { "NOT MET" },
+                        condition.requirement,
+                        condition.required,
+                        condition.found
+                    );
+                }
+            }
+            if !check.reasons.is_empty() {
+                println!("reasons:");
+                for reason in &check.reasons {
+                    println!("  - {reason}");
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3039,6 +3156,13 @@ fn run(cli: Cli) -> Result<(), String> {
                     out,
                 } => cmd_parties_sign(&node, role.clone(), kind.clone(), input, out),
                 PartiesCmd::Show { id } => cmd_parties_show(&node, id.clone()),
+            }
+        }
+        Commands::Contract { cmd } => {
+            let node = load_node_reader(&cli.data_dir)?;
+            match cmd {
+                ContractCmd::Show { id } => cmd_contract_show(&node, id.clone()),
+                ContractCmd::Check { id } => cmd_contract_check(&node, id.clone()),
             }
         }
         Commands::Sync { peers, page } => {

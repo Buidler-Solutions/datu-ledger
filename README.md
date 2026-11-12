@@ -589,6 +589,52 @@ quantum-resistant too. Policy decides *whose* signature counts: `--require-role
 holder` wants some verified holder; `--rule 'gov.titles.*:holder@holder_key'`
 wants **the** holder - the key named inside the document.
 
+### Document contracts: rules as ledger content
+
+Party signatures answer "did the affected people consent?". Contracts answer
+"does this document satisfy the rule it claims to follow?" - and the rule
+itself is ledger content, content-addressed like everything else. A contract
+is a *predicate*, not a program: a pure function over the document and its
+direct citations (`refs`, one hop). Nothing executes and nothing mutates, so
+evaluation is identical on every node and safe on a no-consensus DAG.
+Contracts gate; people act.
+
+A contract spec is a small JSON rule - `admits` (the document kind),
+`requires_parties` (verified party roles, with key pins and field binds),
+`requires_refs` (cited documents of a kind, optionally with a required party
+or a minimum of distinct cosigners), and `deadline_from_field`. It is
+published as a party-signed `gov.contract` document into the `gov.contracts`
+namespace through the ordinary writer policy, so the entry id *is* the
+contract's address. A governed document opts in by naming its rule:
+
+```json
+{"parcel": "PH-1", "holder_key": "…", "deadline_ms": 1770000000000,
+ "contract": {"id": "<hex contract entry id>", "version": 1}}
+```
+
+Validators enforce at admission: a gated-namespace document that declares a
+contract is stored only if the contract admits it - kind matches, required
+parties verified, required citations present in its `refs` and on time
+(citations stamped after the deadline field do not count). Resolution is
+fail-closed: the contract entry must be present on this node, in the
+contracts namespace, at the pinned version. Open observers mirror everything
+and can evaluate the same predicate on demand:
+
+```sh
+datu publish --ns gov.contracts --file contract.json   # the rule itself
+datu contract show --id <contract-entry-id>            # inspect the rule
+datu contract check --id <governed-entry-id>           # condition-by-condition verdict
+```
+
+`datu verify` recounts contract satisfaction across the whole ledger
+(`contracts_failed`) as evidence - what a stricter node would have refused,
+or what arrived before the rule did. Because contracts are generic
+predicates over documents and citations, ecosystem conventions can build on
+them without new protocol machinery: document escrow (a certificate released
+to a holder once compliance entries arrive), one-award-per-parcel rewards,
+conditional registries. A tool for whoever needs it - documents that declare
+no contract are untouched.
+
 ## Network modes: who may join and sync
 
 `policy.json` gates whose **entries land** (write admission). `network.json`
@@ -723,15 +769,17 @@ tokenless, offline-capable operation.
 ## Layout
 
 - `crates/core` - entries, hash chains, Merkle set-roots, checkpoints, hybrid
-  crypto, bloom filters, attestation/cosign helpers, party signatures
+  crypto, bloom filters, attestation/cosign helpers, party signatures,
+  document contracts (predicate specs)
 - `crates/store` - append-only storage (immutability triggers), writer policy
-  gate, bundles, delta files, reconciliation pages, full verification
+  gate, contract admission + evaluation, bundles, delta files, reconciliation
+  pages, full verification
 - `crates/p2p` - DATUP2P1: the native node-to-node sync protocol over raw TCP
 - `crates/wallet` - keychain identities (Argon2id), reference signer,
   party consent signing, multi-reader field sealing (`datu-sealed-v2`; reads
   legacy `dag-sealed-v2` and `dag-sealed-v1`)
 - `crates/cli` - the `datu` binary (node daemon, p2p + mDNS discovery, serve,
-  sync, delta, attest, policy, parties, wallet, witness, prove-fork)
+  sync, delta, attest, policy, parties, contract, wallet, witness, prove-fork)
 
 ## Roadmap
 

@@ -190,6 +190,9 @@ impl Store {
     ///    registry office and the holder - nobody else).
     /// 4. if `rules[].max_entries_per_author` is set, an author over the cap
     ///    in that namespace is denied - one ballot per voter, at admission.
+    /// 5. if the document declares a contract (`doc.contract`, see
+    ///    `datu_core::contract`), the contract entry must be resolvable on
+    ///    this node and its predicate must admit the document.
     pub fn gate(&self, entry: &Entry) -> StoreResult<()> {
         let policy = match &self.policy {
             Some(p) => p,
@@ -238,7 +241,7 @@ impl Store {
             .filter_map(|rule| rule.max_entries_per_author)
             .min();
         if required.is_empty() && sealed_fields.is_empty() && cap.is_none() {
-            return Ok(());
+            return self.enforce_contract(entry);
         }
         let document = match SignedDocument::from_payload(&entry.body.payload) {
             Some(document) => Some(document),
@@ -338,7 +341,12 @@ impl Store {
                 )));
             }
         }
-        Ok(())
+        // Last bar: if the document itself declares a contract
+        // (`doc.contract`), the contract must admit it. Admission
+        // enforcement is institutional; evaluation stays universal - open
+        // observers mirror everything and can re-run the same predicate
+        // via `datu contract check`.
+        self.enforce_contract(entry)
     }
 
     /// Is `subject` (a node or writer key) vouched for by any of `attestors`

@@ -1,6 +1,7 @@
 pub mod attest;
 pub mod bloom;
 pub mod checkpoint;
+pub mod contract;
 pub mod entry;
 pub mod error;
 pub mod feed;

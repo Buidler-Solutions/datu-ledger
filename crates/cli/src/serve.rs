@@ -260,6 +260,7 @@ fn handle_inner(
                 "checkpoints": report.checkpoints,
                 "pending_links": report.pending_links,
                 "conflicts": report.conflicts,
+                "contracts_failed": report.contracts_failed,
                 "policy": policy,
                 "network": network,
                 "manifest": match governance.as_ref() {
