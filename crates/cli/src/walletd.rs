@@ -284,6 +284,25 @@ fn handle_inner(
                 }),
             )
         }
+        // Capability probe: lets a client (the extension, the SDK) tell this
+        // service apart from an older one that lacks SignetAuth, and pick the
+        // newer service when several are running on localhost.
+        ("GET", "/v1/wallet/capabilities") => respond_json(
+            stream,
+            "200 OK",
+            &serde_json::json!({
+                "ok": true,
+                "service": "datu-wallet-bridge",
+                "version": env!("CARGO_PKG_VERSION"),
+                "features": [
+                    "identities",
+                    "auth-assert",
+                    "grants",
+                    "origin-pinning",
+                    "webauthn",
+                ],
+            }),
+        ),
         ("GET", "/v1/wallet/identities") => {
             let identities = wallet.list().map_err(|e| e.to_string())?;
             let items: Vec<serde_json::Value> = identities

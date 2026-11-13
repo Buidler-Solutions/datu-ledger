@@ -141,30 +141,73 @@ async function pairWallet(url, token, label) {
 
 // 7488 first: the canonical desktop bridge (LaunchAgent / DATU Wallet.app).
 const PROBE_PORTS = ['7488', '7588', '7482', '7483', '7480', '7481', '7484', '7485', '7489', '7490'];
+// Which features a service offers. The probe exists so the panel can prefer a
+// current service over an older one running on another port: a stale app
+// without SignetAuth should never be the one the panel pairs with when a
+// current one is also up.
+const bridgeFeatures = {}; // url -> Set(features)
+async function probeFeatures(url, token) {
+  if (bridgeFeatures[url]) return bridgeFeatures[url];
+  try {
+    const res = await fetch(`${url}/v1/wallet/capabilities`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) return new Set();
+    const json = await res.json();
+    const set = new Set(Array.isArray(json.features) ? json.features : []);
+    bridgeFeatures[url] = set;
+    return set;
+  } catch {
+    return new Set();
+  }
+}
+
 async function autoPair() {
+  const candidates = [];
   for (const port of PROBE_PORTS) {
     const url = `http://127.0.0.1:${port}`;
-    if (tokens[url]) {
-      try {
-        await pairWallet(url, tokens[url]);
-        status(`re-paired with the Signet service at ${url}`, 'ok');
-        return true;
-      } catch {
-        delete tokens[url]; // stale token (bridge restarted) - mint a fresh one
-        await sessionSet({ tokens });
+    let token = tokens[url];
+    if (token) {
+      const features = await probeFeatures(url, token);
+      const reachable = await fetch(`${url}/v1/wallet/identities`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(1500),
+      })
+        .then((r) => r.ok)
+        .catch(() => false);
+      if (reachable) {
+        candidates.push({ url, token, port, features });
+        continue;
       }
+      delete tokens[url]; // stale token (bridge restarted) - mint a fresh one
+      await sessionSet({ tokens });
     }
     try {
-      const res = await fetch(`${url}/v1/pair`);
+      const res = await fetch(`${url}/v1/pair`, { signal: AbortSignal.timeout(1500) });
       if (!res.ok) continue;
       const data = await res.json();
       if (!data || !data.token) continue;
-      await pairWallet(url, data.token, `datu · ${port}`);
-      status(`auto-paired with the Signet service at ${url}`, 'ok');
-      return true;
+      const features = await probeFeatures(url, data.token);
+      candidates.push({ url, token: data.token, port, features });
     } catch {}
   }
-  return false;
+  if (!candidates.length) return false;
+  // Prefer a service that speaks SignetAuth; fall back to a legacy one only
+  // when nothing better is running.
+  const modern = candidates.filter((c) => c.features.has('auth-assert'));
+  const chosen = modern[0] || candidates[0];
+  await pairWallet(chosen.url, chosen.token, `datu · ${chosen.port}`);
+  if (!chosen.features.has('auth-assert')) {
+    setConnState(
+      'legacy',
+      `connected to ${chosen.url}, which predates SignetAuth (login needs a current Signet). Update the DATU Wallet app, or start the current binary: datu signet serve --addr 127.0.0.1:7588`,
+    );
+    status('paired with an older Signet - SignetAuth login is unavailable until it is updated', 'err');
+  } else {
+    status(`auto-paired with the Signet service at ${chosen.url}`, 'ok');
+  }
+  return true;
 }
 
 // ---- connection state: auto-detect the local Signet, explain how to get one ----
@@ -187,6 +230,13 @@ function setConnState(kind, detail = '') {
     text.className = 'muted small';
     text.textContent = detail || 'looking for a local Signet service…';
     if (hint) hint.style.display = 'none';
+    return;
+  }
+  if (kind === 'legacy') {
+    text.className = 'err small';
+    text.textContent = detail || 'connected to an older Signet service that predates SignetAuth';
+    if (hint) hint.style.display = 'block';
+    $('bridgeDot').className = 'dot red';
     return;
   }
   // not-found: the extension needs a local Signet; show install guidance
