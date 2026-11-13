@@ -162,6 +162,21 @@
         </div>
         <p class="muted small" id="pairHint"></p>
 
+        <h2>Device passkey unlock</h2>
+        <p class="muted small">
+          Replace typing the passphrase with a device passkey (Touch ID, Windows
+          Hello, PIN). The passphrase is wrapped under a key only your passkey
+          can derive, and is unwrapped into panel memory for this session after
+          a biometric gesture. Losing the passkey changes nothing: type the
+          passphrase as before.
+        </p>
+        <div class="row">
+          <button class="ghost" id="passkeyEnable">Protect this identity with a passkey</button>
+          <button class="ghost" id="passkeyUnlock">Unlock with passkey</button>
+          <button class="ghost" id="passkeyForget">Forget passkey</button>
+        </div>
+        <p class="muted small" id="passkeyHint">Select an identity and enter its passphrase in the Sign tab first, then protect it.</p>
+
         <h2>Backup &amp; move devices</h2>
         <p class="muted small">
           Exports the selected identity as a file encrypted with a separate backup
@@ -188,6 +203,7 @@
 
     <script src="blake3.js"></script>
     <script src="coverage.js"></script>
+    <script src="passkey.js"></script>
     <script src="panel.js"></script>
   </body>
 </html>

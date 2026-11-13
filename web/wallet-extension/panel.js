@@ -871,6 +871,64 @@ async function importIdentity() {
   }
 }
 
+// ---------- device passkey unlock (Level 3b) ----------
+// The passkey wraps the passphrase: enable stores an AES-GCM blob (key
+// derived from the authenticator's PRF output) per identity; unlock runs the
+// biometric gesture, unwraps the passphrase into panel memory (passCache)
+// and the session grant / signing flows work as if it was typed.
+const PASSKEY_PREFIX = 'datu.passkey.';
+
+async function passkeyEnable() {
+  try {
+    const identity = selected();
+    if (!$('pass').value) throw new Error('enter the vault passphrase first (Sign tab)');
+    if (!window.datuPasskey) throw new Error('passkey module not loaded');
+    status('creating the device passkey (follow the system prompt)…');
+    const { credentialId } = await window.datuPasskey.createPasskey(identity.name);
+    const salt = window.datuPasskey.prfSalt();
+    status('confirm the passkey once to activate it…');
+    const secret = await window.datuPasskey.unlockSecret(credentialId, salt);
+    const blob = await window.datuPasskey.wrapPassphrase(secret, $('pass').value);
+    await localSet({
+      [PASSKEY_PREFIX + identity.name]: { credentialId, salt: btoa(String.fromCharCode(...salt)), ...blob },
+    });
+    $('passkeyHint').textContent = `passkey active for '${identity.name}' - Unlock with passkey replaces typing`;
+    status(`passkey protection enabled for ${identity.name}`, 'ok');
+  } catch (e) {
+    status(`passkey setup failed: ${e.message}`, 'err');
+  }
+}
+
+async function passkeyUnlock() {
+  try {
+    const identity = selected();
+    const stored = await localGet([PASSKEY_PREFIX + identity.name]);
+    const record = stored[PASSKEY_PREFIX + identity.name];
+    if (!record) throw new Error(`no passkey registered for '${identity.name}' - protect it first`);
+    if (!window.datuPasskey) throw new Error('passkey module not loaded');
+    status('authenticate with the device passkey…');
+    const salt = Uint8Array.from(atob(record.salt), (c) => c.charCodeAt(0));
+    const secret = await window.datuPasskey.unlockSecret(record.credentialId, salt);
+    const passphrase = await window.datuPasskey.unwrapPassphrase(secret, record.iv, record.ct);
+    passCache[identity.name] = passphrase;
+    notifyState();
+    status(`unlocked ${identity.name} with the device passkey (session only)`, 'ok');
+  } catch (e) {
+    status(`passkey unlock failed: ${e.message} - type the passphrase instead`, 'err');
+  }
+}
+
+async function passkeyForget() {
+  try {
+    const identity = selected();
+    await chrome.storage.local.remove(PASSKEY_PREFIX + identity.name);
+    $('passkeyHint').textContent = 'passkey forgotten - the passphrase still works';
+    status(`passkey protection removed for ${identity.name}`, 'muted');
+  } catch (e) {
+    status(e.message, 'err');
+  }
+}
+
 // ---------- idle auto-lock ----------
 function clearSensitive() {
   $('pass').value = '';
@@ -1110,6 +1168,9 @@ $('copy').addEventListener('click', async () => {
   await navigator.clipboard.writeText($('result').value);
   status('signed consent copied - paste it back into the registry dApp', 'ok');
 });
+$('passkeyEnable').addEventListener('click', passkeyEnable);
+$('passkeyUnlock').addEventListener('click', passkeyUnlock);
+$('passkeyForget').addEventListener('click', passkeyForget);
 $('node').addEventListener('change', () => {
   localSet({ node: nodeUrl() });
   checkNode();
