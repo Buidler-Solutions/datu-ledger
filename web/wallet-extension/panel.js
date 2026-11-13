@@ -833,6 +833,7 @@ async function confirmLogin() {
     if (!pendingLogin) throw new Error('nothing to sign');
     const identity = selected();
     if (!$('pass').value) throw new Error('enter your vault passphrase (Sign tab)');
+    await stepUpIfProtected(identity.name);
     status('unlocking your Signet and signing the challenge…');
     const data = await bridge('/v1/wallet/auth-assert', {
       name: identity.name,
@@ -950,6 +951,25 @@ async function importIdentity() {
 // and the session grant / signing flows work as if it was typed.
 const PASSKEY_PREFIX = 'datu.passkey.';
 const SESSION_PASS = 'datu.passkeySessionPass';
+
+// Step-up: when an identity is passkey-protected, every interactive sign-in
+// asks for the biometric gesture, so the passkey gates the action itself and
+// not merely the session. Silent re-logins (auto) are exempt by design: they
+// exist so a page reload does not prompt on every navigation.
+const STEPUP_KEY = 'datu.passkeyStepUp';
+async function stepUpIfProtected(name) {
+  try {
+    const stored = await localGet([PASSKEY_PREFIX + name, STEPUP_KEY]);
+    const record = stored[PASSKEY_PREFIX + name];
+    if (!record) return;
+    if (stored[STEPUP_KEY] === false) return;
+    if (!window.datuPasskey) return;
+    status(`confirm '${name}' with the device passkey…`);
+    await window.datuPasskey.presenceAssertion(record.credentialId);
+  } catch (e) {
+    throw new Error(`passkey confirmation failed: ${e.message}`);
+  }
+}
 
 // The picker can be empty right after a browser restart even though the
 // Signet is paired, so passkey actions refresh the list before selecting.
@@ -1134,6 +1154,7 @@ async function processRequest(req, passphrase) {
     // re-logins do not (the bridge only needs it to register a new site).
     if (isLogin && body.auto !== true) {
       body.approve = true;
+      await stepUpIfProtected(body.name);
     }
     // Silent re-logins prefer a session grant: no passphrase round-trip.
     // If the grant expired, retry once with the cached passphrase.
@@ -1305,6 +1326,15 @@ $('copy').addEventListener('click', async () => {
   await navigator.clipboard.writeText($('result').value);
   status('signed consent copied - paste it back into the registry dApp', 'ok');
 });
+$('passkeyStepUp').addEventListener('change', async () => {
+  await localSet({ [STEPUP_KEY]: $('passkeyStepUp').checked });
+  status(
+    $('passkeyStepUp').checked
+      ? 'every sign-in will ask for the device passkey'
+      : 'sign-ins use the session unlock until it expires',
+    'muted',
+  );
+});
 $('passkeyEnable').addEventListener('click', passkeyEnable);
 $('passkeyUnlock').addEventListener('click', passkeyUnlock);
 $('passkeyForget').addEventListener('click', passkeyForget);
@@ -1314,6 +1344,12 @@ $('node').addEventListener('change', () => {
 });
 
 // ---------- boot ----------
+const stepUpEl = $('passkeyStepUp');
+if (stepUpEl) {
+  localGet([STEPUP_KEY]).then((v) => {
+    stepUpEl.checked = v[STEPUP_KEY] !== false;
+  });
+}
 const versionEl = $('extVersion');
 if (versionEl && chrome.runtime?.getManifest) {
   versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
