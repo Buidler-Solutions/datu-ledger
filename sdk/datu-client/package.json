@@ -1,0 +1,36 @@
+{
+  "name": "@datu/client",
+  "version": "0.1.0",
+  "description": "Integrate a dApp with the DATU accountability DAG: SignetAuth login, signing, sealing, node reads and coverage verification",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./mock": {
+      "types": "./src/mock.d.ts",
+      "default": "./src/mock.js"
+    },
+    "./auth": "./src/auth.js",
+    "./errors": "./src/errors.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "datu",
+    "signet",
+    "signetauth",
+    "webauthn",
+    "accountability",
+    "dag"
+  ],
+  "license": "MIT"
+}

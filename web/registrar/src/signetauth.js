@@ -6,8 +6,16 @@
 // canonical signed bytes match crates/core/src/auth.rs exactly:
 //   datu-auth-v1\n<rp_id>\n<origin>\n<nonce_hex>\n<expires_at_ms>\n
 
-export const AUTH_DOMAIN = 'datu-auth-v1';
-export const NONCE_BYTES = 16;
+// The canonical byte string and domain come from the shipped SDK, so the dApp
+// and third-party integrations can never drift from each other.
+import {
+  AUTH_DOMAIN,
+  NONCE_BYTES,
+  authSignedBytes,
+  challengeIsLive,
+} from '../../../sdk/datu-client/src/auth.js';
+
+export { AUTH_DOMAIN, NONCE_BYTES, authSignedBytes, challengeIsLive };
 
 export function randomNonceHex() {
   const bytes = new Uint8Array(NONCE_BYTES);
@@ -24,15 +32,7 @@ export function newChallenge({ rpId, origin, ttlMs = 60000 }) {
   };
 }
 
-export function authSignedBytes({ rp_id, origin, nonce, expires_at_ms }) {
-  return new TextEncoder().encode(
-    `${AUTH_DOMAIN}\n${rp_id}\n${origin}\n${nonce}\n${expires_at_ms}\n`
-  );
-}
 
-export function challengeIsLive(challenge, nowMs = Date.now()) {
-  return nowMs < challenge.expires_at_ms;
-}
 
 // The node serves /coverage.js, which exposes verifyEd25519 (WebCrypto) on
 // window.datuCoverage. We reuse it instead of shipping a second verifier.

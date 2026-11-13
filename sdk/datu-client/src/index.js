@@ -1,0 +1,276 @@
+/**
+ * @datu/client - integrate a dApp with the DATU accountability DAG.
+ *
+ * One entry point: connect({ bridgeUrl, nodeUrl }) returns a client that
+ * speaks to the Signet extension (keys live in the Signet service, never here)
+ * and to a ledger node (reads, submission, coverage proofs).
+ *
+ * SignetAuth is a one-liner:
+ *   const { assertion, verified } = await datu.signIn({ name, rpId, origin });
+ * See specs/signetauth.md in the repo for the wire standard.
+ */
+import { createExtensionTransport } from './extension.js';
+import { createNodeClient } from './node.js';
+import {
+  AUTH_DOMAIN,
+  authSignedBytes,
+  challengeIsLive,
+  newChallenge,
+  randomNonceHex,
+  verifyAssertion,
+  verifyEd25519,
+} from './auth.js';
+import { DatuError, ErrorCode, mapError } from './errors.js';
+
+export {
+  AUTH_DOMAIN,
+  authSignedBytes,
+  challengeIsLive,
+  newChallenge,
+  randomNonceHex,
+  verifyAssertion,
+  verifyEd25519,
+  DatuError,
+  ErrorCode,
+  createExtensionTransport,
+  createNodeClient,
+};
+
+const require = (value, message) => {
+  if (!value) throw new DatuError(ErrorCode.BAD_ARGUMENT, message);
+  return value;
+};
+
+/**
+ * Connect to a Signet extension (and optionally a node).
+ * Options:
+ *   bridgeUrl   - the Signet service URL the extension is paired with
+ *   nodeUrl     - a ledger node / explorer (default http://127.0.0.1:7474)
+ *   transport   - inject an extension transport (tests, custom hosts)
+ *   fetchImpl   - inject fetch (tests, non-browser runtimes)
+ *   rpId/origin - defaults for signIn (origin defaults to window.location.origin)
+ */
+export async function connect({
+  bridgeUrl,
+  nodeUrl = 'http://127.0.0.1:7474',
+  transport,
+  fetchImpl,
+  rpId,
+  origin,
+  detect = true,
+} = {}) {
+  const rpc = transport || createExtensionTransport();
+  if (detect) {
+    const pong = await rpc.ping();
+    if (!pong) {
+      throw new DatuError(
+        ErrorCode.NOT_CONNECTED,
+        'Signet extension not detected - load it from chrome://extensions and reload this page',
+      );
+    }
+  }
+
+  const defaultRpId = rpId || (typeof window !== 'undefined' ? window.location.hostname : undefined);
+  const defaultOrigin = origin || (typeof window !== 'undefined' ? window.location.origin : undefined);
+
+  async function identities() {
+    const listed = await rpc.identities(bridgeUrl);
+    return listed.identities || [];
+  }
+
+  async function sign({ name, path, body, summary }) {
+    require(path, 'path is required');
+    try {
+      const res = await rpc.sign({ bridgeUrl, path, body: { name, ...body }, summary });
+      return res.body || res;
+    } catch (e) {
+      // Whatever transport produced it, callers get a stable code.
+      throw mapError(e);
+    }
+  }
+
+  /** Bridge passthrough for screens that already build full bodies. */
+  const bridge = (path, body, summary) => sign({ name: body && body.name, path, body, summary });
+
+  /**
+   * Start a SignetAuth login: mint the challenge (this app is the relying
+   * party) and get a verifier bound to it.
+   */
+  function startLogin(options = {}) {
+    const challenge = newChallenge({
+      rpId: options.rpId || defaultRpId,
+      origin: options.origin || defaultOrigin,
+      ttlMs: options.ttlMs,
+      nonce: options.nonce,
+    });
+    return {
+      challenge,
+      verify: (assertion) => verifyAssertion(assertion, challenge),
+    };
+  }
+
+  /**
+   * Full login: challenge, wallet signature via the extension, local
+   * verification. Returns { assertion, verified, challenge }.
+   * `verified` is true, false, or null when no local verifier exists.
+   */
+  async function signIn({ name, rpId, origin, ttlMs, nonce, summary } = {}) {
+    const { challenge, verify } = startLogin({ rpId, origin, ttlMs, nonce });
+    const assertion = await sign({
+      name,
+      path: '/v1/wallet/auth-assert',
+      body: {
+        rp_id: challenge.rp_id,
+        origin: challenge.origin,
+        nonce: challenge.nonce,
+        expires_at_ms: challenge.expires_at_ms,
+      },
+      summary: summary || `Sign in to ${challenge.rp_id}`,
+    });
+    const verdict = await verify(assertion);
+    if (verdict.ok === false) {
+      throw new DatuError(ErrorCode.REJECTED, `login assertion rejected: ${verdict.reason}`);
+    }
+    return { assertion, verified: verdict.ok, challenge };
+  }
+
+  /** Party signature on a document, as a role (holder, registrar, ...). */
+  const partySign = async ({ name, role, document, kind, summary } = {}) => {
+    require(role, 'role is required');
+    return sign({
+      name,
+      path: '/v1/wallet/party-sign',
+      body: { name, role, kind, document },
+      summary: summary || `Sign as ${role}${kind ? ` (${kind})` : ''}`,
+    });
+  };
+
+  /** Author a ledger entry from a sign request (namespace, payload, refs). */
+  const signEntry = async ({ name, request, summary } = {}) => {
+    require(request, 'request is required');
+    return sign({
+      name,
+      path: '/v1/wallet/sign-entry',
+      body: { name, request },
+      summary: summary || `Publish to ${request.namespace || 'a namespace'}`,
+    });
+  };
+
+  const seal = async ({ name, document, fields, to, toFields, summary } = {}) =>
+    sign({
+      name,
+      path: '/v1/wallet/seal',
+      body: { name, document, fields, to, to_fields: toFields },
+      summary: summary || `Seal ${(fields || []).join(', ')}`,
+    });
+
+  const sealDeferred = async ({ name, document, fields, to, toField, summary } = {}) =>
+    sign({
+      name,
+      path: '/v1/wallet/seal-deferred',
+      body: { name, document, fields, to, to_field: toField },
+      summary: summary || `Defer ${(fields || []).join(', ')}`,
+    });
+
+  const releaseDeferred = async ({ document, field, release } = {}) => {
+    require(field, 'field is required');
+    return sign({
+      path: '/v1/wallet/release-deferred',
+      body: { document, field, release },
+      summary: `Release ${field}`,
+    });
+  };
+
+  const openDeferred = async ({ name, document, field, release, summary } = {}) => {
+    require(field, 'field is required');
+    return sign({
+      name,
+      path: '/v1/wallet/deferred-open',
+      body: { name, document, field, release },
+      summary: summary || `Open ${field}`,
+    });
+  };
+
+  const openSealed = async ({ name, document, summary } = {}) =>
+    sign({
+      name,
+      path: '/v1/wallet/open',
+      body: { name, document },
+      summary: summary || 'Decrypt fields addressed to you',
+    });
+
+  /** Verify an entry's signatures and party list inside the Signet service. */
+  const verifyEntry = async ({ name, entry } = {}) =>
+    sign({
+      name,
+      path: '/v1/wallet/verify-entry',
+      body: { name, entry },
+      summary: 'Verify an entry',
+    });
+
+  /**
+   * Coverage: is this entry witnessed by a fresh checkpoint? Verifies the
+   * served Merkle path and checkpoint signature locally when a coverage
+   * verifier is supplied (the node serves /coverage.js as window.datuCoverage,
+   * or pass coverageVerifier from './verify.js').
+   */
+  async function verifyCoverage(entryId, { coverageVerifier } = {}) {
+    const node = getNode();
+    const answer = await node.coverage(entryId);
+    const verifier = coverageVerifier || (typeof window !== 'undefined' ? window.datuCoverage : null);
+    const witnesses = answer.witnesses || [];
+    const results = [];
+    for (const witness of witnesses) {
+      if (!verifier || !verifier.verifyWitness) {
+        results.push({ ...witness, verdict: 'not checked (no local coverage verifier)' });
+        continue;
+      }
+      try {
+        const check = await verifier.verifyWitness(entryId, witness);
+        results.push({ ...witness, verdict: check.ok ? 'verified' : `not verified: ${check.reason}` });
+      } catch (e) {
+        results.push({ ...witness, verdict: `not verified: ${e.message}` });
+      }
+    }
+    return { entryId, witnesses: results, stale: answer.stale || [] };
+  }
+
+  let nodeClient = createNodeClient({ nodeUrl, fetchImpl });
+  function getNode() {
+    if (!nodeClient) nodeClient = createNodeClient({ nodeUrl, fetchImpl });
+    return nodeClient;
+  }
+
+  return {
+    bridgeUrl,
+    get nodeUrl() {
+      return nodeClient.url;
+    },
+    setNodeUrl(url) {
+      nodeClient = createNodeClient({ nodeUrl: url, fetchImpl });
+    },
+    get node() {
+      return getNode();
+    },
+    rpc,
+    ping: () => rpc.ping(),
+    identities,
+    onState: (fn) => rpc.onState(fn),
+    sign,
+    bridge,
+    startLogin,
+    signIn,
+    partySign,
+    signEntry,
+    seal,
+    sealDeferred,
+    releaseDeferred,
+    openDeferred,
+    openSealed,
+    verifyEntry,
+    verifyCoverage,
+    onError: (e) => mapError(e),
+  };
+}
+
+export default { connect };

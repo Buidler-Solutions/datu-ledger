@@ -40,6 +40,8 @@ jobs:
           node --check web/wallet-extension/passkey.js
       - name: extension pure-logic tests
         run: node --test web/wallet-extension/test/blake3.test.mjs web/wallet-extension/test/coverage.test.mjs web/wallet-extension/test/passkey.test.mjs
+      - name: datu client SDK tests
+        run: node --test sdk/datu-client/test/*.test.mjs
       - name: registrar build and tests
         working-directory: web/registrar
         run: |

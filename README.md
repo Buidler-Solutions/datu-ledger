@@ -975,6 +975,19 @@ where contacts exist).
 order, only causal order. This is the deliberate trade for permissionless,
 tokenless, offline-capable operation.
 
+## SDK for dApps
+
+`sdk/datu-client` (published shape: `@datu/client`) wraps the whole integration
+surface: SignetAuth login in one call, party signatures, sealing and deferred
+delivery, node reads, coverage verification, typed errors, TypeScript
+declarations, and mock transports so a dApp's tests need no wallet.
+
+```js
+import { connect } from '@datu/client';
+const datu = await connect({ bridgeUrl: 'http://127.0.0.1:7588', nodeUrl: 'http://127.0.0.1:7474' });
+const { assertion, verified } = await datu.signIn({ name: 'amina', rpId: 'app.example.com' });
+```
+
 ## Layout
 
 - `crates/core` - entries, hash chains, Merkle set-roots, checkpoints, hybrid
