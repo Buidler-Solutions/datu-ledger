@@ -134,12 +134,13 @@ async function pairWallet(url, token, label) {
   showSeal();
   notifyState();
   $('pairHint').textContent = `paired · ${identities.length} identities · token kept for this browser session`;
+  setConnState('connected');
   status(`Signet ready - ${identities.length} identities`, 'ok');
   checkNode(true);
 }
 
 // 7488 first: the canonical desktop bridge (LaunchAgent / DATU Wallet.app).
-const PROBE_PORTS = ['7488', '7482', '7483', '7480', '7481', '7484', '7485', '7489', '7490'];
+const PROBE_PORTS = ['7488', '7588', '7482', '7483', '7480', '7481', '7484', '7485', '7489', '7490'];
 async function autoPair() {
   for (const port of PROBE_PORTS) {
     const url = `http://127.0.0.1:${port}`;
@@ -164,6 +165,72 @@ async function autoPair() {
     } catch {}
   }
   return false;
+}
+
+// ---- connection state: auto-detect the local Signet, explain how to get one ----
+const REPO_URL = 'https://github.com/greenarmor/datu-ledger';
+const RELEASES_URL = 'https://github.com/greenarmor/datu-ledger/releases';
+
+function setConnState(kind, detail = '') {
+  const text = $('connText');
+  const hint = $('installHint');
+  if (!text) return;
+  if (kind === 'connected') {
+    const active = wallets.find((w) => w.url === activeUrl);
+    text.className = 'ok small';
+    text.textContent = `connected: ${active ? active.url : activeUrl} - ${identities.length} identities, paired automatically`;
+    if (hint) hint.style.display = 'none';
+    $('bridgeDot').className = 'dot green';
+    return;
+  }
+  if (kind === 'searching') {
+    text.className = 'muted small';
+    text.textContent = detail || 'looking for a local Signet service…';
+    if (hint) hint.style.display = 'none';
+    return;
+  }
+  // not-found: the extension needs a local Signet; show install guidance
+  text.className = 'err small';
+  text.textContent =
+    detail ||
+    'no Signet service found. Install or launch the DATU Wallet desktop app (or run datu signet serve), then press Connect now.';
+  if (hint) hint.style.display = 'block';
+  $('bridgeDot').className = 'dot red';
+}
+
+async function connectSignet({ quiet = false } = {}) {
+  if (!quiet) setConnState('searching');
+  status('looking for a local Signet service…', 'muted');
+  const found = await autoPair();
+  if (found) {
+    setConnState('connected');
+    return true;
+  }
+  setConnState('not-found');
+  if (!quiet) {
+    status('no Signet service answered - see the installation steps in Settings', 'err');
+  }
+  return false;
+}
+
+// Watchdog: the desktop app may start after the browser, or restart mid-session.
+// While unpaired, poll quietly so pairing happens without the human doing anything.
+let connTimer = null;
+function armConnectionWatchdog() {
+  clearInterval(connTimer);
+  connTimer = setInterval(async () => {
+    if (identities.length) return;
+    if (document.visibilityState === 'hidden') return;
+    await connectSignet({ quiet: true });
+  }, 20_000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && !identities.length) {
+      connectSignet({ quiet: true });
+    }
+  });
+  window.addEventListener('focus', () => {
+    if (!identities.length) connectSignet({ quiet: true });
+  });
 }
 
 async function addWallet() {
@@ -207,8 +274,9 @@ async function switchWallet() {
     $('walletUrl').value = url;
     if (!tokens[url]) {
       await persistWallets();
-      $('pairHint').textContent = 'this Signet needs its token - paste it and press “Save & pair”';
-      status(`switched to ${url} - paste its pairing token`, 'muted');
+      $('pairHint').textContent = 'this Signet is not paired yet - press Connect now, or use the advanced token field';
+      setConnState('not-found', `switched to ${url}, which is not paired yet - press Connect now`);
+      status(`switched to ${url} - not paired`, 'muted');
       return;
     }
     await pairWallet(url, tokens[url], wallet?.label);
@@ -1298,10 +1366,8 @@ pollRequests();
 
 // ---------- wiring ----------
 $('addWallet').addEventListener('click', addWallet);
-$('findWallet').addEventListener('click', async () => {
-  status('looking for a local Signet service…', 'muted');
-  if (!(await autoPair())) status('nothing found on 127.0.0.1:7480-7490 - is DATU Wallet running? - or paste a token', 'err');
-});
+$('findWallet').addEventListener('click', () => connectSignet());
+$('connRetry').addEventListener('click', () => connectSignet());
 $('switchWallet').addEventListener('click', switchWallet);
 $('removeWallet').addEventListener('click', removeWallet);
 $('forget').addEventListener('click', forgetToken);
@@ -1374,11 +1440,14 @@ if (versionEl && chrome.runtime?.getManifest) {
       await sessionSet({ tokens });
     }
   }
-  if (!identities.length && (await autoPair())) {
+  if (identities.length) {
+    setConnState('connected');
+  } else if (await connectSignet({ quiet: true })) {
     // paired itself - nothing for the user to do
-  } else if (!identities.length) {
-    status('no Signet service found on this machine - paste a pairing token in Settings', 'muted');
+  } else {
+    setConnState('not-found');
     document.querySelector('nav button[data-tab="settings"]').click();
   }
+  armConnectionWatchdog();
   armIdleTimer();
 })();

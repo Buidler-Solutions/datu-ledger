@@ -138,6 +138,30 @@
         <button class="primary" id="create">Create identity</button>
         <p class="muted" id="createHint" style="display:none"></p>
 
+        <h2>Signet connection</h2>
+        <div id="connCard">
+          <div class="muted small" id="connText">looking for a local Signet service…</div>
+          <div class="row" style="margin-top:.4rem">
+            <button class="primary" id="connRetry">Connect now</button>
+          </div>
+          <div id="installHint" style="display:none; margin-top:.5rem">
+            <p class="muted small">
+              <b>No Signet service answered on this machine.</b> The panel talks to a local
+              Signet process (the DATU Wallet desktop app, or
+              <code>datu signet serve</code>). Keys live there, never in this extension.
+            </p>
+            <p class="muted small">
+              Install the desktop app or the CLI from the official releases, launch it once,
+              then press <b>Connect now</b>. The panel pairs itself; no token is typed.
+            </p>
+            <div class="row">
+              <a class="button" href="https://github.com/greenarmor/datu-ledger/releases" target="_blank" rel="noreferrer">Official releases</a>
+              <a class="button" href="https://github.com/greenarmor/datu-ledger" target="_blank" rel="noreferrer">Source repository</a>
+            </div>
+            <p class="muted small">Or from a terminal: <code>datu signet serve --data-dir ~/.datu --addr 127.0.0.1:7488</code></p>
+          </div>
+        </div>
+
         <h2>Signets on this device</h2>
         <p class="muted small">
           One Signet per person, several identities inside for context
@@ -152,11 +176,18 @@
         </div>
         <label>Label<input id="walletLabel" placeholder="alice" /></label>
         <label>Bridge URL<input id="walletUrl" value="http://127.0.0.1:7488" /></label>
-        <label>Pairing token (from <code>wallet/bridge.token</code>)<input id="token" type="password" placeholder="64 hex characters" /></label>
-        <div class="row">
-          <button class="primary" id="addWallet">Save &amp; pair</button>
-          <button class="ghost" id="forget">Forget token</button>
-        </div>
+        <details>
+          <summary class="muted small">Advanced: pair with a token by hand (only if auto-detection cannot reach the Signet)</summary>
+          <label>Pairing token (from <code>wallet/bridge.token</code>)<input id="token" type="password" placeholder="64 hex characters" /></label>
+          <div class="row">
+            <button class="ghost" id="addWallet">Save &amp; pair</button>
+            <button class="ghost" id="forget">Forget token</button>
+          </div>
+          <p class="muted small">
+            The extension can self-pair with any Signature service it can reach, so this is
+            only for unusual setups (remote bridge, custom port, locked-down browser).
+          </p>
+        </details>
         <div class="row">
           <button class="ghost" id="findWallet">Find my Signet automatically</button>
         </div>
