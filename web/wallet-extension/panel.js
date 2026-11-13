@@ -778,6 +778,7 @@ async function confirmLogin() {
     if (data.grant) {
       grantCache[bridgeUrl()] = grantCache[bridgeUrl()] || {};
       grantCache[bridgeUrl()][identity.name] = data.grant;
+      await persistGrants();
     }
     $('loginResult').value = JSON.stringify(data, null, 2);
     $('loginCopy').disabled = false;
@@ -966,6 +967,9 @@ function armIdleTimer() {
 const REQUESTS_KEY = 'datuRpcQueue';
 const passCache = {}; // identity name -> passphrase, panel memory only
 const grantCache = {}; // bridge url -> { identity name -> SignetAuth session grant }
+// Grants are also mirrored to session storage so the WebAuthn proxy in the
+// background can spend one without another prompt (they expire in 15 min).
+const persistGrants = () => sessionSet({ datuGrants: grantCache });
 let requestsFingerprint = '';
 
 function notifyState() {
@@ -1011,6 +1015,7 @@ async function processRequest(req, passphrase) {
       if (isLogin && res.grant) {
         grantCache[url] = grantCache[url] || {};
         grantCache[url][body.name] = res.grant;
+        await persistGrants();
       }
       chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: true, result: { status: 200, body: res } });
       return true;
@@ -1024,6 +1029,7 @@ async function processRequest(req, passphrase) {
         if (res.grant) {
           grantCache[url] = grantCache[url] || {};
           grantCache[url][body.name] = res.grant;
+          await persistGrants();
         }
         chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: true, result: { status: 200, body: res } });
         return true;
@@ -1181,8 +1187,9 @@ $('node').addEventListener('change', () => {
   const local = await localGet(['wallets', 'node']);
   if (local.node) $('node').value = local.node;
   wallets = Array.isArray(local.wallets) && local.wallets.length ? local.wallets : [DEFAULT_WALLET];
-  const session = await sessionGet(['activeWallet', 'tokens']);
+  const session = await sessionGet(['activeWallet', 'tokens', 'datuGrants']);
   tokens = session.tokens || {};
+  Object.assign(grantCache, session.datuGrants || {});
   activeUrl = session.activeWallet || wallets[0].url;
   renderWallets();
 

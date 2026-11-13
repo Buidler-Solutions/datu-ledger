@@ -690,6 +690,25 @@ enum WalletCmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Verify a login assertion with the identity's public key - the relying
+    /// party check (single Ed25519 signature; nonce bookkeeping stays yours)
+    AuthVerify {
+        #[arg(long)]
+        rp_id: String,
+        #[arg(long)]
+        origin: String,
+        /// Single-use nonce the relying party issued (32 hex chars)
+        #[arg(long)]
+        nonce: String,
+        #[arg(long)]
+        expires_at_ms: u64,
+        /// The identity's Ed25519 public key (64 hex chars)
+        #[arg(long)]
+        pubkey: String,
+        /// The assertion's Ed25519 signature (128 hex chars)
+        #[arg(long)]
+        signature: String,
+    },
 }
 
 struct Node {
@@ -3823,6 +3842,57 @@ fn cmd_wallet_auth_assert(
     Ok(())
 }
 
+fn cmd_wallet_auth_verify(
+    rp_id: &str,
+    origin: &str,
+    nonce_hex: &str,
+    expires_at_ms: u64,
+    pubkey_hex: &str,
+    signature_hex: &str,
+) -> Result<(), String> {
+    let nonce: [u8; datu_core::auth::NONCE_BYTES] = hex::decode(nonce_hex)
+        .map_err(|e| format!("bad nonce hex: {e}"))?
+        .try_into()
+        .map_err(|_| {
+            format!(
+                "nonce must be {} hex chars",
+                datu_core::auth::NONCE_BYTES * 2
+            )
+        })?;
+    let sig: [u8; 64] = hex::decode(signature_hex)
+        .map_err(|e| format!("bad signature hex: {e}"))?
+        .try_into()
+        .map_err(|_| "signature must be 128 hex chars".to_string())?;
+    let pubkey = datu_core::entry::parse_key(pubkey_hex).map_err(|e| e.to_string())?;
+    let challenge = datu_core::auth::AuthChallenge {
+        rp_id: rp_id.to_string(),
+        origin: origin.to_string(),
+        nonce,
+        expires_at_ms,
+    };
+    datu_core::auth::verify_assertion(&pubkey, &challenge, &sig).map_err(|e| e.to_string())?;
+    let expired = !challenge.is_live(now_ms());
+    println!(
+        "verified: genuine {} assertion by {} for {} ({}){}",
+        datu_core::auth::AUTH_DOMAIN,
+        pubkey_hex,
+        rp_id,
+        origin,
+        if expired {
+            " - WARNING: the challenge itself has expired by this machine's clock"
+        } else {
+            ""
+        }
+    );
+    if expired {
+        return Err("challenge expired".into());
+    }
+    println!(
+        "remaining relying-party checks: nonce single-use bookkeeping and pubkey registration"
+    );
+    Ok(())
+}
+
 fn run(cli: Cli) -> Result<(), String> {
     match &cli.command {
         Commands::Init => cmd_init(&cli.data_dir),
@@ -4074,6 +4144,14 @@ fn run(cli: Cli) -> Result<(), String> {
                     out,
                 )
             }
+            WalletCmd::AuthVerify {
+                rp_id,
+                origin,
+                nonce,
+                expires_at_ms,
+                pubkey,
+                signature,
+            } => cmd_wallet_auth_verify(rp_id, origin, nonce, *expires_at_ms, pubkey, signature),
         },
         Commands::Attest { cmd } => match cmd {
             // Creating/cosigning writes an entry, so it carries write

@@ -745,6 +745,99 @@ fn handle_inner(
             }
             respond_json(stream, "200 OK", &response)
         }
+        // SignetAuth Level 3a: the bridge as a WebAuthn virtual authenticator.
+        // A browser extension proxies navigator.credentials here; the format
+        // work lives in datu_core::auth_webauthn (COSE Ed25519, authenticatorData).
+        ("POST", "/v1/wallet/webauthn-create") => {
+            let body_json = parse_body(&body)?;
+            let name = str_field(&body_json, "name")?;
+            let passphrase = str_field(&body_json, "passphrase")?;
+            let identity = load_guarded(&wallet, &name, &passphrase)?;
+            let rp_id = str_field(&body_json, "rp_id")?;
+            let user_name = body_json
+                .get("user_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&name)
+                .to_string();
+            use rand::RngCore;
+            let mut cred = [0u8; 16];
+            rand::rngs::OsRng.fill_bytes(&mut cred);
+            let mut creds = load_web_authn_creds(data_dir, &name)?;
+            creds.insert(
+                hex::encode(cred),
+                WebAuthnCredential {
+                    rp_id: rp_id.clone(),
+                    user_name,
+                    created_at_ms: now_ms(),
+                },
+            );
+            save_web_authn_creds(data_dir, &name, &creds)?;
+            let cose = datu_core::auth_webauthn::cose_ed25519_pubkey(&identity.ed.verifying_key());
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({
+                    "ok": true,
+                    "credential_id": hex::encode(cred),
+                    "rp_id": rp_id,
+                    "public_key_cose_b64": base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD, cose),
+                    "pubkey": identity.public.ed_public,
+                    "alg": datu_core::auth_webauthn::COSE_ALG_EDDSA,
+                }),
+            )
+        }
+        ("POST", "/v1/wallet/webauthn-get") => {
+            let body_json = parse_body(&body)?;
+            let name = str_field(&body_json, "name")?;
+            let grant = body_json
+                .get("grant")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let passphrase = body_json
+                .get("passphrase")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let identity = if !grant.is_empty() {
+                grants.use_grant(&name, &grant)?
+            } else {
+                std::sync::Arc::new(load_guarded(&wallet, &name, passphrase)?)
+            };
+            let rp_id = str_field(&body_json, "rp_id")?;
+            let credential_id = str_field(&body_json, "credential_id")?;
+            let creds = load_web_authn_creds(data_dir, &name)?;
+            match creds.get(&credential_id) {
+                Some(cred) if cred.rp_id == rp_id => {}
+                Some(_) => return Err("this credential belongs to another rp_id".into()),
+                None => return Err("unknown credential for this identity".into()),
+            }
+            let client_data_b64 = str_field(&body_json, "client_data_json_b64")?;
+            let client_data = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                client_data_b64.as_bytes(),
+            )
+            .map_err(|e| format!("bad client_data_json_b64: {e}"))?;
+            let flags = datu_core::auth_webauthn::FLAG_UP | datu_core::auth_webauthn::FLAG_UV;
+            let assertion = datu_core::auth_webauthn::sign_webauthn_assertion(
+                &identity.ed,
+                &rp_id,
+                flags,
+                0,
+                &client_data,
+            );
+            let b64 = base64::engine::general_purpose::STANDARD;
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({
+                    "ok": true,
+                    "credential_id": credential_id,
+                    "authenticator_data_b64": base64::Engine::encode(&b64, &assertion.authenticator_data),
+                    "signature_b64": base64::Engine::encode(&b64, assertion.signature),
+                }),
+            )
+        }
         (m, _) => respond_json(
             stream,
             "404 Not Found",
@@ -801,6 +894,59 @@ fn save_rps(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(rps).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+// ---- WebAuthn virtual-authenticator credentials (Level 3a) ----
+
+/// One registered WebAuthn credential for one identity: which rp_id it was
+/// created for. The key material itself is the identity's Ed25519 key; this
+/// file only maps credential ids to relying parties.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WebAuthnCredential {
+    rp_id: String,
+    user_name: String,
+    created_at_ms: u64,
+}
+
+fn web_authn_creds_path(data_dir: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+    {
+        return Err("identity name must be 1-64 chars of [A-Za-z0-9_.-]".into());
+    }
+    Ok(data_dir
+        .join("wallet")
+        .join("webauthn")
+        .join(format!("{name}.json")))
+}
+
+fn load_web_authn_creds(
+    data_dir: &Path,
+    name: &str,
+) -> Result<std::collections::HashMap<String, WebAuthnCredential>, String> {
+    let path = web_authn_creds_path(data_dir, name)?;
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&text)
+        .map_err(|e| format!("corrupt webauthn registry {}: {e}", path.display()))
+}
+
+fn save_web_authn_creds(
+    data_dir: &Path,
+    name: &str,
+    creds: &std::collections::HashMap<String, WebAuthnCredential>,
+) -> Result<(), String> {
+    let path = web_authn_creds_path(data_dir, name)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(creds).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
@@ -1469,5 +1615,122 @@ mod tests {
             .to_string(),
         );
         assert!(status.contains("400"), "wrong passphrase refused: {status}");
+    }
+
+    /// Level 3a over HTTP: create a WebAuthn credential, then sign an
+    /// assertion the way a browser verifies it (rpIdHash + signature over
+    /// authenticatorData || SHA-256(clientDataJSON)).
+    #[test]
+    fn webauthn_virtual_authenticator_over_http() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let serve_dir = data.clone();
+        std::thread::spawn(move || {
+            let _ = serve(&serve_dir, &format!("127.0.0.1:{port}"), Vec::new());
+        });
+        let token_path = data.join(TOKEN_FILE);
+        let started = Instant::now();
+        let token = loop {
+            if let Ok(text) = std::fs::read_to_string(&token_path) {
+                let token = text.trim().to_string();
+                if token.len() >= 32 {
+                    break token;
+                }
+            }
+            if started.elapsed() > Duration::from_secs(10) {
+                panic!("bridge did not come up");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/create",
+            Some(&token),
+            &json!({"name": "carol", "passphrase": "carol pass"}).to_string(),
+        );
+        assert!(status.contains("200"), "{status} {body}");
+        let pubkey_hex = serde_json::from_str::<serde_json::Value>(&body).unwrap()["identity"]
+            ["ed_public"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/webauthn-create",
+            Some(&token),
+            &json!({"name": "carol", "passphrase": "carol pass",
+                    "rp_id": "app.example.com", "user_name": "carol@example.com"})
+            .to_string(),
+        );
+        assert!(status.contains("200"), "create failed: {status} {body}");
+        let cred: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(cred["alg"], -8);
+        assert!(cred["public_key_cose_b64"].as_str().unwrap().len() > 30);
+        let credential_id = cred["credential_id"].as_str().unwrap().to_string();
+
+        let client_data = br#"{"type":"webauthn.get","challenge":"AAECAwQFBgcICQoLDA0ODw","origin":"https://app.example.com"}"#;
+        let client_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, client_data);
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/webauthn-get",
+            Some(&token),
+            &json!({"name": "carol", "passphrase": "carol pass",
+                    "rp_id": "app.example.com", "credential_id": credential_id,
+                    "client_data_json_b64": client_b64})
+            .to_string(),
+        );
+        assert!(status.contains("200"), "get failed: {status} {body}");
+        let assertion: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let auth_data = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            assertion["authenticator_data_b64"]
+                .as_str()
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+        let sig: [u8; 64] = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            assertion["signature_b64"].as_str().unwrap().as_bytes(),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let verifying = datu_core::entry::parse_key(&pubkey_hex).unwrap();
+        datu_core::auth_webauthn::verify_webauthn_assertion(
+            &verifying,
+            "app.example.com",
+            &datu_core::auth_webauthn::WebauthnAssertion {
+                authenticator_data: auth_data,
+                signature: sig,
+            },
+            client_data,
+        )
+        .unwrap();
+
+        // A credential is bound to its rp_id.
+        let (status, _) = http(
+            port,
+            "POST",
+            "/v1/wallet/webauthn-get",
+            Some(&token),
+            &json!({"name": "carol", "passphrase": "carol pass",
+                    "rp_id": "evil.example", "credential_id": credential_id,
+                    "client_data_json_b64": client_b64})
+            .to_string(),
+        );
+        assert!(
+            status.contains("400"),
+            "cross-rp credential refused: {status}"
+        );
     }
 }

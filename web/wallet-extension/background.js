@@ -155,3 +155,180 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   return false;
 });
+
+// ---------- SignetAuth Level 3a: WebAuthn proxy (virtual authenticator) ----------
+// Chrome 133+ exposes chrome.webAuthenticationProxy, letting an extension
+// answer navigator.credentials.create/get on behalf of an authenticator. We
+// forward to the paired Signet bridge, which signs with the identity's
+// Ed25519 key (datu_core::auth_webauthn). The bridge needs an unlocked
+// session (a grant minted by a passphrase or passkey unlock in the panel);
+// without one, the ceremony fails closed and the Relying Party falls back.
+//
+// Format notes: our authenticator is synced-credential grade: attestation
+// format "none", UP|UV flags set, signCount 0 (no per-credential state).
+
+const b64uToBytes = (s) => {
+  const t = String(s).replace(/-/g, '+').replace(/_/g, '/');
+  const pad = t.length % 4 ? '='.repeat(4 - (t.length % 4)) : '';
+  return Uint8Array.from(atob(t + pad), (c) => c.charCodeAt(0));
+};
+const bytesToB64u = (bytes) =>
+  btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const utf8 = (s) => new TextEncoder().encode(s);
+
+async function sha256(bytes) {
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+}
+
+// Minimal CTAP2 canonical CBOR for the fields WebAuthn needs (integers,
+// text and byte strings, small maps/arrays).
+function cborUint(major, n) {
+  if (n < 24) return [major << 5 | n];
+  if (n < 0x100) return [major << 5 | 24, n];
+  if (n < 0x10000) return [major << 5 | 25, n >> 8, n & 0xff];
+  return [major << 5 | 26, (n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
+}
+const cborBytes = (bytes) => [...cborUint(2, bytes.length), ...bytes];
+const cborText = (text) => {
+  const bytes = utf8(text);
+  return [...cborUint(3, bytes.length), ...bytes];
+};
+
+async function attestationObject(rpId, credentialIdHex, coseB64) {
+  const rpIdHash = await sha256(utf8(rpId));
+  const authData = new Uint8Array([
+    ...rpIdHash,
+    0x45, // UP | UV | AT
+    0, 0, 0, 0, // signCount
+    ...new Uint8Array(16), // AAGUID (all zero: no model identity)
+    (credentialIdHex.length / 2) >> 8,
+    (credentialIdHex.length / 2) & 0xff,
+    ...Uint8Array.from(credentialIdHex.match(/../g).map((h) => parseInt(h, 16))),
+    ...Uint8Array.from(atob(coseB64), (c) => c.charCodeAt(0)),
+  ]);
+  return Uint8Array.from([
+    0xa3, // map(3)
+    ...cborText('fmt'), ...cborText('none'),
+    ...cborText('attStmt'), 0xa0,
+    ...cborText('authData'), ...cborBytes(authData),
+  ]);
+}
+
+// The panel persists its SignetAuth grants here so the proxy can spend one
+// without another prompt; the grant itself expires in 15 minutes.
+async function activeGrant() {
+  const s = await chrome.storage.session.get(['datuGrants', 'wallets', 'activeWallet', 'tokens']);
+  const grants = s.datuGrants || {};
+  for (const [url, byName] of Object.entries(grants)) {
+    const token = (s.tokens || {})[url];
+    const [name, grant] = Object.entries(byName || {})[0] || [];
+    if (token && name && grant) return { url: url.replace(/\/+$/, ''), token, name, grant };
+  }
+  return null;
+}
+
+async function bridgeCall({ url, token }, path, body) {
+  const res = await fetch(`${url}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+}
+
+function wireWebAuthnProxy() {
+  const proxy = chrome.webAuthenticationProxy;
+  if (!proxy) return; // older Chrome: the SignetAuth assertion flow still works
+  const log = (...args) => console.info('[webauthn-proxy]', ...args);
+
+  proxy.onRequestCreateRequest.addListener(async (details) => {
+    try {
+      const request = JSON.parse(details.requestDetailsJson || '{}');
+      const pk = request.publicKey || request;
+      const rpId = pk.rp?.id || new URL(request.origin || `https://${'localhost'}`).hostname;
+      const session = await activeGrant();
+      if (!session) throw new Error('unlock the DATU Signet panel first (passphrase or passkey)');
+      const created = await bridgeCall(session, '/v1/wallet/webauthn-create', {
+        name: session.name,
+        grant: session.grant,
+        rp_id: rpId,
+        user_name: pk.user?.name || session.name,
+      });
+      const attestation = await attestationObject(rpId, created.credential_id, created.public_key_cose_b64);
+      const responseJson = {
+        id: bytesToB64u(b64uToBytes(created.credential_id)),
+        rawId: bytesToB64u(Uint8Array.from(created.credential_id.match(/../g).map((h) => parseInt(h, 16)))),
+        type: 'public-key',
+        clientExtensionResults: {},
+        response: {
+          clientDataJSON: request.clientDataJson || pk.challenge || '',
+          attestationObject: bytesToB64u(attestation),
+          transports: ['internal'],
+        },
+      };
+      await proxy.completeCreateRequest({ requestId: details.requestId, responseJson: JSON.stringify(responseJson) });
+      log('created credential for', rpId);
+    } catch (e) {
+      await proxy.completeCreateRequest({ requestId: details.requestId, error: { name: 'NotAllowedError', message: e.message } });
+      log('create failed:', e.message);
+    }
+  });
+
+  proxy.onRequestGetRequest.addListener(async (details) => {
+    try {
+      const request = JSON.parse(details.requestDetailsJson || '{}');
+      const pk = request.publicKey || request;
+      const rpId = pk.rpId || new URL(request.origin || 'https://localhost').hostname;
+      const allow = pk.allowCredentials || [];
+      if (!allow.length) throw new Error('this authenticator only answers allowCredentials requests');
+      const credentialIdHex = Array.from(b64uToBytes(allow[0].id))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+      const session = await activeGrant();
+      if (!session) throw new Error('unlock the DATU Signet panel first (passphrase or passkey)');
+      const clientDataJSON = {
+        type: 'webauthn.get',
+        challenge: allow[0].clientChallenge || pk.challenge,
+        origin: request.origin,
+        crossOrigin: false,
+      };
+      const clientDataB64 = btoa(JSON.stringify(clientDataJSON));
+      const signed = await bridgeCall(session, '/v1/wallet/webauthn-get', {
+        name: session.name,
+        grant: session.grant,
+        rp_id: rpId,
+        credential_id: credentialIdHex,
+        client_data_json_b64: clientDataB64,
+      });
+      const responseJson = {
+        id: allow[0].id,
+        rawId: allow[0].id,
+        type: 'public-key',
+        clientExtensionResults: {},
+        response: {
+          clientDataJSON: bytesToB64u(utf8(JSON.stringify(clientDataJSON))),
+          authenticatorData: signed.authenticator_data_b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+          signature: signed.signature_b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+          userHandle: null,
+        },
+      };
+      await proxy.completeGetRequest({ requestId: details.requestId, responseJson: JSON.stringify(responseJson) });
+      log('assertion signed for', rpId);
+    } catch (e) {
+      await proxy.completeGetRequest({ requestId: details.requestId, error: { name: 'NotAllowedError', message: e.message } });
+      log('get failed:', e.message);
+    }
+  });
+
+  // Attach lazily: attachment without requests is harmless, and Chrome
+  // re-attaches on startup when the API is present.
+  proxy.attach({}).catch(() => {});
+}
+
+try {
+  wireWebAuthnProxy();
+} catch (e) {
+  console.warn('webAuthenticationProxy unavailable:', e.message);
+}

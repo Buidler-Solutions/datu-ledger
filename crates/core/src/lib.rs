@@ -1,5 +1,6 @@
 pub mod attest;
 pub mod auth;
+pub mod auth_webauthn;
 pub mod bloom;
 pub mod checkpoint;
 pub mod contract;
