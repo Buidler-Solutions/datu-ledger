@@ -970,6 +970,14 @@ const grantCache = {}; // bridge url -> { identity name -> SignetAuth session gr
 // Grants are also mirrored to session storage so the WebAuthn proxy in the
 // background can spend one without another prompt (they expire in 15 min).
 const persistGrants = () => sessionSet({ datuGrants: grantCache });
+const grantFor = (name, url) => {
+  const clean = String(url || '').replace(/\/+$/, '');
+  if ((grantCache[clean] || {})[name]) return grantCache[clean][name];
+  for (const byName of Object.values(grantCache)) {
+    if ((byName || {})[name]) return byName[name];
+  }
+  return '';
+};
 let requestsFingerprint = '';
 
 function notifyState() {
@@ -1007,8 +1015,8 @@ async function processRequest(req, passphrase) {
     }
     // Silent re-logins prefer a session grant: no passphrase round-trip.
     // If the grant expired, retry once with the cached passphrase.
-    if (isLogin && !passphrase && (grantCache[url] || {})[body.name]) {
-      body.grant = grantCache[url][body.name];
+    if (isLogin && !passphrase && grantFor(body.name, url)) {
+      body.grant = grantFor(body.name, url);
     }
     try {
       const res = await bridgeCall(url, payload.path || '', body, token);
@@ -1047,11 +1055,12 @@ async function pollRequests() {
     const o = await chrome.storage.session.get(REQUESTS_KEY);
     const queue = o[REQUESTS_KEY] || [];
 
-    // Silent path: auto re-login challenges when the passphrase is cached.
+    // Silent path: auto re-login challenges when the passphrase is cached OR
+    // a live session grant exists (passkey unlocks never cache a passphrase).
     const remaining = [];
     for (const req of queue) {
       const body = (req.payload || {}).body || {};
-      if (body.auto === true && passCache[body.name]) {
+      if (body.auto === true && (passCache[body.name] || grantFor(body.name, (req.payload || {}).bridgeUrl))) {
         try {
           await processRequest(req, passCache[body.name]);
           continue;
@@ -1103,7 +1112,7 @@ function renderRequest(req) {
       `site <b>${esc(body.rp_id || '?')}</b> · origin <b>${esc(body.origin || '?')}</b>`,
       `<br/>challenge expires ${body.expires_at_ms ? esc(new Date(body.expires_at_ms).toISOString()) : '?'} · datu-auth-v1, never a ledger entry`,
     ].join('');
-    box.insertBefore(detail, box.lastChild);
+    box.insertBefore(detail, head.nextSibling);
   }
 
   const pass = document.createElement('input');

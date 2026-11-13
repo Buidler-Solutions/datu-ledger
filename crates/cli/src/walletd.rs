@@ -751,8 +751,19 @@ fn handle_inner(
         ("POST", "/v1/wallet/webauthn-create") => {
             let body_json = parse_body(&body)?;
             let name = str_field(&body_json, "name")?;
-            let passphrase = str_field(&body_json, "passphrase")?;
-            let identity = load_guarded(&wallet, &name, &passphrase)?;
+            // Grant or passphrase: the browser proxy holds a session grant
+            // (minted by a panel unlock), never the passphrase itself.
+            let grant = body_json
+                .get("grant")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let identity = if !grant.is_empty() {
+                grants.use_grant(&name, &grant)?
+            } else {
+                let passphrase = str_field(&body_json, "passphrase")?;
+                std::sync::Arc::new(load_guarded(&wallet, &name, &passphrase)?)
+            };
             let rp_id = str_field(&body_json, "rp_id")?;
             let user_name = body_json
                 .get("user_name")
@@ -1674,6 +1685,55 @@ mod tests {
         assert_eq!(cred["alg"], -8);
         assert!(cred["public_key_cose_b64"].as_str().unwrap().len() > 30);
         let credential_id = cred["credential_id"].as_str().unwrap().to_string();
+
+        // The browser proxy never holds the passphrase: create and get must
+        // work off a session grant alone (regression: grant path).
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/auth-assert",
+            Some(&token),
+            &json!({"name": "carol", "passphrase": "carol pass", "rp_id": "app.example.com",
+                    "origin": "https://app.example.com", "nonce": "ee".repeat(16),
+                    "expires_at_ms": 4_102_444_800_000u64, "approve": true})
+            .to_string(),
+        );
+        assert!(status.contains("200"), "grant mint failed: {status} {body}");
+        let grant = serde_json::from_str::<serde_json::Value>(&body).unwrap()["grant"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/webauthn-create",
+            Some(&token),
+            &json!({"name": "carol", "grant": grant,
+                    "rp_id": "grant.example", "user_name": "carol@example.com"})
+            .to_string(),
+        );
+        assert!(
+            status.contains("200"),
+            "grant-only create failed: {status} {body}"
+        );
+        let grant_cred = serde_json::from_str::<serde_json::Value>(&body).unwrap()["credential_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let client_b64_probe = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"{\"type\":\"webauthn.get\"}",
+        );
+        let (status, _) = http(
+            port,
+            "POST",
+            "/v1/wallet/webauthn-get",
+            Some(&token),
+            &json!({"name": "carol", "grant": grant, "rp_id": "grant.example",
+                    "credential_id": grant_cred, "client_data_json_b64": client_b64_probe})
+            .to_string(),
+        );
+        assert!(status.contains("200"), "grant-only get failed: {status}");
 
         let client_data = br#"{"type":"webauthn.get","challenge":"AAECAwQFBgcICQoLDA0ODw","origin":"https://app.example.com"}"#;
         let client_b64 =
