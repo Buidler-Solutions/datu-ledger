@@ -63,6 +63,14 @@ await datu.partySign({ name: 'amina', role: 'holder', document, kind: 'land.titl
 await datu.signEntry({ name: 'amina', request: { namespace: 'gov.records', payload } });
 ```
 
+Headless or server-side use (a trusted host that owns the Signet service) can
+sign in without the extension by passing `passphrase`; a browser page must
+never do that, because then the page holds the secret.
+
+```js
+await datu.signIn({ name: 'amina', rpId: 'app.example.com', passphrase: process.env.VAULT_PASS });
+```
+
 ## Privacy
 
 ```js
@@ -83,9 +91,21 @@ const coverage = await datu.verifyCoverage(id); // verifies witness Merkle paths
 const verdict = await datu.node.contractStatus(anchorId);
 ```
 
-`verifyCoverage` uses `window.datuCoverage` when an app has loaded the node's
-`/coverage.js`; otherwise it reports each witness as not checked rather than
-pretending.
+`verifyCoverage` verifies the served Merkle path and checkpoint signature
+locally. It uses `window.datuCoverage` if your app already loaded the node's
+`/coverage.js`, otherwise it fetches and evaluates it once itself
+(`datu.loadCoverageVerifier()` is exposed too). Outside a browser there is no
+verifier, and each witness is reported as not checked rather than pretended.
+
+## Convenience rules
+
+- `fields`, `to`, `toFields` accept an array, a single string, or a comma list
+  (`fields: 'name,tax_id'`), so form inputs and env vars pass straight through
+- `signIn({ ..., strict: true })` refuses an assertion the SDK could not verify
+  locally; without it you get `verified: null` and can decide yourself
+- Node statuses are named: `403 -> POLICY_DENIED`, `409 -> CONFLICT`
+  (forks are preserved as evidence, not errors to hide), `429 -> RATE_LIMITED`
+  with `details.retryAfterS`
 
 ## Errors
 
@@ -101,9 +121,9 @@ try {
 }
 ```
 
-Codes: `NOT_CONNECTED`, `NOT_PAIRED`, `NEEDS_APPROVAL`, `ORIGIN_MISMATCH`,
+Codes: `NOT_CONNECTED`, `NOT_PAIRED`, `NEEDS_APPROVAL`, `NEEDS_PASSPHRASE`, `ORIGIN_MISMATCH`,
 `GRANT_EXPIRED`, `UNKNOWN_ROUTE`, `REJECTED`, `TIMEOUT`, `BRIDGE_ERROR`,
-`NODE_ERROR`, `BAD_ARGUMENT`.
+`NODE_ERROR`, `POLICY_DENIED`, `CONFLICT`, `RATE_LIMITED`, `BAD_ARGUMENT`.
 
 ## Tests without a wallet
 
@@ -125,6 +145,18 @@ requests your app makes.
 
 Types ship with the package (`src/index.d.ts`); no build step and no bundler
 required, the package is plain ESM.
+
+## Verify against a real stack
+
+```sh
+datu signet serve --addr 127.0.0.1:7588 --data-dir /tmp/datu-demo
+datu node --http 127.0.0.1:7574 --data-dir /tmp/datu-demo
+DATU_PASS=amina-demo node scripts/live-smoke.mjs
+```
+
+Prints identities, node status, a verified login, a rejected replay, a grant
+re-login, coverage, and a refused phishing origin. The unit suite
+(`npm test`) needs no network.
 
 ## License
 

@@ -48,6 +48,7 @@ test('signIn mints a challenge, signs it, and verifies locally', async () => {
   assert.equal(challenge.rp_id, 'app.example.com');
   assert.equal(rpc.calls[0].path, '/v1/wallet/auth-assert');
   assert.equal(rpc.calls[0].body.nonce, challenge.nonce);
+  assert.equal(rpc.calls[0].body.approve, true, 'interactive login carries the approval gesture');
 });
 
 test('signIn rejects an assertion signed by the wrong key', async () => {
@@ -61,6 +62,15 @@ test('signIn rejects an assertion signed by the wrong key', async () => {
     return out;
   };
   await assert.rejects(datu.signIn({ name: 'amina', rpId: 'a', origin: 'https://a' }), /rejected/);
+});
+
+test('silent relogin passes a grant and no approval gesture', async () => {
+  const key = keypair();
+  const rpc = mockTransport({ keys: { amina: key } });
+  const datu = await connect({ transport: rpc });
+  await datu.signIn({ name: 'amina', rpId: 'app', origin: 'https://app', approve: false, grant: 'g-1' });
+  assert.equal(rpc.calls[0].body.approve, false);
+  assert.equal(rpc.calls[0].body.grant, 'g-1');
 });
 
 test('signIn rejects an assertion for another challenge (replay)', async () => {
@@ -130,6 +140,55 @@ test('node errors surface as NODE_ERROR with status', async () => {
     assert.match(e.message, /no route/);
     return true;
   });
+});
+
+test('list arguments accept strings, comma lists and arrays', async () => {
+  const rpc = mockTransport();
+  const datu = await connect({ transport: rpc });
+  await datu.seal({ name: 'registrar', document: {}, fields: 'a,b', to: 'key1,key2' });
+  assert.deepEqual(rpc.calls[0].body.fields, ['a', 'b']);
+  assert.deepEqual(rpc.calls[0].body.to, ['key1', 'key2']);
+  await datu.sealDeferred({ name: 'registrar', document: {}, fields: ['p'], to: 'key1' });
+  assert.deepEqual(rpc.calls[1].body.fields, ['p']);
+  assert.equal(rpc.calls[1].body.to, 'key1');
+});
+
+test('strict login refuses an unverifiable assertion', async () => {
+  const key = keypair();
+  const rpc = mockTransport({ keys: { amina: key } });
+  const datu = await connect({ transport: rpc });
+  const realVerify = globalThis.crypto;
+  const savedSubtle = realVerify.subtle;
+  Object.defineProperty(realVerify, 'subtle', { configurable: true, value: undefined });
+  try {
+    const lax = await datu.signIn({ name: 'amina', rpId: 'a', origin: 'https://a' });
+    assert.equal(lax.verified, null);
+    await assert.rejects(
+      datu.signIn({ name: 'amina', rpId: 'a', origin: 'https://a', strict: true }),
+      /could not be verified locally/,
+    );
+  } finally {
+    Object.defineProperty(realVerify, 'subtle', { configurable: true, value: savedSubtle });
+  }
+});
+
+test('node statuses map to named codes (denied, conflict, quota)', async () => {
+  const make = (status, body) => ({
+    fetchImpl: async () => ({ ok: false, status, text: async () => JSON.stringify(body) }),
+  });
+  const cases = [
+    [403, { error: 'denied', denied: 'writer not admitted' }, ErrorCode.POLICY_DENIED],
+    [409, { error: 'conflict' }, ErrorCode.CONFLICT],
+    [429, { error: 'rate limit', retry_after_s: 12 }, ErrorCode.RATE_LIMITED],
+    [500, { error: 'boom' }, ErrorCode.NODE_ERROR],
+  ];
+  for (const [status, body, expected] of cases) {
+    const datu = await connect({ transport: mockTransport(), ...make(status, body) });
+    await assert.rejects(datu.node.status(), (e) => {
+      assert.equal(e.code, expected, `${status} -> ${e.code}`);
+      return true;
+    });
+  }
 });
 
 test('argument validation is explicit', async () => {

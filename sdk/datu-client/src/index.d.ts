@@ -56,6 +56,7 @@ export type ErrorCodeValue =
   | 'NOT_CONNECTED'
   | 'NOT_PAIRED'
   | 'NEEDS_APPROVAL'
+  | 'NEEDS_PASSPHRASE'
   | 'ORIGIN_MISMATCH'
   | 'GRANT_EXPIRED'
   | 'UNKNOWN_ROUTE'
@@ -63,6 +64,9 @@ export type ErrorCodeValue =
   | 'TIMEOUT'
   | 'BRIDGE_ERROR'
   | 'NODE_ERROR'
+  | 'POLICY_DENIED'
+  | 'CONFLICT'
+  | 'RATE_LIMITED'
   | 'BAD_ARGUMENT';
 
 export declare class DatuError extends Error {
@@ -124,16 +128,26 @@ export interface DatuClient {
     ttlMs?: number;
     nonce?: Hex;
     summary?: string;
+    /** Refuse an assertion that could not be verified locally (default false). */
+    strict?: boolean;
+    /** Approval gesture for first use of a site (default true). */
+    approve?: boolean;
+    /** Session grant from a previous login, for silent re-logins. */
+    grant?: string;
+    /** Trusted-host only (never a browser page): sign in without the extension. */
+    passphrase?: string;
   }): Promise<{ assertion: AuthAssertion; verified: boolean | null; challenge: AuthChallenge }>;
   partySign(args: { name?: string; role: string; document: any; kind?: string; summary?: string }): Promise<SignResult>;
   signEntry(args: { name?: string; request: any; summary?: string }): Promise<SignResult>;
-  seal(args: { name?: string; document: any; fields: string[]; to?: string[]; toFields?: string[]; summary?: string }): Promise<SignResult>;
-  sealDeferred(args: { name?: string; document: any; fields: string[]; to?: string; toField?: string; summary?: string }): Promise<SignResult>;
+  seal(args: { name?: string; document: any; fields: string[] | string; to?: string[] | string; toFields?: string[] | string; summary?: string }): Promise<SignResult>;
+  sealDeferred(args: { name?: string; document: any; fields: string[] | string; to?: string | string[]; toField?: string; summary?: string }): Promise<SignResult>;
   releaseDeferred(args: { document: any; field: string; release: any }): Promise<SignResult>;
   openDeferred(args: { name?: string; document: any; field: string; release: any; summary?: string }): Promise<SignResult>;
   openSealed(args: { name?: string; document: any; summary?: string }): Promise<SignResult>;
   verifyEntry(args: { name?: string; entry: any }): Promise<SignResult>;
   verifyCoverage(entryId: Hex, opts?: { coverageVerifier?: any }): Promise<CoverageResult>;
+  /** Load the node's /coverage.js verifier (browser only; null elsewhere). */
+  loadCoverageVerifier(): Promise<any>;
   onError(e: unknown): DatuError;
 }
 

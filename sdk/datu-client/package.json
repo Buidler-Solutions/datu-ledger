@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "description": "Integrate a dApp with the DATU accountability DAG: SignetAuth login, signing, sealing, node reads and coverage verification",
   "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/greenarmor/datu-ledger",
+    "directory": "sdk/datu-client"
+  },
   "main": "./src/index.js",
   "types": "./src/index.d.ts",
   "exports": {
@@ -14,8 +23,14 @@
       "types": "./src/mock.d.ts",
       "default": "./src/mock.js"
     },
-    "./auth": "./src/auth.js",
-    "./errors": "./src/errors.js"
+    "./auth": {
+      "types": "./src/auth.d.ts",
+      "default": "./src/auth.js"
+    },
+    "./errors": {
+      "types": "./src/errors.d.ts",
+      "default": "./src/errors.js"
+    }
   },
   "files": [
     "src",

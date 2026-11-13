@@ -41,6 +41,17 @@ const require = (value, message) => {
   return value;
 };
 
+// Accept "a,b", "a" or ["a","b"] everywhere a list of names/keys is expected:
+// integrations read from forms and env vars far more often than from arrays.
+const asList = (value) => {
+  if (value == null || value === '') return undefined;
+  if (Array.isArray(value)) return value;
+  return String(value)
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+};
+
 /**
  * Connect to a Signet extension (and optionally a node).
  * Options:
@@ -114,7 +125,23 @@ export async function connect({
    * verification. Returns { assertion, verified, challenge }.
    * `verified` is true, false, or null when no local verifier exists.
    */
-  async function signIn({ name, rpId, origin, ttlMs, nonce, summary } = {}) {
+  async function signIn({
+    name,
+    rpId,
+    origin,
+    ttlMs,
+    nonce,
+    summary,
+    strict = false,
+    // The human clicked "sign in": that is the approval gesture the bridge
+    // needs to register a site on first use. Silent re-logins pass false.
+    approve = true,
+    grant,
+    // Only for a trusted host that owns the Signet service (CLI, server-side
+    // bridge, tests). A browser page must never pass this: the extension
+    // supplies the passphrase from the panel.
+    passphrase,
+  } = {}) {
     const { challenge, verify } = startLogin({ rpId, origin, ttlMs, nonce });
     const assertion = await sign({
       name,
@@ -124,12 +151,21 @@ export async function connect({
         origin: challenge.origin,
         nonce: challenge.nonce,
         expires_at_ms: challenge.expires_at_ms,
+        approve,
+        grant,
+        passphrase,
       },
       summary: summary || `Sign in to ${challenge.rp_id}`,
     });
     const verdict = await verify(assertion);
     if (verdict.ok === false) {
       throw new DatuError(ErrorCode.REJECTED, `login assertion rejected: ${verdict.reason}`);
+    }
+    if (strict && verdict.ok !== true) {
+      throw new DatuError(
+        ErrorCode.REJECTED,
+        `login assertion could not be verified locally: ${verdict.reason}`,
+      );
     }
     return { assertion, verified: verdict.ok, challenge };
   }
@@ -160,17 +196,25 @@ export async function connect({
     sign({
       name,
       path: '/v1/wallet/seal',
-      body: { name, document, fields, to, to_fields: toFields },
-      summary: summary || `Seal ${(fields || []).join(', ')}`,
+      body: { name, document, fields: asList(fields), to: asList(to), to_fields: asList(toFields) },
+      summary: summary || `Seal ${asList(fields) ? asList(fields).join(', ') : 'fields'}`,
     });
 
-  const sealDeferred = async ({ name, document, fields, to, toField, summary } = {}) =>
-    sign({
+  const sealDeferred = async ({ name, document, fields, to, toField, summary } = {}) => {
+    const holders = asList(to);
+    return sign({
       name,
       path: '/v1/wallet/seal-deferred',
-      body: { name, document, fields, to, to_field: toField },
-      summary: summary || `Defer ${(fields || []).join(', ')}`,
+      body: {
+        name,
+        document,
+        fields: asList(fields),
+        to: holders ? holders[0] : undefined,
+        to_field: toField,
+      },
+      summary: summary || `Defer ${asList(fields) ? asList(fields).join(', ') : 'fields'}`,
     });
+  };
 
   const releaseDeferred = async ({ document, field, release } = {}) => {
     require(field, 'field is required');
@@ -209,6 +253,31 @@ export async function connect({
     });
 
   /**
+   * Load the node's coverage verifier (it serves /coverage.js, which exposes
+   * BLAKE3 plus Merkle-path and Ed25519 checks on window.datuCoverage).
+   * Browser only; in Node it resolves to null and coverage stays unchecked.
+   */
+  let coverageVerifierPromise = null;
+  async function loadCoverageVerifier() {
+    if (typeof window === 'undefined') return null;
+    if (window.datuCoverage) return window.datuCoverage;
+    if (coverageVerifierPromise) return coverageVerifierPromise;
+    coverageVerifierPromise = (async () => {
+      try {
+        const base = getNode().url;
+        const res = await doFetch(`${base}/coverage.js`);
+        if (!res.ok) return null;
+        const source = await res.text();
+        (0, eval)(source);
+        return window.datuCoverage || null;
+      } catch {
+        return null;
+      }
+    })();
+    return coverageVerifierPromise;
+  }
+
+  /**
    * Coverage: is this entry witnessed by a fresh checkpoint? Verifies the
    * served Merkle path and checkpoint signature locally when a coverage
    * verifier is supplied (the node serves /coverage.js as window.datuCoverage,
@@ -217,7 +286,10 @@ export async function connect({
   async function verifyCoverage(entryId, { coverageVerifier } = {}) {
     const node = getNode();
     const answer = await node.coverage(entryId);
-    const verifier = coverageVerifier || (typeof window !== 'undefined' ? window.datuCoverage : null);
+    const verifier =
+      coverageVerifier ||
+      (typeof window !== 'undefined' ? window.datuCoverage : null) ||
+      (await loadCoverageVerifier());
     const witnesses = answer.witnesses || [];
     const results = [];
     for (const witness of witnesses) {
@@ -235,6 +307,7 @@ export async function connect({
     return { entryId, witnesses: results, stale: answer.stale || [] };
   }
 
+  const doFetch = fetchImpl || (typeof fetch !== 'undefined' ? fetch : null);
   let nodeClient = createNodeClient({ nodeUrl, fetchImpl });
   function getNode() {
     if (!nodeClient) nodeClient = createNodeClient({ nodeUrl, fetchImpl });
@@ -269,6 +342,7 @@ export async function connect({
     openSealed,
     verifyEntry,
     verifyCoverage,
+    loadCoverageVerifier,
     onError: (e) => mapError(e),
   };
 }

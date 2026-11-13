@@ -29,11 +29,22 @@ export function createNodeClient({ nodeUrl, fetchImpl } = {}) {
         json = { error: text };
       }
       if (!res.ok) {
-        throw new DatuError(
-          ErrorCode.NODE_ERROR,
-          (json && json.error) || `node ${res.status}`,
-          { status: res.status },
-        );
+        // The node speaks in HTTP codes; dApps speak in these:
+        //   403 denied by writer policy, 409 fork/conflict kept as evidence,
+        //   429 quota (retry_after_s), 5xx node fault.
+        const code =
+          res.status === 403
+            ? ErrorCode.POLICY_DENIED
+            : res.status === 409
+              ? ErrorCode.CONFLICT
+              : res.status === 429
+                ? ErrorCode.RATE_LIMITED
+                : ErrorCode.NODE_ERROR;
+        throw new DatuError(code, (json && (json.error || json.denied)) || `node ${res.status}`, {
+          status: res.status,
+          retryAfterS: json && json.retry_after_s,
+          denied: json && json.denied,
+        });
       }
       return json;
     } catch (e) {

@@ -73,7 +73,9 @@ export function createExtensionTransport({ timeoutMs = DEFAULT_TIMEOUT_MS, pingM
         reject(
           new DatuError(
             ErrorCode.TIMEOUT,
-            'no answer from the Signet extension - load it (chrome://extensions) and reload this page',
+            action === 'identities'
+              ? 'no answer from the Signet extension - update it to 1.6.0 or newer (it brokers identity listing) and reload the page'
+              : 'no answer from the Signet extension - load it (chrome://extensions) and reload this page',
           ),
         );
       }, timeout);
