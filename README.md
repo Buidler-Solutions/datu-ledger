@@ -234,6 +234,25 @@ Default node directory is `.datu/` (`--data-dir` to override). It contains:
 `secret.key` (Ed25519), `secret.mldsa65` (ML-DSA-65), `node.db` (append-only store),
 `wallet/` (identities + index).
 
+## Sign in with your identity (SignetAuth)
+
+A Signet identity is also a login credential: the site issues a one-time
+challenge, your wallet signs it, and the site verifies one Ed25519 signature
+against your registered public key. No password and no bearer token travel;
+the signed bytes are domain-separated (`datu-auth-v1`) so an assertion can
+never be replayed as a ledger signature.
+
+```sh
+datu signet auth-assert --name amina --rp-id app.example.com   --origin https://app.example.com --nonce <32 hex from the site>   --expires-at-ms <challenge expiry> --out login.json      # wallet side
+datu signet auth-verify --rp-id app.example.com --origin https://app.example.com   --nonce <same> --expires-at-ms <same>   --pubkey <identity key> --signature <from login.json>     # relying party side
+```
+
+The bridge pins each relying party's origin on first approval, so a phishing
+site can never obtain a valid assertion for the real one, and a passphrase
+login mints a short-lived in-memory session grant so re-logins do not re-send
+it. A device passkey can gate the whole thing behind Touch ID / Windows Hello.
+Wire standard and test vector: `specs/signetauth.md`.
+
 ## Wallet, dApps, and field-level encryption (Tier 4)
 
 The **wallet is the keychain minus the money**: named identities, each holding an
