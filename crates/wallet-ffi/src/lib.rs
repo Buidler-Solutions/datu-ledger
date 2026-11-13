@@ -14,7 +14,7 @@
 //! The request grammar mirrors the desktop bridge routes (`{"action":
 //! "identities"}`, `create`, `party-sign`, `seal`, `open`, `seal-deferred`,
 //! `release-deferred`, `open-deferred`, `export`, `import`, `sign-entry`,
-//! `verify-entry`) and returns the same response shapes, so a front end can
+//! `verify-entry`, `auth-assert`) and returns the same response shapes, so a front end can
 //! swap an HTTP bridge for this core without changing screens. Errors come back as `{"error": "…"}` - including
 //! passphrase throttling: 5 wrong passphrases lock that identity for 15 s.
 //!
@@ -365,8 +365,51 @@ fn process_inner(core: &WalletCore, request_json: &str) -> Result<Value, String>
             let entry_json = wire::entry_full_json(&entry)?;
             Ok(json!({ "ok": true, "id": hex_encode(id), "entry": entry_json }))
         }
+        // SignetAuth Level 1: sign a relying party's login challenge. Same
+        // response shape as the bridge's POST /v1/wallet/auth-assert.
+        "auth-assert" => {
+            let name = str_field(&body, "name")?;
+            let passphrase = str_field(&body, "passphrase")?;
+            let identity = load_guarded(core, &name, &passphrase)?;
+            let rp_id = str_field(&body, "rp_id")?;
+            let origin = str_field(&body, "origin")?;
+            let nonce_hex = str_field(&body, "nonce")?;
+            let expires_at_ms = body
+                .get("expires_at_ms")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing 'expires_at_ms' (milliseconds since Unix epoch)")?;
+            let nonce: [u8; datu_core::auth::NONCE_BYTES] = hex::decode(&nonce_hex)
+                .map_err(|e| format!("bad nonce hex: {e}"))?
+                .try_into()
+                .map_err(|_| {
+                    format!(
+                        "nonce must be {} hex chars",
+                        datu_core::auth::NONCE_BYTES * 2
+                    )
+                })?;
+            if rp_id.is_empty() || rp_id.len() > 255 {
+                return Err("rp_id must be 1-255 chars".into());
+            }
+            let challenge = datu_core::auth::AuthChallenge {
+                rp_id,
+                origin,
+                nonce,
+                expires_at_ms,
+            };
+            let signature = datu_core::auth::sign_assertion(&identity.ed, &challenge);
+            Ok(json!({
+                "ok": true,
+                "domain": datu_core::auth::AUTH_DOMAIN,
+                "rp_id": challenge.rp_id,
+                "origin": challenge.origin,
+                "nonce": nonce_hex,
+                "expires_at_ms": challenge.expires_at_ms,
+                "pubkey": identity.public.ed_public,
+                "signature": hex::encode(signature),
+            }))
+        }
         other => Err(format!(
-            "unknown action '{other}' - expected identities, create, party-sign, seal, open, seal-deferred, release-deferred, open-deferred, export, import, sign-entry, verify-entry"
+            "unknown action '{other}' - expected identities, create, party-sign, seal, open, seal-deferred, release-deferred, open-deferred, export, import, sign-entry, verify-entry, auth-assert"
         )),
     }
 }
@@ -551,5 +594,72 @@ pub unsafe extern "C" fn datu_wallet_close(core: *mut WalletCore) {
 pub unsafe extern "C" fn datu_string_free(s: *mut c_char) {
     if !s.is_null() {
         drop(CString::from_raw(s));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_assert_action_signs_verifiable_login_challenge() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = WalletCore::new(dir.path().to_path_buf());
+        let created = process(
+            &core,
+            r#"{"action":"create","name":"alice","passphrase":"alice pass"}"#,
+        );
+        let created: Value = serde_json::from_str(&created).unwrap();
+        assert!(
+            created.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "{created:?}"
+        );
+        let pubkey_hex = created["identity"]["ed_public"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let nonce = "cd".repeat(datu_core::auth::NONCE_BYTES);
+        let request = json!({
+            "action": "auth-assert",
+            "name": "alice",
+            "passphrase": "alice pass",
+            "rp_id": "app.example.com",
+            "origin": "https://app.example.com",
+            "nonce": nonce,
+            "expires_at_ms": 4_102_444_800_000u64,
+        })
+        .to_string();
+        let out = process(&core, &request);
+        let out: Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            out.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "{out:?}"
+        );
+        assert_eq!(out["domain"], "datu-auth-v1");
+        assert_eq!(out["pubkey"], pubkey_hex.as_str());
+
+        let challenge = datu_core::auth::AuthChallenge {
+            rp_id: "app.example.com".into(),
+            origin: "https://app.example.com".into(),
+            nonce: hex::decode(&nonce).unwrap().try_into().unwrap(),
+            expires_at_ms: 4_102_444_800_000,
+        };
+        let sig: [u8; 64] = hex::decode(out["signature"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let verifying = datu_core::entry::parse_key(&pubkey_hex).unwrap();
+        datu_core::auth::verify_assertion(&verifying, &challenge, &sig).unwrap();
+
+        // Malformed nonce is refused before any signing happens.
+        let bad = process(
+            &core,
+            r#"{"action":"auth-assert","name":"alice","passphrase":"alice pass","rp_id":"app.example.com","origin":"https://app.example.com","nonce":"zz","expires_at_ms":4102444800000}"#,
+        );
+        assert!(
+            bad.contains("bad nonce hex") || bad.contains("nonce must be"),
+            "{bad}"
+        );
     }
 }

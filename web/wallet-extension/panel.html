@@ -27,6 +27,7 @@
     <nav>
       <button data-tab="records" class="active">My records</button>
       <button data-tab="consent">Sign</button>
+      <button data-tab="login">Login</button>
       <button data-tab="data">My data</button>
       <button data-tab="settings">Settings</button>
     </nav>
@@ -82,6 +83,34 @@
         </div>
         <textarea id="result" rows="5" readonly placeholder="signed document - give it back to the registry dApp"></textarea>
         <button class="ghost" id="copy" disabled>Copy signed consent</button>
+      </section>
+
+      <section data-panel="login">
+        <h2>Sign in to a site (SignetAuth)</h2>
+        <p class="muted small">
+          Challenge-response login: the site issues a one-time challenge, your
+          Signet signs it, the site verifies against your public key. No
+          password reaches the site, and the assertion is useless if replayed
+          (datu-auth-v1).
+        </p>
+        <label>Site (rp_id)<input id="loginRp" placeholder="app.example.com" /></label>
+        <label>Origin the request came from<input id="loginOrigin" placeholder="https://app.example.com" /></label>
+        <label>Challenge nonce (32 hex chars, from the site)<input id="loginNonce" placeholder="paste the nonce the site gave you" /></label>
+        <label>Challenge expiry - ms since epoch (blank = now + 60s)<input id="loginExpires" placeholder="4102444800000" /></label>
+        <button class="primary" id="loginReview">Review sign-in</button>
+        <div class="confirm" id="loginConfirm" style="display:none">
+          <div class="muted small">You are signing in as this identity to this site</div>
+          <div id="loginSummary" class="summary"></div>
+          <div class="row">
+            <button class="primary" id="loginSign">Approve &amp; sign in</button>
+            <button class="ghost" id="loginCancel">Cancel</button>
+          </div>
+        </div>
+        <textarea id="loginResult" rows="6" readonly placeholder="login assertion - paste it back into the site's login form"></textarea>
+        <button class="ghost" id="loginCopy" disabled>Copy assertion</button>
+        <p class="muted small">
+          The assertion never becomes a ledger entry and can never be reused as one.
+        </p>
       </section>
 
       <section data-panel="data">

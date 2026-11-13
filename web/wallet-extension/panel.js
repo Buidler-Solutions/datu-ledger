@@ -716,6 +716,77 @@ async function openPasted() {
   }
 }
 
+// ---------- SignetAuth login (review, then confirm) ----------
+// Level 1: the site's challenge is signed with the selected identity; the
+// assertion goes back to the site and is worthless on any other site, origin
+// or nonce. Review shows exactly what is being signed.
+let pendingLogin = null; // { rp_id, origin, nonce, expires_at_ms }
+
+function reviewLogin() {
+  try {
+    const identity = selected();
+    if (!$('pass').value) throw new Error('enter your vault passphrase (Sign tab)');
+    const rp_id = $('loginRp').value.trim();
+    const origin = $('loginOrigin').value.trim();
+    const nonce = $('loginNonce').value.trim().toLowerCase();
+    const expiresRaw = $('loginExpires').value.trim();
+    if (!rp_id) throw new Error('enter the site id (rp_id, e.g. app.example.com)');
+    if (!origin) throw new Error('enter the origin the login request came from');
+    if (!/^[0-9a-f]{32}$/.test(nonce)) throw new Error('nonce must be 32 hex chars (issued by the site)');
+    const expires_at_ms = expiresRaw
+      ? (/^\d+$/.test(expiresRaw) ? Number(expiresRaw) : NaN)
+      : Date.now() + 60000;
+    if (!Number.isFinite(expires_at_ms)) throw new Error('expiry must be milliseconds since epoch');
+    if (expires_at_ms <= Date.now()) throw new Error('this challenge has already expired - ask the site for a fresh one');
+    pendingLogin = { rp_id, origin, nonce, expires_at_ms };
+    $('loginSummary').innerHTML = [
+      `<div><span class="k">sign in to</span> <b>${esc(rp_id)}</b></div>`,
+      `<div><span class="k">origin</span> <b>${esc(origin)}</b></div>`,
+      `<div><span class="k">as identity</span> <b>${esc(identity.name)} · ${identity.ed_public.slice(0, 16)}…</b></div>`,
+      `<div><span class="k">nonce (single use)</span> <b>${esc(nonce)}</b></div>`,
+      `<div><span class="k">expires</span> <b>${new Date(expires_at_ms).toISOString()}</b></div>`,
+      '<div><span class="k">domain</span> <b>datu-auth-v1 (never a ledger entry)</b></div>',
+    ].join('');
+    $('loginConfirm').style.display = 'block';
+    status('review the sign-in, then approve', 'muted');
+  } catch (e) {
+    pendingLogin = null;
+    $('loginConfirm').style.display = 'none';
+    status(e.message, 'err');
+  }
+}
+
+async function confirmLogin() {
+  try {
+    if (!pendingLogin) throw new Error('nothing to sign');
+    const identity = selected();
+    if (!$('pass').value) throw new Error('enter your vault passphrase (Sign tab)');
+    status('unlocking your Signet and signing the challenge…');
+    const data = await bridge('/v1/wallet/auth-assert', {
+      name: identity.name,
+      passphrase: $('pass').value,
+      rp_id: pendingLogin.rp_id,
+      origin: pendingLogin.origin,
+      nonce: pendingLogin.nonce,
+      expires_at_ms: pendingLogin.expires_at_ms,
+    });
+    if (data.domain !== 'datu-auth-v1') throw new Error('unexpected assertion domain from the bridge');
+    $('loginResult').value = JSON.stringify(data, null, 2);
+    $('loginCopy').disabled = false;
+    $('loginConfirm').style.display = 'none';
+    pendingLogin = null;
+    status(`signed in to ${data.rp_id} - paste the assertion into the site's login form`, 'ok');
+  } catch (e) {
+    status(e.message, 'err');
+  }
+}
+
+function cancelLogin() {
+  pendingLogin = null;
+  $('loginConfirm').style.display = 'none';
+  status('sign-in cancelled', 'muted');
+}
+
 // ---------- create identity ----------
 async function createIdentity() {
   try {
@@ -803,6 +874,10 @@ function clearSensitive() {
   $('opened').textContent = '';
   $('confirmBox').style.display = 'none';
   pendingSign = null;
+  pendingLogin = null;
+  $('loginConfirm').style.display = 'none';
+  $('loginResult').value = '';
+  $('loginCopy').disabled = true;
 }
 function armIdleTimer() {
   clearTimeout(idleTimer);
@@ -910,9 +985,21 @@ function renderRequest(req) {
   box.style.padding = '.45rem 0';
 
   const head = document.createElement('div');
-  head.innerHTML = `<b>${esc(payload.summary || path || req.action)}</b>
+  const isLogin = path === '/v1/wallet/auth-assert';
+  head.innerHTML = `<b>${esc(payload.summary || (isLogin ? `sign in to ${body.rp_id || 'a site'}` : path || req.action))}</b>
     <div class="muted small">${esc(url)}${esc(path)} · identity ${esc(body.name || '?')} · ${new Date(req.at).toLocaleTimeString()}</div>`;
   box.appendChild(head);
+
+  if (isLogin) {
+    const detail = document.createElement('div');
+    detail.className = 'muted small';
+    detail.style.margin = '.3rem 0';
+    detail.innerHTML = [
+      `site <b>${esc(body.rp_id || '?')}</b> · origin <b>${esc(body.origin || '?')}</b>`,
+      `<br/>challenge expires ${body.expires_at_ms ? esc(new Date(body.expires_at_ms).toISOString()) : '?'} · datu-auth-v1, never a ledger entry`,
+    ].join('');
+    box.insertBefore(detail, box.lastChild);
+  }
 
   const pass = document.createElement('input');
   pass.type = 'password';
@@ -925,7 +1012,7 @@ function renderRequest(req) {
   row.className = 'row';
   const confirm = document.createElement('button');
   confirm.className = 'primary';
-  confirm.textContent = 'Confirm & sign';
+  confirm.textContent = isLogin ? 'Approve sign-in' : 'Confirm & sign';
   const reject = document.createElement('button');
   reject.className = 'ghost';
   reject.textContent = 'Reject';
@@ -965,6 +1052,13 @@ $('identity').addEventListener('change', showSeal);
 $('find').addEventListener('click', findMyRecords);
 $('check').addEventListener('click', () => checkNode());
 $('sign').addEventListener('click', reviewConsent);
+$('loginReview').addEventListener('click', reviewLogin);
+$('loginSign').addEventListener('click', confirmLogin);
+$('loginCancel').addEventListener('click', cancelLogin);
+$('loginCopy').addEventListener('click', async () => {
+  await navigator.clipboard.writeText($('loginResult').value);
+  status('login assertion copied - paste it into the site login form', 'ok');
+});
 $('confirmSign').addEventListener('click', confirmSign);
 $('cancelSign').addEventListener('click', cancelSign);
 $('open').addEventListener('click', openPasted);

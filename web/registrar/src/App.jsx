@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { listIdentities, nodeGet, nodePost, getToken, setToken } from './api.js';
 import { onWalletState, walletPing, walletSign } from './wallet.js';
+import { newChallenge, verifyAssertion } from './signetauth.js';
 
 const NS = 'gov.titles.application';
 const KIND = 'land.title.application';
@@ -65,11 +66,6 @@ function useHashPage() {
   return [page, go];
 }
 
-function randomHex(bytes = 16) {
-  const a = new Uint8Array(bytes);
-  crypto.getRandomValues(a);
-  return Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
-}
 
 function downloadJson(name, data) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -110,8 +106,6 @@ function parseEnvelope(text) {
 
 const partyOf = (doc, role) => (doc.parties || []).find((p) => p.role === role);
 
-const loginParty = (res) =>
-  (((res.body || {}).document || {}).parties || []).find((p) => p.role === 'login');
 
 // ---- landing page: not logged in (or wallet not yet registered here) ----
 function Welcome({ wallet, identities, bridgeUrl, nodeUrl, nodeStatus, busy, onLogin, onRefresh, say }) {
@@ -358,6 +352,10 @@ export default function App() {
   }, [page, session]);
 
   // ---- login / logout ----
+  // SignetAuth (datu-auth-v1): challenge-response login. The Signet signs the
+  // one-time challenge; the app verifies the Ed25519 signature locally
+  // against the identity's public key, so the node and the bridge are never
+  // trusted for authentication.
   async function login(roleKey, name) {
     setBusy(true);
     try {
@@ -367,31 +365,47 @@ export default function App() {
         );
       }
       const role = ROLES[roleKey] ? roleKey : 'landowner';
-      const challenge = { role, node: nodeUrl, nonce: randomHex(16), ts: Date.now() };
+      const challenge = newChallenge({
+        rpId: window.location.hostname,
+        origin: window.location.origin,
+      });
       const res = await walletSign({
         bridgeUrl,
-        path: '/v1/wallet/party-sign',
+        path: '/v1/wallet/auth-assert',
         summary: `Login - your Signet signs a one-time challenge as ${ROLES[role].label}${name ? ` (${name})` : ''}`,
-        body: { name, role: 'login', kind: 'datu.login', document: challenge },
+        body: {
+          name,
+          rp_id: challenge.rp_id,
+          origin: challenge.origin,
+          nonce: challenge.nonce,
+          expires_at_ms: challenge.expires_at_ms,
+        },
       });
-      const party = loginParty(res);
-      if (!party) throw new Error('Signet returned no login signature');
-      const known = roleOfKey(party.key);
+      const assertion = res.body || {};
+      if (!assertion.pubkey) throw new Error('Signet returned no login assertion');
+      const verdict = await verifyAssertion(nodeUrl, assertion, challenge);
+      if (verdict.ok === false) throw new Error(`login assertion rejected: ${verdict.reason}`);
+      const known = roleOfKey(assertion.pubkey);
       const finalRole = known && ROLES[known] ? known : role;
       if (known && known !== role) {
         say(`this Signet is already registered as ${ROLES[known].label} - routing it there`, 'muted');
       }
-      rememberRole(party.key, finalRole);
+      rememberRole(assertion.pubkey, finalRole);
       const s = {
         name,
-        ed: party.key,
-        sig: party.ed_signature || '',
+        ed: assertion.pubkey,
+        sig: assertion.signature || '',
         at: new Date().toLocaleTimeString(),
         role: finalRole,
       };
       setSession(s);
       saveSession(s);
-      say(`${name || 'Signet'} logged in as ${ROLES[finalRole].label} (${party.key.slice(0, 16)}…)`, 'ok');
+      say(
+        `${name || 'Signet'} logged in as ${ROLES[finalRole].label} (${assertion.pubkey.slice(0, 16)}…)${
+          verdict.ok === true ? ' - signature verified locally' : ' - local verification unavailable'
+        }`,
+        'ok'
+      );
       go(ROLES[finalRole].page);
     } catch (e) {
       say(e.message, 'err');
@@ -422,27 +436,34 @@ export default function App() {
     autoTried.current = true;
     (async () => {
       try {
-        const challenge = {
-          role: session.role,
-          node: nodeUrl,
-          nonce: randomHex(16),
-          ts: Date.now(),
-        };
+        const challenge = newChallenge({
+          rpId: window.location.hostname,
+          origin: window.location.origin,
+        });
         const res = await walletSign({
           bridgeUrl,
-          path: '/v1/wallet/party-sign',
+          path: '/v1/wallet/auth-assert',
           summary: `Re-login - ${session.name} re-signs a challenge as ${ROLES[session.role]?.label || session.role}`,
           body: {
             name: session.name,
-            role: 'login',
-            kind: 'datu.login',
-            document: challenge,
+            rp_id: challenge.rp_id,
+            origin: challenge.origin,
+            nonce: challenge.nonce,
+            expires_at_ms: challenge.expires_at_ms,
             auto: true,
           },
         });
-        const party = loginParty(res);
-        if (!party || party.key !== session.ed) {
+        const assertion = res.body || {};
+        if (!assertion.pubkey || assertion.pubkey !== session.ed) {
           say('stored session belongs to a different key - log in again', 'err');
+          setSession(null);
+          clearSession();
+          go('welcome');
+          return;
+        }
+        const verdict = await verifyAssertion(nodeUrl, assertion, challenge);
+        if (verdict.ok === false) {
+          say(`re-login assertion rejected: ${verdict.reason}`, 'err');
           setSession(null);
           clearSession();
           go('welcome');
@@ -450,7 +471,7 @@ export default function App() {
         }
         const s = {
           ...session,
-          sig: party.ed_signature || '',
+          sig: assertion.signature || '',
           at: new Date().toLocaleTimeString(),
         };
         setSession(s);

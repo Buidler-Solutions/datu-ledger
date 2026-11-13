@@ -668,6 +668,28 @@ enum WalletCmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Sign a login challenge with a wallet identity (SignetAuth): the
+    /// assertion a relying party verifies to log you in - never a ledger entry
+    AuthAssert {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// Relying party identifier, e.g. app.example.com
+        #[arg(long)]
+        rp_id: String,
+        /// Origin the login request came from, e.g. https://app.example.com
+        #[arg(long)]
+        origin: String,
+        /// Single-use nonce issued by the relying party (32 hex chars)
+        #[arg(long)]
+        nonce: String,
+        /// Challenge expiry: milliseconds since Unix epoch
+        #[arg(long)]
+        expires_at_ms: u64,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 struct Node {
@@ -3751,6 +3773,56 @@ fn cmd_wallet_cosign_doc(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn cmd_wallet_auth_assert(
+    data_dir: &Path,
+    name: &str,
+    passphrase: &str,
+    rp_id: &str,
+    origin: &str,
+    nonce_hex: &str,
+    expires_at_ms: u64,
+    out: &Option<PathBuf>,
+) -> Result<(), String> {
+    let wallet = datu_wallet::Wallet::open(data_dir);
+    let identity = wallet.load(name, passphrase)?;
+    if rp_id.is_empty() || rp_id.len() > 255 {
+        return Err("rp_id must be 1-255 chars".into());
+    }
+    let nonce: [u8; datu_core::auth::NONCE_BYTES] = hex::decode(nonce_hex)
+        .map_err(|e| format!("bad nonce hex: {e}"))?
+        .try_into()
+        .map_err(|_| {
+            format!(
+                "nonce must be {} hex chars",
+                datu_core::auth::NONCE_BYTES * 2
+            )
+        })?;
+    let challenge = datu_core::auth::AuthChallenge {
+        rp_id: rp_id.to_string(),
+        origin: origin.to_string(),
+        nonce,
+        expires_at_ms,
+    };
+    let signature = datu_core::auth::sign_assertion(&identity.ed, &challenge);
+    let json = serde_json::to_string_pretty(&serde_json::json!({
+        "domain": datu_core::auth::AUTH_DOMAIN,
+        "rp_id": challenge.rp_id,
+        "origin": challenge.origin,
+        "nonce": nonce_hex,
+        "expires_at_ms": challenge.expires_at_ms,
+        "pubkey": identity.public.ed_public,
+        "signature": hex::encode(signature),
+    }))
+    .map_err(|e| e.to_string())?;
+    write_output(out, &json)?;
+    println!(
+        "signed login assertion for '{}' as {} (datu-auth-v1; nonce single-use tracking is the relying party's job)",
+        challenge.rp_id, identity.public.name
+    );
+    Ok(())
+}
+
 fn run(cli: Cli) -> Result<(), String> {
     match &cli.command {
         Commands::Init => cmd_init(&cli.data_dir),
@@ -3980,6 +4052,27 @@ fn run(cli: Cli) -> Result<(), String> {
             } => {
                 let pass = get_passphrase(passphrase.clone())?;
                 cmd_wallet_cosign_doc(&cli.data_dir, name, &pass, role, kind.clone(), input, out)
+            }
+            WalletCmd::AuthAssert {
+                name,
+                passphrase,
+                rp_id,
+                origin,
+                nonce,
+                expires_at_ms,
+                out,
+            } => {
+                let pass = get_passphrase(passphrase.clone())?;
+                cmd_wallet_auth_assert(
+                    &cli.data_dir,
+                    name,
+                    &pass,
+                    rp_id,
+                    origin,
+                    nonce,
+                    *expires_at_ms,
+                    out,
+                )
             }
         },
         Commands::Attest { cmd } => match cmd {

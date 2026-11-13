@@ -40,6 +40,9 @@
 //!   POST /v1/wallet/import      {input, backup_passphrase, rename?}
 //!   POST /v1/wallet/verify-entry{entry}
 //!   POST /v1/wallet/sign-entry  {name, passphrase, request}
+//!   POST /v1/wallet/auth-assert {name, passphrase, rp_id, origin, nonce,
+//!                                expires_at_ms} -> SignetAuth Level 1 login
+//!                                assertion (datu-auth-v1 challenge-response)
 
 use crate::serve as ledger_api;
 use datu_core::parties::SignedDocument;
@@ -545,6 +548,56 @@ fn handle_inner(
                 &serde_json::json!({ "ok": true, "id": hex::encode(id), "entry": json }),
             )
         }
+        ("POST", "/v1/wallet/auth-assert") => {
+            // SignetAuth Level 1: sign a relying party's login challenge with
+            // the identity's Ed25519 key. Domain-separated (datu-auth-v1), so
+            // this can never be replayed as a ledger signature. Nonce
+            // single-use tracking and expiry are the relying party's job.
+            let body_json = parse_body(&body)?;
+            let name = str_field(&body_json, "name")?;
+            let passphrase = str_field(&body_json, "passphrase")?;
+            let identity = load_guarded(&wallet, &name, &passphrase)?;
+            let rp_id = str_field(&body_json, "rp_id")?;
+            let origin = str_field(&body_json, "origin")?;
+            let nonce_hex = str_field(&body_json, "nonce")?;
+            let expires_at_ms = body_json
+                .get("expires_at_ms")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing 'expires_at_ms' (milliseconds since Unix epoch)")?;
+            let nonce_bytes = hex::decode(&nonce_hex).map_err(|e| format!("bad nonce hex: {e}"))?;
+            let nonce: [u8; datu_core::auth::NONCE_BYTES] =
+                nonce_bytes.try_into().map_err(|_| {
+                    format!(
+                        "nonce must be {} hex chars",
+                        datu_core::auth::NONCE_BYTES * 2
+                    )
+                })?;
+            if rp_id.is_empty() || rp_id.len() > 255 {
+                return Err("rp_id must be 1-255 chars".into());
+            }
+            let challenge = datu_core::auth::AuthChallenge {
+                rp_id,
+                origin,
+                nonce,
+                expires_at_ms,
+            };
+            let signature = datu_core::auth::sign_assertion(&identity.ed, &challenge);
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({
+                    "ok": true,
+                    "domain": datu_core::auth::AUTH_DOMAIN,
+                    "rp_id": challenge.rp_id,
+                    "origin": challenge.origin,
+                    "nonce": nonce_hex,
+                    "expires_at_ms": challenge.expires_at_ms,
+                    "pubkey": identity.public.ed_public,
+                    "signature": hex::encode(signature),
+                    "note": "verified challenge-response login assertion; nonce single-use tracking is the relying party's job",
+                }),
+            )
+        }
         (m, _) => respond_json(
             stream,
             "404 Not Found",
@@ -800,6 +853,7 @@ a{color:#58a6ff}code{background:#161b22;padding:.1rem .3rem;border-radius:4px}
 <li><code>POST /v1/wallet/seal</code> / <code>open</code> - field encryption</li>
 <li><code>POST /v1/wallet/verify-entry</code> - verify a record from any node</li>
 <li><code>POST /v1/wallet/sign-entry</code> - author a ledger entry</li>
+<li><code>POST /v1/wallet/auth-assert</code> - sign a login challenge (SignetAuth)</li>
 </ul>
 <p>Browser origins: extension pages and explicitly allowed dev origins only.
 Bind 127.0.0.1. If you can read this page from another machine, stop the bridge.</p>
@@ -995,5 +1049,120 @@ mod tests {
         );
         let opened: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(opened["value"], json!("Amina"));
+    }
+
+    /// SignetAuth Level 1 over the bridge HTTP surface: token auth, passphrase
+    /// throttle reuse, and a returned assertion that verifies against the
+    /// identity's published key with the core verifier.
+    #[test]
+    fn auth_assert_over_http() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let serve_dir = data.clone();
+        std::thread::spawn(move || {
+            let _ = serve(&serve_dir, &format!("127.0.0.1:{port}"), Vec::new());
+        });
+        let token_path = data.join(TOKEN_FILE);
+        let started = Instant::now();
+        let token = loop {
+            if let Ok(text) = std::fs::read_to_string(&token_path) {
+                let token = text.trim().to_string();
+                if token.len() >= 32 {
+                    break token;
+                }
+            }
+            if started.elapsed() > Duration::from_secs(10) {
+                panic!("bridge did not come up");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/create",
+            Some(&token),
+            &json!({"name": "alice", "passphrase": "alice pass"}).to_string(),
+        );
+        assert!(status.contains("200"), "{status} {body}");
+        let pubkey_hex = serde_json::from_str::<serde_json::Value>(&body).unwrap()["identity"]
+            ["ed_public"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // No token, no assertions.
+        let (status, _) = http(
+            port,
+            "POST",
+            "/v1/wallet/auth-assert",
+            None,
+            &json!({"name": "alice", "passphrase": "alice pass", "rp_id": "app.example.com",
+                    "origin": "https://app.example.com", "nonce": "42".repeat(16),
+                    "expires_at_ms": 4_102_444_800_000u64})
+            .to_string(),
+        );
+        assert!(status.contains("401"), "unpaired refused: {status}");
+
+        // Valid challenge: signed assertion comes back and verifies offline.
+        let nonce = "ab".repeat(datu_core::auth::NONCE_BYTES);
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/auth-assert",
+            Some(&token),
+            &json!({"name": "alice", "passphrase": "alice pass", "rp_id": "app.example.com",
+                    "origin": "https://app.example.com", "nonce": nonce,
+                    "expires_at_ms": 4_102_444_800_000u64})
+            .to_string(),
+        );
+        assert!(status.contains("200"), "{status} {body}");
+        let out: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(out["domain"], "datu-auth-v1");
+        assert_eq!(out["rp_id"], "app.example.com");
+        assert_eq!(out["pubkey"], pubkey_hex.as_str());
+        let challenge = datu_core::auth::AuthChallenge {
+            rp_id: "app.example.com".into(),
+            origin: "https://app.example.com".into(),
+            nonce: hex::decode(&nonce).unwrap().try_into().unwrap(),
+            expires_at_ms: 4_102_444_800_000,
+        };
+        let sig: [u8; 64] = hex::decode(out["signature"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let verifying = datu_core::entry::parse_key(&pubkey_hex).unwrap();
+        datu_core::auth::verify_assertion(&verifying, &challenge, &sig).unwrap();
+
+        // Same challenge re-signed must differ per key, and a tampered
+        // assertion must fail verification: covered by core tests; here we
+        // assert the route refuses malformed nonces.
+        let (status, _) = http(
+            port,
+            "POST",
+            "/v1/wallet/auth-assert",
+            Some(&token),
+            &json!({"name": "alice", "passphrase": "alice pass", "rp_id": "app.example.com",
+                    "origin": "https://app.example.com", "nonce": "zz",
+                    "expires_at_ms": 4_102_444_800_000u64})
+            .to_string(),
+        );
+        assert!(status.contains("400"), "bad nonce hex refused: {status}");
+
+        // Wrong passphrase is refused (throttle path shared with the rest).
+        let (status, _) = http(
+            port,
+            "POST",
+            "/v1/wallet/auth-assert",
+            Some(&token),
+            &json!({"name": "alice", "passphrase": "wrong pass", "rp_id": "app.example.com",
+                    "origin": "https://app.example.com", "nonce": nonce,
+                    "expires_at_ms": 4_102_444_800_000u64})
+            .to_string(),
+        );
+        assert!(status.contains("400"), "wrong passphrase refused: {status}");
     }
 }
