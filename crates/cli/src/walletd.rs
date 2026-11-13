@@ -60,6 +60,68 @@ pub const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PASSPHRASE_FAILURES: u32 = 5;
 const LOCKOUT_MS: u64 = 15_000;
 const TOKEN_FILE: &str = "wallet/bridge.token";
+/// SignetAuth session grants: minted after a passphrase-authenticated
+/// login, valid for auth-assert only, sliding window.
+pub const GRANT_TTL_MS: u64 = 15 * 60_000;
+
+/// In-memory SignetAuth session grants: random id -> (identity name,
+/// expiry, the unlocked identity). They die with the process, never touch
+/// disk, and unlock only the auth-assert route - never sealing, signing or
+/// export. The passphrase is re-sent only when no live grant exists.
+#[derive(Default)]
+pub struct Grants {
+    map: std::sync::Mutex<std::collections::HashMap<String, GrantEntry>>,
+}
+
+struct GrantEntry {
+    name: String,
+    expires_at_ms: u64,
+    identity: std::sync::Arc<LoadedIdentity>,
+}
+
+impl Grants {
+    fn mint(
+        &self,
+        name: &str,
+        identity: LoadedIdentity,
+    ) -> Result<(String, u64, std::sync::Arc<LoadedIdentity>), String> {
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let id = hex::encode(bytes);
+        let exp = now_ms() + GRANT_TTL_MS;
+        let mut map = self.map.lock().map_err(|_| "lock poisoned".to_string())?;
+        let now = now_ms();
+        map.retain(|_, e| e.expires_at_ms > now);
+        let entry = std::sync::Arc::new(identity);
+        map.insert(
+            id.clone(),
+            GrantEntry {
+                name: name.to_string(),
+                expires_at_ms: exp,
+                identity: std::sync::Arc::clone(&entry),
+            },
+        );
+        Ok((id, exp, entry))
+    }
+
+    /// Sliding-window check: a valid grant refreshes its expiry and hands
+    /// back the unlocked identity it was minted from.
+    fn use_grant(&self, name: &str, grant: &str) -> Result<std::sync::Arc<LoadedIdentity>, String> {
+        let mut map = self.map.lock().map_err(|_| "lock poisoned".to_string())?;
+        let now = now_ms();
+        match map.get_mut(grant) {
+            Some(entry) if entry.name == name && entry.expires_at_ms > now => {
+                entry.expires_at_ms = now + GRANT_TTL_MS;
+                Ok(std::sync::Arc::clone(&entry.identity))
+            }
+            _ => Err(
+                "grant unknown, expired or for another identity - log in with the passphrase again"
+                    .into(),
+            ),
+        }
+    }
+}
 
 pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<(), String> {
     let wallet = Wallet::open(data_dir);
@@ -100,6 +162,7 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
     let dir = data_dir.to_path_buf();
     let token = Arc::new(token);
     let origins = Arc::new(origins);
+    let grants = Arc::new(Grants::default());
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(s) => s,
@@ -108,8 +171,9 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
         let dir = dir.clone();
         let token = Arc::clone(&token);
         let origins = Arc::clone(&origins);
+        let grants = Arc::clone(&grants);
         std::thread::spawn(move || {
-            let _ = handle(stream, &dir, &token, &origins);
+            let _ = handle(stream, &dir, &token, &origins, &grants);
         });
     }
     Ok(())
@@ -120,9 +184,10 @@ fn handle(
     data_dir: &Path,
     token: &str,
     origins: &[String],
+    grants: &Grants,
 ) -> Result<(), String> {
     let mut stream = stream;
-    if let Err(e) = handle_inner(&mut stream, data_dir, token, origins) {
+    if let Err(e) = handle_inner(&mut stream, data_dir, token, origins, grants) {
         if let Some(rest) = e.strip_prefix("TOO_MANY_ATTEMPTS:") {
             let _ = respond_json(
                 &mut stream,
@@ -145,6 +210,7 @@ fn handle_inner(
     data_dir: &Path,
     token: &str,
     origins: &[String],
+    grants: &Grants,
 ) -> Result<(), String> {
     let (method, path, body, headers) = match read_request(stream) {
         Some(r) => r,
@@ -565,8 +631,27 @@ fn handle_inner(
             // assertion for the real origin.
             let body_json = parse_body(&body)?;
             let name = str_field(&body_json, "name")?;
-            let passphrase = str_field(&body_json, "passphrase")?;
-            let identity = load_guarded(&wallet, &name, &passphrase)?;
+            let grant = body_json
+                .get("grant")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // Two unlock paths: a session grant (minted by an earlier
+            // passphrase login, unlocks ONLY this route, sliding 15 min) or
+            // the passphrase itself. Silent re-logins use the grant; the
+            // panel falls back to the passphrase when it has expired.
+            let (identity, minted_grant): (std::sync::Arc<LoadedIdentity>, _) = if !grant.is_empty()
+            {
+                (grants.use_grant(&name, &grant)?, None)
+            } else {
+                let passphrase = str_field(&body_json, "passphrase")?;
+                let identity = load_guarded(&wallet, &name, &passphrase)?;
+                let (id, exp, identity) = grants.mint(&name, identity)?;
+                (
+                    identity,
+                    Some(serde_json::json!({ "grant": id, "grant_expires_at_ms": exp })),
+                )
+            };
             let rp_id = str_field(&body_json, "rp_id")?;
             let origin = str_field(&body_json, "origin")?;
             let nonce_hex = str_field(&body_json, "nonce")?;
@@ -641,21 +726,24 @@ fn handle_inner(
                 expires_at_ms,
             };
             let signature = datu_core::auth::sign_assertion(&identity.ed, &challenge);
-            respond_json(
-                stream,
-                "200 OK",
-                &serde_json::json!({
-                    "ok": true,
-                    "domain": datu_core::auth::AUTH_DOMAIN,
-                    "rp_id": challenge.rp_id,
-                    "origin": challenge.origin,
-                    "nonce": nonce_hex,
-                    "expires_at_ms": challenge.expires_at_ms,
-                    "pubkey": identity.public.ed_public,
-                    "signature": hex::encode(signature),
-                    "note": "verified challenge-response login assertion; nonce single-use tracking is the relying party's job",
-                }),
-            )
+            let mut response = serde_json::json!({
+                "ok": true,
+                "domain": datu_core::auth::AUTH_DOMAIN,
+                "rp_id": challenge.rp_id,
+                "origin": challenge.origin,
+                "nonce": nonce_hex,
+                "expires_at_ms": challenge.expires_at_ms,
+                "pubkey": identity.public.ed_public,
+                "signature": hex::encode(signature),
+                "note": "verified challenge-response login assertion; nonce single-use tracking is the relying party's job",
+            });
+            if let Some(grant) = minted_grant {
+                // Session grant for silent re-logins: auth-assert only,
+                // sliding 15 min, in-memory, dies with this process.
+                response["grant"] = grant["grant"].clone();
+                response["grant_expires_at_ms"] = grant["grant_expires_at_ms"].clone();
+            }
+            respond_json(stream, "200 OK", &response)
         }
         (m, _) => respond_json(
             stream,
@@ -1310,6 +1398,63 @@ mod tests {
         assert!(
             status.contains("200"),
             "registered origin still signs without approve: {status}"
+        );
+
+        // Session grants: a passphrase login mints one; it then signs without
+        // the passphrase (sliding window), rejects other identities, and a
+        // bogus grant is refused.
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/auth-assert",
+            Some(&token),
+            &json!({"name": "alice", "passphrase": "alice pass", "rp_id": "app.example.com",
+                    "origin": "https://app.example.com", "nonce": "aa".repeat(16),
+                    "expires_at_ms": 4_102_444_800_000u64})
+            .to_string(),
+        );
+        assert!(status.contains("200"), "{status} {body}");
+        let granted: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let grant = granted["grant"].as_str().unwrap().to_string();
+        assert!(grant.len() >= 32, "grant minted: {granted}");
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/auth-assert",
+            Some(&token),
+            &json!({"name": "alice", "grant": grant, "rp_id": "app.example.com",
+                    "origin": "https://app.example.com", "nonce": "bb".repeat(16),
+                    "expires_at_ms": 4_102_444_800_000u64})
+            .to_string(),
+        );
+        assert!(
+            status.contains("200"),
+            "grant signs without passphrase: {status} {body}"
+        );
+        let (status, _) = http(
+            port,
+            "POST",
+            "/v1/wallet/auth-assert",
+            Some(&token),
+            &json!({"name": "alice", "grant": "0".repeat(64), "rp_id": "app.example.com",
+                    "origin": "https://app.example.com", "nonce": "cc".repeat(16),
+                    "expires_at_ms": 4_102_444_800_000u64})
+            .to_string(),
+        );
+        assert!(status.contains("400"), "bogus grant refused: {status}");
+        let (status, _) = http(
+            port,
+            "POST",
+            "/v1/wallet/auth-assert",
+            Some(&token),
+            &json!({"name": "bob", "grant": grant, "rp_id": "app.example.com",
+                    "origin": "https://app.example.com", "nonce": "dd".repeat(16),
+                    "expires_at_ms": 4_102_444_800_000u64})
+            .to_string(),
+        );
+        assert!(
+            status.contains("400"),
+            "grant bound to its identity: {status}"
         );
 
         // Wrong passphrase is refused (throttle path shared with the rest).

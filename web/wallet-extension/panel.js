@@ -775,6 +775,10 @@ async function confirmLogin() {
       approve: true,
     });
     if (data.domain !== 'datu-auth-v1') throw new Error('unexpected assertion domain from the bridge');
+    if (data.grant) {
+      grantCache[bridgeUrl()] = grantCache[bridgeUrl()] || {};
+      grantCache[bridgeUrl()][identity.name] = data.grant;
+    }
     $('loginResult').value = JSON.stringify(data, null, 2);
     $('loginCopy').disabled = false;
     $('loginConfirm').style.display = 'none';
@@ -903,6 +907,7 @@ function armIdleTimer() {
 // else waits for an explicit confirm here.
 const REQUESTS_KEY = 'datuRpcQueue';
 const passCache = {}; // identity name -> passphrase, panel memory only
+const grantCache = {}; // bridge url -> { identity name -> SignetAuth session grant }
 let requestsFingerprint = '';
 
 function notifyState() {
@@ -925,6 +930,7 @@ async function processRequest(req, passphrase) {
   const body = { ...(payload.body || {}) };
   const url = (payload.bridgeUrl || '').replace(/\/+$/, '');
   const token = tokens[url];
+  const isLogin = payload.path === '/v1/wallet/auth-assert';
   try {
     if (!token) throw new Error('this Signet is not paired - paste its bridge token in Settings');
     if (passphrase) {
@@ -934,12 +940,38 @@ async function processRequest(req, passphrase) {
     }
     // A confirmed login request carries the approval gesture; silent auto
     // re-logins do not (the bridge only needs it to register a new site).
-    if (payload.path === '/v1/wallet/auth-assert' && body.auto !== true) {
+    if (isLogin && body.auto !== true) {
       body.approve = true;
     }
-    const res = await bridgeCall(url, payload.path || '', body, token);
-    chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: true, result: { status: 200, body: res } });
-    return true;
+    // Silent re-logins prefer a session grant: no passphrase round-trip.
+    // If the grant expired, retry once with the cached passphrase.
+    if (isLogin && !passphrase && (grantCache[url] || {})[body.name]) {
+      body.grant = grantCache[url][body.name];
+    }
+    try {
+      const res = await bridgeCall(url, payload.path || '', body, token);
+      if (isLogin && res.grant) {
+        grantCache[url] = grantCache[url] || {};
+        grantCache[url][body.name] = res.grant;
+      }
+      chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: true, result: { status: 200, body: res } });
+      return true;
+    } catch (e) {
+      if (isLogin && body.grant && /grant/.test(e.message) && passCache[body.name]) {
+        delete (grantCache[url] || {})[body.name];
+        const retry = { ...body };
+        delete retry.grant;
+        retry.passphrase = passCache[body.name];
+        const res = await bridgeCall(url, payload.path || '', retry, token);
+        if (res.grant) {
+          grantCache[url] = grantCache[url] || {};
+          grantCache[url][body.name] = res.grant;
+        }
+        chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: true, result: { status: 200, body: res } });
+        return true;
+      }
+      throw e;
+    }
   } catch (e) {
     chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: false, error: e.message });
     throw e;
