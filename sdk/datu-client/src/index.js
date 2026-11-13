@@ -1,5 +1,5 @@
 /**
- * @datu/client - integrate a dApp with the DATU accountability DAG.
+ * @greenarmor/datu-client - integrate a dApp with the DATU accountability DAG.
  *
  * One entry point: connect({ bridgeUrl, nodeUrl }) returns a client that
  * speaks to the Signet extension (keys live in the Signet service, never here)

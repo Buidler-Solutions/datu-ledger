@@ -1,4 +1,4 @@
-# @datu/client
+# @greenarmor/datu-client
 
 Integrate a dApp with the DATU accountability DAG: SignetAuth login, party
 signatures, sealed and deferred fields, node reads, and local coverage
@@ -8,16 +8,18 @@ server-side verification.
 Keys never enter your page. The DATU Signet extension holds the pairing token
 and the Signet service holds the keys; this SDK only speaks to them.
 
-## Install (path or future registry)
+## Install
 
 ```sh
-npm install /path/to/datu-ledger/sdk/datu-client
+npm install @greenarmor/datu-client
 ```
+
+From the repo, before a release: `npm install /path/to/datu-ledger/sdk/datu-client`.
 
 ## Connect
 
 ```js
-import { connect } from '@datu/client';
+import { connect } from '@greenarmor/datu-client';
 
 const datu = await connect({
   bridgeUrl: 'http://127.0.0.1:7588',
@@ -110,7 +112,7 @@ verifier, and each witness is reported as not checked rather than pretended.
 ## Errors
 
 ```js
-import { DatuError, ErrorCode } from '@datu/client';
+import { DatuError, ErrorCode } from '@greenarmor/datu-client';
 
 try {
   await datu.signIn({ name: 'amina' });
@@ -128,8 +130,8 @@ Codes: `NOT_CONNECTED`, `NOT_PAIRED`, `NEEDS_APPROVAL`, `NEEDS_PASSPHRASE`, `ORI
 ## Tests without a wallet
 
 ```js
-import { connect } from '@datu/client';
-import { mockTransport, mockFetch } from '@datu/client/mock';
+import { connect } from '@greenarmor/datu-client';
+import { mockTransport, mockFetch } from '@greenarmor/datu-client/mock';
 
 const datu = await connect({
   transport: mockTransport({ keys: { amina: keypair }, identities: [identity] }),
