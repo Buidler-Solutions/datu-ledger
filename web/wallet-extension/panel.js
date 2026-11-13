@@ -914,6 +914,7 @@ async function importIdentity() {
 // biometric gesture, unwraps the passphrase into panel memory (passCache)
 // and the session grant / signing flows work as if it was typed.
 const PASSKEY_PREFIX = 'datu.passkey.';
+const SESSION_PASS = 'datu.passkeySessionPass';
 
 // The picker can be empty right after a browser restart even though the
 // Signet is paired, so passkey actions refresh the list before selecting.
@@ -922,6 +923,12 @@ async function pickIdentityForPasskey() {
   return selected();
 }
 
+// Two modes, chosen by what the device's authenticator supports:
+//   prf      - the passkey derives a key (HKDF over the PRF output) that wraps
+//              the passphrase; the wrapped blob is all that is stored
+//   presence - no PRF (common for Touch ID / iCloud passkeys): the passkey is
+//              a user-presence gate and the passphrase lives in session
+//              storage only, expiring with the browser session
 async function passkeyEnable() {
   try {
     const identity = await pickIdentityForPasskey();
@@ -929,20 +936,36 @@ async function passkeyEnable() {
     // here, the Sign tab field, or a session that already cached it.
     const passphrase = $('passkeyPass').value || $('pass').value || passCache[identity.name];
     if (!passphrase) throw new Error("type this identity's vault passphrase in the field above");
-    passCache[identity.name] = passphrase;
-    notifyState();
     if (!window.datuPasskey) throw new Error('passkey module not loaded');
     status('creating the device passkey (follow the system prompt)…');
-    const { credentialId } = await window.datuPasskey.createPasskey(identity.name);
-    const salt = window.datuPasskey.prfSalt();
-    status('confirm the passkey once to activate it…');
-    const secret = await window.datuPasskey.unlockSecret(credentialId, salt);
-    const blob = await window.datuPasskey.wrapPassphrase(secret, passphrase);
-    await localSet({
-      [PASSKEY_PREFIX + identity.name]: { credentialId, salt: btoa(String.fromCharCode(...salt)), ...blob },
-    });
+    const { credentialId, prfEnabled } = await window.datuPasskey.createPasskey(identity.name);
+    let record;
+    if (prfEnabled) {
+      const salt = window.datuPasskey.prfSalt();
+      status('confirm the passkey once to activate it…');
+      const secret = await window.datuPasskey.unlockSecret(credentialId, salt);
+      if (!secret) throw new Error('the device reported PRF support but returned no secret');
+      const blob = await window.datuPasskey.wrapPassphrase(secret, passphrase);
+      record = { mode: 'prf', credentialId, salt: btoa(String.fromCharCode(...salt)), ...blob };
+    } else {
+      // Presence mode: prove the gesture works, then keep the passphrase in
+      // session storage (memory-backed, dies with the browser session).
+      status('this device has no PRF support - using passkey-gated session mode…');
+      await window.datuPasskey.presenceAssertion(credentialId);
+      const session = await sessionGet([SESSION_PASS]);
+      const map = session[SESSION_PASS] || {};
+      map[identity.name] = passphrase;
+      await sessionSet({ [SESSION_PASS]: map });
+      record = { mode: 'presence', credentialId };
+    }
+    await localSet({ [PASSKEY_PREFIX + identity.name]: record });
+    passCache[identity.name] = passphrase;
+    notifyState();
     $('passkeyPass').value = '';
-    $('passkeyHint').textContent = `passkey active for '${identity.name}' - Unlock with passkey replaces typing`;
+    $('passkeyHint').textContent =
+      record.mode === 'prf'
+        ? `passkey active for '${identity.name}' (PRF-wrapped) - Unlock with passkey replaces typing`
+        : `passkey active for '${identity.name}' (session mode: the passphrase rests in this browser session only)`;
     status(`passkey protection enabled for ${identity.name}`, 'ok');
   } catch (e) {
     status(`passkey setup failed: ${e.message}`, 'err');
@@ -957,9 +980,20 @@ async function passkeyUnlock() {
     if (!record) throw new Error(`no passkey registered for '${identity.name}' - protect it first`);
     if (!window.datuPasskey) throw new Error('passkey module not loaded');
     status('authenticate with the device passkey…');
-    const salt = Uint8Array.from(atob(record.salt), (c) => c.charCodeAt(0));
-    const secret = await window.datuPasskey.unlockSecret(record.credentialId, salt);
-    const passphrase = await window.datuPasskey.unwrapPassphrase(secret, record.iv, record.ct);
+    let passphrase;
+    if (record.mode === 'presence') {
+      await window.datuPasskey.presenceAssertion(record.credentialId);
+      const session = await sessionGet([SESSION_PASS]);
+      passphrase = (session[SESSION_PASS] || {})[identity.name];
+      if (!passphrase) {
+        throw new Error('the session cache expired - type the passphrase once and re-protect');
+      }
+    } else {
+      const salt = Uint8Array.from(atob(record.salt), (c) => c.charCodeAt(0));
+      const secret = await window.datuPasskey.unlockSecret(record.credentialId, salt);
+      if (!secret) throw new Error('this passkey stopped offering PRF - re-protect it');
+      passphrase = await window.datuPasskey.unwrapPassphrase(secret, record.iv, record.ct);
+    }
     passCache[identity.name] = passphrase;
     notifyState();
     status(`unlocked ${identity.name} with the device passkey (session only)`, 'ok');
@@ -972,6 +1006,10 @@ async function passkeyForget() {
   try {
     const identity = await pickIdentityForPasskey();
     await chrome.storage.local.remove(PASSKEY_PREFIX + identity.name);
+    const session = await sessionGet([SESSION_PASS]);
+    const map = session[SESSION_PASS] || {};
+    delete map[identity.name];
+    await sessionSet({ [SESSION_PASS]: map });
     $('passkeyHint').textContent = 'passkey forgotten - the passphrase still works';
     status(`passkey protection removed for ${identity.name}`, 'muted');
   } catch (e) {

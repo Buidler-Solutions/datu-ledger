@@ -6,7 +6,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import '../passkey.js';
 
-const { wrapPassphrase, unwrapPassphrase, prfSalt } = globalThis.datuPasskey;
+const { wrapPassphrase, unwrapPassphrase, prfSalt, presenceAssertion, unlockSecret } =
+  globalThis.datuPasskey;
 
 const SECRET = crypto.getRandomValues(new Uint8Array(32));
 const OTHER = crypto.getRandomValues(new Uint8Array(32));
@@ -28,6 +29,20 @@ test('tampered ciphertext fails closed', async () => {
   bytes[0] ^= 1;
   const tampered = btoa(String.fromCharCode(...bytes));
   await assert.rejects(unwrapPassphrase(SECRET, blob.iv, tampered));
+});
+
+test('a dismissed or secret-less ceremony yields no secret, never a fake one', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { credentials: { get: async () => undefined } },
+  });
+  try {
+    await assert.rejects(presenceAssertion('AAAA'), /dismissed/);
+    assert.equal(await unlockSecret('AAAA', prfSalt()), null);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor);
+  }
 });
 
 test('salts are random and 32 bytes', async () => {

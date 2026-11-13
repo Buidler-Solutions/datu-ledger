@@ -54,7 +54,9 @@
   const prfSalt = () => randomBytes(32); // stored alongside the wrapped blob
 
   /// WebAuthn glue: create a resident passkey with the PRF extension
-  /// enabled. Must be called from the panel page (user gesture).
+  /// requested. Not every authenticator supports PRF (Touch ID and iCloud
+  /// Keychain passkeys often do not), so the result says whether it does.
+  /// Must be called from the panel page (user gesture).
   async function createPasskey(username) {
     const credential = await root.navigator.credentials.create({
       publicKey: {
@@ -70,11 +72,14 @@
         extensions: { prf: {} },
       },
     });
-    return { credentialId: b64(new Uint8Array(credential.rawId)) };
+    const prfEnabled = Boolean(credential?.clientExtensionResults?.prf?.enabled);
+    return { credentialId: b64(new Uint8Array(credential.rawId)), prfEnabled };
   }
 
-  /// The user-presence + user-verification gesture: assert the passkey and
-  /// evaluate the PRF extension to obtain the wrapping secret.
+  /// The user-presence + user-verification gesture: assert the passkey and,
+  /// when the authenticator supports PRF, evaluate it to obtain the wrapping
+  /// secret. Returns null when PRF is unavailable (callers then fall back to
+  /// a passkey-gated session cache).
   async function unlockSecret(credentialIdB64, salt) {
     const assertion = await root.navigator.credentials.get({
       publicKey: {
@@ -85,11 +90,29 @@
       extensions: { prf: { eval: { first: salt } } },
     });
     const results = assertion?.clientExtensionResults?.prf?.results;
-    if (!results?.first) {
-      throw new Error('this passkey does not support the PRF extension - recreate it from Settings');
-    }
-    return new Uint8Array(results.first);
+    return results?.first ? new Uint8Array(results.first) : null;
   }
 
-  root.datuPasskey = { wrapPassphrase, unwrapPassphrase, prfSalt, createPasskey, unlockSecret };
+  /// Plain presence assertion (no PRF): proves the human passed the device's
+  /// user verification. Used by the fallback mode.
+  async function presenceAssertion(credentialIdB64) {
+    const assertion = await root.navigator.credentials.get({
+      publicKey: {
+        challenge: randomBytes(32),
+        allowCredentials: [{ type: 'public-key', id: unb64(credentialIdB64) }],
+        userVerification: 'required',
+      },
+    });
+    if (!assertion) throw new Error('the passkey prompt was dismissed');
+    return true;
+  }
+
+  root.datuPasskey = {
+    wrapPassphrase,
+    unwrapPassphrase,
+    prfSalt,
+    createPasskey,
+    unlockSecret,
+    presenceAssertion,
+  };
 })(globalThis);
