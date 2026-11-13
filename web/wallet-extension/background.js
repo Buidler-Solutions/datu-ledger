@@ -110,6 +110,39 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       });
       return false;
     }
+    // Read-only identity listing: the extension already holds the bridge
+    // token, so a dApp never has to paste one. Public keys only, no prompt.
+    if (msg.action === 'identities') {
+      (async () => {
+        try {
+          const url = String((msg.payload || {}).bridgeUrl || '')
+            .replace(/\/+$/, '');
+          const s = await chrome.storage.session.get(['tokens']);
+          const token = (s.tokens || {})[url];
+          if (!token) {
+            // Fall back to any paired Signet when the dApp has no preference.
+            const first = Object.entries(s.tokens || {})[0] || [];
+            if (!first[0]) throw new Error('no Signet paired - open the panel and pair first');
+            const res = await fetch(`${first[0].replace(/\/+$/, '')}/v1/wallet/identities`, {
+              headers: { Authorization: `Bearer ${first[1]}` },
+            });
+            const json = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+            if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+            sendResponse({ ok: true, result: { identities: json.identities || [], bridgeUrl: first[0] } });
+            return;
+          }
+          const res = await fetch(`${url}/v1/wallet/identities`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          const json = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+          if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+          sendResponse({ ok: true, result: { identities: json.identities || [], bridgeUrl: url } });
+        } catch (e) {
+          sendResponse({ ok: false, error: e.message });
+        }
+      })();
+      return true;
+    }
     (async () => {
       const queue = await readQueue();
       queue.push({

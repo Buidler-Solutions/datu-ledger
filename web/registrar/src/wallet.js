@@ -85,3 +85,11 @@ export function walletPing() {
 export function walletSign({ bridgeUrl, path, body, summary }) {
   return send('sign', { bridgeUrl, path, body, summary }, 300000);
 }
+
+// Read-only identity listing: the extension already holds the bridge token,
+// so the dApp never needs one pasted into it. Resolves to
+// { identities, bridgeUrl }.
+export async function walletIdentities(bridgeUrl) {
+  const result = await send('identities', { bridgeUrl }, 15000);
+  return result.body || result;
+}

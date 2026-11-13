@@ -67,3 +67,6 @@
     });
   }
 })();
+
+// Read-only identity listing from the extension: it holds the bridge token,
+// so a dApp never asks the human to paste one. Public keys only, no prompt.

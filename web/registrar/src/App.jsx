@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { listIdentities, nodeGet, nodePost, getToken, setToken } from './api.js';
-import { onWalletState, walletPing, walletSign } from './wallet.js';
+import { onWalletState, walletIdentities, walletPing, walletSign } from './wallet.js';
 import { newChallenge, verifyAssertion } from './signetauth.js';
 
 const NS = 'gov.titles.application';
@@ -289,16 +289,29 @@ export default function App() {
     } catch (e) {
       say(`cannot reach the node at ${nodeUrl}: ${e.message}`, 'err');
     }
-    if (!getToken()) {
-      say('bridge: paste the pairing token above to list Signet identities', 'muted');
-      return;
-    }
+    // Identity listing goes through the extension, which already holds the
+    // bridge token - the dApp never needs one pasted into it. A manually
+    // pasted token (Settings) remains as a fallback for debugging.
     try {
-      const ids = await listIdentities(bridgeUrl);
+      const listed = await walletIdentities(bridgeUrl);
+      const ids = listed.identities || [];
       setIdentities(ids);
-      say(`bridge: ${ids.length} identities on ${bridgeUrl}`, 'ok');
-    } catch (e) {
-      say(`cannot reach the bridge at ${bridgeUrl}: ${e.message}`, 'err');
+      say(`bridge: ${ids.length} identities via the Signet extension`, 'ok');
+    } catch (viaExtension) {
+      if (!getToken()) {
+        say(
+          `identities need the extension (${viaExtension.message}) or a pasted token in Settings`,
+          'muted'
+        );
+        return;
+      }
+      try {
+        const ids = await listIdentities(bridgeUrl);
+        setIdentities(ids);
+        say(`bridge: ${ids.length} identities on ${bridgeUrl} (manual token)`, 'ok');
+      } catch (e) {
+        say(`cannot reach the bridge at ${bridgeUrl}: ${e.message}`, 'err');
+      }
     }
   }, [bridgeUrl, nodeUrl]);
 
