@@ -300,6 +300,28 @@ document.querySelectorAll('nav button[data-tab]').forEach((button) => {
 });
 
 // ---------- node ----------
+// The typed node URL wins; when nothing answers there, probe the usual
+// local ports and adopt the first live ledger node, so a stale default
+// (7475, 7474, ...) never reads as "node down" while an explorer is up.
+const NODE_CANDIDATES = ['7574', '7474', '7480', '7490', '7575'];
+async function adoptLiveNode() {
+  const configured = nodeUrl();
+  const ports = NODE_CANDIDATES.filter((port) => !configured.includes(`:${port}`));
+  for (const port of ports) {
+    const url = `http://127.0.0.1:${port}`;
+    try {
+      const res = await fetch(`${url}/v1/status`, { signal: AbortSignal.timeout(1500) });
+      if (!res.ok) continue;
+      const st = await res.json();
+      if (typeof st.entries !== 'number') continue; // not a datu node
+      $('node').value = url;
+      await localSet({ node: url });
+      return st;
+    } catch {}
+  }
+  return null;
+}
+
 async function checkNode(quiet = false) {
   try {
     const st = await nodeGet('/v1/status');
@@ -308,6 +330,19 @@ async function checkNode(quiet = false) {
     $('modeDot').className = `dot ${mode === 'open-observer' ? 'green' : 'blue'}`;
     if (!quiet) status(`node ok - ${mode}, ${st.entries} entries, ${st.checkpoints} witnesses`, 'ok');
   } catch (e) {
+    const found = await adoptLiveNode();
+    if (found) {
+      const mode = found.policy?.mode ?? '?';
+      $('modeText').textContent = `${mode} · ${found.entries}`;
+      $('modeDot').className = `dot ${mode === 'open-observer' ? 'green' : 'blue'}`;
+      if (!quiet) {
+        status(
+          `node moved to ${nodeUrl()} - ${mode}, ${found.entries} entries (the previous URL was down: ${e.message})`,
+          'ok',
+        );
+      }
+      return;
+    }
     $('modeText').textContent = 'node down';
     $('modeDot').className = 'dot red';
     if (!quiet) status(`cannot reach node: ${e.message}`, 'err');
