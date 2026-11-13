@@ -41,8 +41,10 @@
 //!   POST /v1/wallet/verify-entry{entry}
 //!   POST /v1/wallet/sign-entry  {name, passphrase, request}
 //!   POST /v1/wallet/auth-assert {name, passphrase, rp_id, origin, nonce,
-//!                                expires_at_ms} -> SignetAuth Level 1 login
-//!                                assertion (datu-auth-v1 challenge-response)
+//!                                expires_at_ms, approve?} -> SignetAuth login
+//!                                assertion (datu-auth-v1 challenge-response;
+//!                                first use of an rp needs approve: true, then
+//!                                the origin is pinned per identity)
 
 use crate::serve as ledger_api;
 use datu_core::parties::SignedDocument;
@@ -549,10 +551,18 @@ fn handle_inner(
             )
         }
         ("POST", "/v1/wallet/auth-assert") => {
-            // SignetAuth Level 1: sign a relying party's login challenge with
-            // the identity's Ed25519 key. Domain-separated (datu-auth-v1), so
-            // this can never be replayed as a ledger signature. Nonce
-            // single-use tracking and expiry are the relying party's job.
+            // SignetAuth: sign a relying party's login challenge with the
+            // identity's Ed25519 key. Domain-separated (datu-auth-v1), so this
+            // can never be replayed as a ledger signature. Nonce single-use
+            // tracking and expiry are the relying party's job.
+            //
+            // Level 2 origin binding: each identity keeps a relying-party
+            // registry (wallet/rps/<name>.json). First use of an rp_id needs
+            // an explicit approval gesture ("approve": true, the panel's
+            // Approve button); after registration the bridge refuses to sign
+            // for any other origin under that rp_id, which kills phishing
+            // sites even when the human is fooled: they can never get a valid
+            // assertion for the real origin.
             let body_json = parse_body(&body)?;
             let name = str_field(&body_json, "name")?;
             let passphrase = str_field(&body_json, "passphrase")?;
@@ -560,6 +570,10 @@ fn handle_inner(
             let rp_id = str_field(&body_json, "rp_id")?;
             let origin = str_field(&body_json, "origin")?;
             let nonce_hex = str_field(&body_json, "nonce")?;
+            let approve = body_json
+                .get("approve")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let expires_at_ms = body_json
                 .get("expires_at_ms")
                 .and_then(|v| v.as_u64())
@@ -574,6 +588,51 @@ fn handle_inner(
                 })?;
             if rp_id.is_empty() || rp_id.len() > 255 {
                 return Err("rp_id must be 1-255 chars".into());
+            }
+            if origin.is_empty() || origin.len() > 255 {
+                return Err("origin must be 1-255 chars".into());
+            }
+            let mut rps = load_rps(data_dir, &name)?;
+            match rps.get(&rp_id) {
+                Some(registered) if registered.origin != origin => {
+                    return respond_json(
+                        stream,
+                        "403 Forbidden",
+                        &serde_json::json!({
+                            "error": format!(
+                                "origin mismatch: '{}' is registered for rp '{}' with origin {}; this request claims {} - refusing to sign (phishing guard)",
+                                name, rp_id, registered.origin, origin
+                            ),
+                            "needs_approval": false,
+                        }),
+                    );
+                }
+                None => {
+                    if !approve {
+                        return respond_json(
+                            stream,
+                            "403 Forbidden",
+                            &serde_json::json!({
+                                "error": format!(
+                                    "first login to '{}': approve it once in the Signet panel (this registers origin {} for this identity)",
+                                    rp_id, origin
+                                ),
+                                "needs_approval": true,
+                                "rp_id": rp_id,
+                                "origin": origin,
+                            }),
+                        );
+                    }
+                    rps.insert(
+                        rp_id.clone(),
+                        RpRegistration {
+                            origin: origin.clone(),
+                            added_at_ms: now_ms(),
+                        },
+                    );
+                    save_rps(data_dir, &name, &rps)?;
+                }
+                _ => {}
             }
             let challenge = datu_core::auth::AuthChallenge {
                 rp_id,
@@ -607,6 +666,55 @@ fn handle_inner(
 }
 
 // ---- pairing / access control ----
+
+/// One registered relying party for one identity: the origin approved on
+/// first use. Later requests under the same rp_id must carry exactly this
+/// origin or the bridge refuses to sign.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct RpRegistration {
+    origin: String,
+    added_at_ms: u64,
+}
+
+fn rp_registry_path(data_dir: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+    {
+        return Err("identity name must be 1-64 chars of [A-Za-z0-9_.-]".into());
+    }
+    Ok(data_dir
+        .join("wallet")
+        .join("rps")
+        .join(format!("{name}.json")))
+}
+
+fn load_rps(
+    data_dir: &Path,
+    name: &str,
+) -> Result<std::collections::HashMap<String, RpRegistration>, String> {
+    let path = rp_registry_path(data_dir, name)?;
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&text).map_err(|e| format!("corrupt rp registry {}: {e}", path.display()))
+}
+
+fn save_rps(
+    data_dir: &Path,
+    name: &str,
+    rps: &std::collections::HashMap<String, RpRegistration>,
+) -> Result<(), String> {
+    let path = rp_registry_path(data_dir, name)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(rps).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
 
 fn load_or_create_token(data_dir: &Path) -> Result<String, String> {
     let path = data_dir.join(TOKEN_FILE);
@@ -1051,9 +1159,10 @@ mod tests {
         assert_eq!(opened["value"], json!("Amina"));
     }
 
-    /// SignetAuth Level 1 over the bridge HTTP surface: token auth, passphrase
-    /// throttle reuse, and a returned assertion that verifies against the
-    /// identity's published key with the core verifier.
+    /// SignetAuth over the bridge HTTP surface: token auth, passphrase
+    /// throttle reuse, first-use approval + per-rp origin pinning (Level 2),
+    /// and a returned assertion that verifies against the identity's
+    /// published key with the core verifier.
     #[test]
     fn auth_assert_over_http() {
         let dir = tempfile::tempdir().unwrap();
@@ -1107,7 +1216,8 @@ mod tests {
         );
         assert!(status.contains("401"), "unpaired refused: {status}");
 
-        // Valid challenge: signed assertion comes back and verifies offline.
+        // First use of an rp_id without approval: refused with the
+        // needs_approval signal the panel turns into an Approve button.
         let nonce = "ab".repeat(datu_core::auth::NONCE_BYTES);
         let (status, body) = http(
             port,
@@ -1117,6 +1227,24 @@ mod tests {
             &json!({"name": "alice", "passphrase": "alice pass", "rp_id": "app.example.com",
                     "origin": "https://app.example.com", "nonce": nonce,
                     "expires_at_ms": 4_102_444_800_000u64})
+            .to_string(),
+        );
+        assert!(
+            status.contains("403"),
+            "first use needs approval: {status} {body}"
+        );
+        assert!(body.contains("needs_approval"), "{body}");
+
+        // Same request carrying the approval gesture: registers the origin
+        // and signs.
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/auth-assert",
+            Some(&token),
+            &json!({"name": "alice", "passphrase": "alice pass", "rp_id": "app.example.com",
+                    "origin": "https://app.example.com", "nonce": nonce,
+                    "expires_at_ms": 4_102_444_800_000u64, "approve": true})
             .to_string(),
         );
         assert!(status.contains("200"), "{status} {body}");
@@ -1151,6 +1279,38 @@ mod tests {
             .to_string(),
         );
         assert!(status.contains("400"), "bad nonce hex refused: {status}");
+
+        // A known rp_id cannot be re-pointed at a different origin, even with
+        // approve: true - the phishing guard. The real site keeps working.
+        let (status, body) = http(
+            port,
+            "POST",
+            "/v1/wallet/auth-assert",
+            Some(&token),
+            &json!({"name": "alice", "passphrase": "alice pass", "rp_id": "app.example.com",
+                    "origin": "https://evil.example", "nonce": nonce,
+                    "expires_at_ms": 4_102_444_800_000u64, "approve": true})
+            .to_string(),
+        );
+        assert!(
+            status.contains("403"),
+            "origin mismatch refused: {status} {body}"
+        );
+        assert!(body.contains("origin mismatch"), "{body}");
+        let (status, _) = http(
+            port,
+            "POST",
+            "/v1/wallet/auth-assert",
+            Some(&token),
+            &json!({"name": "alice", "passphrase": "alice pass", "rp_id": "app.example.com",
+                    "origin": "https://app.example.com", "nonce": nonce,
+                    "expires_at_ms": 4_102_444_800_000u64})
+            .to_string(),
+        );
+        assert!(
+            status.contains("200"),
+            "registered origin still signs without approve: {status}"
+        );
 
         // Wrong passphrase is refused (throttle path shared with the rest).
         let (status, _) = http(

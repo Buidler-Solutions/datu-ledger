@@ -746,6 +746,7 @@ function reviewLogin() {
       `<div><span class="k">nonce (single use)</span> <b>${esc(nonce)}</b></div>`,
       `<div><span class="k">expires</span> <b>${new Date(expires_at_ms).toISOString()}</b></div>`,
       '<div><span class="k">domain</span> <b>datu-auth-v1 (never a ledger entry)</b></div>',
+      '<div><span class="k">origin pin</span> <b>first sign-in registers this origin; any other origin is refused afterwards</b></div>',
     ].join('');
     $('loginConfirm').style.display = 'block';
     status('review the sign-in, then approve', 'muted');
@@ -769,6 +770,9 @@ async function confirmLogin() {
       origin: pendingLogin.origin,
       nonce: pendingLogin.nonce,
       expires_at_ms: pendingLogin.expires_at_ms,
+      // The Approve click is the user-presence gesture: first use of a site
+      // registers its origin for this identity (the bridge pins it after).
+      approve: true,
     });
     if (data.domain !== 'datu-auth-v1') throw new Error('unexpected assertion domain from the bridge');
     $('loginResult').value = JSON.stringify(data, null, 2);
@@ -927,6 +931,11 @@ async function processRequest(req, passphrase) {
       body.passphrase = passphrase;
       passCache[body.name] = passphrase;
       notifyState();
+    }
+    // A confirmed login request carries the approval gesture; silent auto
+    // re-logins do not (the bridge only needs it to register a new site).
+    if (payload.path === '/v1/wallet/auth-assert' && body.auto !== true) {
+      body.approve = true;
     }
     const res = await bridgeCall(url, payload.path || '', body, token);
     chrome.runtime.sendMessage({ kind: 'datu-result', id: req.id, ok: true, result: { status: 200, body: res } });
