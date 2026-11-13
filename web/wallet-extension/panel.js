@@ -245,9 +245,37 @@ async function forgetToken() {
 
 // ---------- identity ----------
 function selected() {
-  const identity = identities.find((i) => i.name === $('identity').value);
-  if (!identity) throw new Error('select an identity first');
-  return identity;
+  const name = $('identity').value;
+  const identity = identities.find((i) => i.name === name);
+  if (identity) return identity;
+  if (!identities.length) {
+    throw new Error('no identity on this Signet yet - create one in Settings, then pair');
+  }
+  if (!name) throw new Error('pick an identity in the header first');
+  throw new Error(`identity '${name}' is not on this Signet - pick another in the header`);
+}
+
+// Re-read the identity list from the bridge and rebuild the header picker.
+// The passkey and backup flows call this first: after a browser restart the
+// panel can be paired with an empty picker, which looked like "select an
+// identity first" with nothing to select.
+async function refreshIdentities() {
+  const data = await bridge('/v1/wallet/identities');
+  const list = data.identities || [];
+  if (!list.length) throw new Error('this Signet has no identities yet - create one in Settings');
+  identities = list;
+  const select = $('identity');
+  const keep = select.value;
+  select.innerHTML = '';
+  for (const id of list) {
+    const option = document.createElement('option');
+    option.value = id.name;
+    option.textContent = `${id.name} · ${id.ed_public.slice(0, 8)}…`;
+    select.appendChild(option);
+  }
+  if (list.some((i) => i.name === keep)) select.value = keep;
+  showSeal();
+  return list;
 }
 
 function showSeal() {
@@ -887,17 +915,27 @@ async function importIdentity() {
 // and the session grant / signing flows work as if it was typed.
 const PASSKEY_PREFIX = 'datu.passkey.';
 
+// The picker can be empty right after a browser restart even though the
+// Signet is paired, so passkey actions refresh the list before selecting.
+async function pickIdentityForPasskey() {
+  if (!identities.length) await refreshIdentities();
+  return selected();
+}
+
 async function passkeyEnable() {
   try {
-    const identity = selected();
-    if (!$('pass').value) throw new Error('enter the vault passphrase first (Sign tab)');
+    const identity = await pickIdentityForPasskey();
+    // A passkey unlocks the passphrase, so wrapping needs it once: accept it
+    // from the Sign tab field or from a session where it is already cached.
+    const passphrase = $('pass').value || passCache[identity.name];
+    if (!passphrase) throw new Error('enter the vault passphrase first (Sign tab)');
     if (!window.datuPasskey) throw new Error('passkey module not loaded');
     status('creating the device passkey (follow the system prompt)…');
     const { credentialId } = await window.datuPasskey.createPasskey(identity.name);
     const salt = window.datuPasskey.prfSalt();
     status('confirm the passkey once to activate it…');
     const secret = await window.datuPasskey.unlockSecret(credentialId, salt);
-    const blob = await window.datuPasskey.wrapPassphrase(secret, $('pass').value);
+    const blob = await window.datuPasskey.wrapPassphrase(secret, passphrase);
     await localSet({
       [PASSKEY_PREFIX + identity.name]: { credentialId, salt: btoa(String.fromCharCode(...salt)), ...blob },
     });
@@ -910,7 +948,7 @@ async function passkeyEnable() {
 
 async function passkeyUnlock() {
   try {
-    const identity = selected();
+    const identity = await pickIdentityForPasskey();
     const stored = await localGet([PASSKEY_PREFIX + identity.name]);
     const record = stored[PASSKEY_PREFIX + identity.name];
     if (!record) throw new Error(`no passkey registered for '${identity.name}' - protect it first`);
@@ -929,7 +967,7 @@ async function passkeyUnlock() {
 
 async function passkeyForget() {
   try {
-    const identity = selected();
+    const identity = await pickIdentityForPasskey();
     await chrome.storage.local.remove(PASSKEY_PREFIX + identity.name);
     $('passkeyHint').textContent = 'passkey forgotten - the passphrase still works';
     status(`passkey protection removed for ${identity.name}`, 'muted');
