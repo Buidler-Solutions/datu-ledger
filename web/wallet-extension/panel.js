@@ -59,7 +59,15 @@ async function call(url, { method = 'GET', body, auth = false, token } = {}) {
       document.querySelector('nav button[data-tab="settings"]').click();
       throw new Error(json.error || 'pairing token rejected - re-pair in Settings');
     }
-    if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+    if (!res.ok) {
+      // Version skew: a bridge older than this panel has no SignetAuth route.
+      const message = json.error || `HTTP ${res.status}`;
+      throw new Error(
+        /no route for/i.test(message)
+          ? `${message} - this Signet service predates SignetAuth; restart it with the current datu binary (datu signet serve)`
+          : message,
+      );
+    }
     return json;
   } catch (e) {
     if (e.name === 'AbortError') throw new Error('request timed out');

@@ -369,22 +369,54 @@ export default function App() {
         rpId: window.location.hostname,
         origin: window.location.origin,
       });
-      const res = await walletSign({
-        bridgeUrl,
-        path: '/v1/wallet/auth-assert',
-        summary: `Login - your Signet signs a one-time challenge as ${ROLES[role].label}${name ? ` (${name})` : ''}`,
-        body: {
-          name,
-          rp_id: challenge.rp_id,
-          origin: challenge.origin,
-          nonce: challenge.nonce,
-          expires_at_ms: challenge.expires_at_ms,
-        },
-      });
-      const assertion = res.body || {};
+      // Version skew: a Signet service older than SignetAuth answers 404 for
+      // the assertion route. Fall back to the party-signed login challenge so
+      // older wallets keep working, and say which path was taken.
+      let assertion;
+      let legacy = false;
+      try {
+        const res = await walletSign({
+          bridgeUrl,
+          path: '/v1/wallet/auth-assert',
+          summary: `Login - your Signet signs a one-time challenge as ${ROLES[role].label}${name ? ` (${name})` : ''}`,
+          body: {
+            name,
+            rp_id: challenge.rp_id,
+            origin: challenge.origin,
+            nonce: challenge.nonce,
+            expires_at_ms: challenge.expires_at_ms,
+          },
+        });
+        assertion = res.body || {};
+      } catch (e) {
+        if (!/no route|404/i.test(e.message)) throw e;
+        legacy = true;
+        const res = await walletSign({
+          bridgeUrl,
+          path: '/v1/wallet/party-sign',
+          summary: `Login (legacy) - your Signet signs a one-time challenge as ${ROLES[role].label}${name ? ` (${name})` : ''}`,
+          body: {
+            name,
+            role: 'login',
+            kind: 'datu.login',
+            document: { role, node: nodeUrl, nonce: challenge.nonce, ts: Date.now() },
+          },
+        });
+        const party = ((res.body || {}).document?.parties || []).find((p) => p.role === 'login');
+        if (!party) throw new Error('Signet returned no login signature');
+        assertion = { pubkey: party.key, signature: party.ed_signature || '' };
+      }
       if (!assertion.pubkey) throw new Error('Signet returned no login assertion');
-      const verdict = await verifyAssertion(nodeUrl, assertion, challenge);
-      if (verdict.ok === false) throw new Error(`login assertion rejected: ${verdict.reason}`);
+      let verdict = { ok: null };
+      if (legacy) {
+        say(
+          'this Signet predates SignetAuth (no /v1/wallet/auth-assert) - used the legacy party-sign challenge',
+          'muted'
+        );
+      } else {
+        verdict = await verifyAssertion(nodeUrl, assertion, challenge);
+        if (verdict.ok === false) throw new Error(`login assertion rejected: ${verdict.reason}`);
+      }
       const known = roleOfKey(assertion.pubkey);
       const finalRole = known && ROLES[known] ? known : role;
       if (known && known !== role) {
@@ -440,20 +472,42 @@ export default function App() {
           rpId: window.location.hostname,
           origin: window.location.origin,
         });
-        const res = await walletSign({
-          bridgeUrl,
-          path: '/v1/wallet/auth-assert',
-          summary: `Re-login - ${session.name} re-signs a challenge as ${ROLES[session.role]?.label || session.role}`,
-          body: {
-            name: session.name,
-            rp_id: challenge.rp_id,
-            origin: challenge.origin,
-            nonce: challenge.nonce,
-            expires_at_ms: challenge.expires_at_ms,
-            auto: true,
-          },
-        });
-        const assertion = res.body || {};
+        let assertion;
+        let legacy = false;
+        try {
+          const res = await walletSign({
+            bridgeUrl,
+            path: '/v1/wallet/auth-assert',
+            summary: `Re-login - ${session.name} re-signs a challenge as ${ROLES[session.role]?.label || session.role}`,
+            body: {
+              name: session.name,
+              rp_id: challenge.rp_id,
+              origin: challenge.origin,
+              nonce: challenge.nonce,
+              expires_at_ms: challenge.expires_at_ms,
+              auto: true,
+            },
+          });
+          assertion = res.body || {};
+        } catch (e) {
+          if (!/no route|404/i.test(e.message)) throw e;
+          legacy = true;
+          const res = await walletSign({
+            bridgeUrl,
+            path: '/v1/wallet/party-sign',
+            summary: `Re-login (legacy) - ${session.name} re-signs a challenge`,
+            body: {
+              name: session.name,
+              role: 'login',
+              kind: 'datu.login',
+              document: { nonce: challenge.nonce, ts: Date.now() },
+              auto: true,
+            },
+          });
+          const party = ((res.body || {}).document?.parties || []).find((p) => p.role === 'login');
+          if (!party) throw new Error('no login signature');
+          assertion = { pubkey: party.key, signature: party.ed_signature || '' };
+        }
         if (!assertion.pubkey || assertion.pubkey !== session.ed) {
           say('stored session belongs to a different key - log in again', 'err');
           setSession(null);
@@ -461,13 +515,15 @@ export default function App() {
           go('welcome');
           return;
         }
-        const verdict = await verifyAssertion(nodeUrl, assertion, challenge);
-        if (verdict.ok === false) {
-          say(`re-login assertion rejected: ${verdict.reason}`, 'err');
-          setSession(null);
-          clearSession();
-          go('welcome');
-          return;
+        if (!legacy) {
+          const verdict = await verifyAssertion(nodeUrl, assertion, challenge);
+          if (verdict.ok === false) {
+            say(`re-login assertion rejected: ${verdict.reason}`, 'err');
+            setSession(null);
+            clearSession();
+            go('welcome');
+            return;
+          }
         }
         const s = {
           ...session,
