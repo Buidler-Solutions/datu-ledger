@@ -925,10 +925,12 @@ async function pickIdentityForPasskey() {
 async function passkeyEnable() {
   try {
     const identity = await pickIdentityForPasskey();
-    // A passkey unlocks the passphrase, so wrapping needs it once: accept it
-    // from the Sign tab field or from a session where it is already cached.
-    const passphrase = $('pass').value || passCache[identity.name];
-    if (!passphrase) throw new Error('enter the vault passphrase first (Sign tab)');
+    // A passkey wraps the passphrase, so it is needed once: the field right
+    // here, the Sign tab field, or a session that already cached it.
+    const passphrase = $('passkeyPass').value || $('pass').value || passCache[identity.name];
+    if (!passphrase) throw new Error("type this identity's vault passphrase in the field above");
+    passCache[identity.name] = passphrase;
+    notifyState();
     if (!window.datuPasskey) throw new Error('passkey module not loaded');
     status('creating the device passkey (follow the system prompt)…');
     const { credentialId } = await window.datuPasskey.createPasskey(identity.name);
@@ -939,6 +941,7 @@ async function passkeyEnable() {
     await localSet({
       [PASSKEY_PREFIX + identity.name]: { credentialId, salt: btoa(String.fromCharCode(...salt)), ...blob },
     });
+    $('passkeyPass').value = '';
     $('passkeyHint').textContent = `passkey active for '${identity.name}' - Unlock with passkey replaces typing`;
     status(`passkey protection enabled for ${identity.name}`, 'ok');
   } catch (e) {

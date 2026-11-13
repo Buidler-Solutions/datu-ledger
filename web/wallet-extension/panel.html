@@ -170,12 +170,13 @@
           a biometric gesture. Losing the passkey changes nothing: type the
           passphrase as before.
         </p>
+        <label>Vault passphrase (needed once, to wrap it under the passkey)<input id="passkeyPass" type="password" /></label>
         <div class="row">
           <button class="ghost" id="passkeyEnable">Protect this identity with a passkey</button>
           <button class="ghost" id="passkeyUnlock">Unlock with passkey</button>
           <button class="ghost" id="passkeyForget">Forget passkey</button>
         </div>
-        <p class="muted small" id="passkeyHint">Select an identity and enter its passphrase in the Sign tab first, then protect it.</p>
+        <p class="muted small" id="passkeyHint">Pick an identity in the header, type its passphrase above, then protect it. After that, Unlock with passkey replaces typing.</p>
 
         <h2>Backup &amp; move devices</h2>
         <p class="muted small">
