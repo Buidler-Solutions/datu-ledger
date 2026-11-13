@@ -1238,6 +1238,11 @@ $('node').addEventListener('change', () => {
 });
 
 // ---------- boot ----------
+const versionEl = $('extVersion');
+if (versionEl && chrome.runtime?.getManifest) {
+  versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
+}
+
 (async () => {
   const local = await localGet(['wallets', 'node']);
   if (local.node) $('node').value = local.node;
