@@ -99,12 +99,18 @@ WebCrypto Ed25519 (the registrar dApp ships a working example).
   under a WebAuthn PRF-derived key, so the unlock gesture is biometric.
   This gates the panel only; the RP sees the same assertion either way.
 
-## 5. WebAuthn bridge mode (virtual authenticator, experimental)
+## 5. WebAuthn bridge mode (virtual authenticator)
 
 Signet identities can also act as real WebAuthn credentials: the browser
-extension proxies `navigator.credentials` calls (chrome.webAuthenticationProxy)
-to the Signet bridge, which creates credentials and signs assertions with
-the identity's Ed25519 key (COSE alg EdDSA, -8).
+extension proxies `navigator.credentials` calls (chrome.webAuthenticationProxy,
+Chrome 115+) to the Signet bridge, which creates credentials and signs
+assertions with the identity's Ed25519 key (COSE alg EdDSA, -8). The proxy
+attaches exactly while a panel unlock grant is live and detaches otherwise,
+so the browser's ordinary passkeys keep working; the extension supplies the
+clientDataJSON (including the requesting origin) itself, because the proxy
+API passes only the options dictionary. Validated end-to-end in a real
+Chromium: create and get ceremonies, SPKI/-8 exposure, and assertion
+signatures verified against the identity key.
 
 Formats (implemented in `datu_core::auth::webauthn`):
 

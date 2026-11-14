@@ -13,3 +13,5 @@ secret.mldsa65
 # bridge tokens, keystores). Never commit, never push - enforced by the
 # global pre-commit hook and pre-push guard.
 .dev-logs/
+__pycache__/
+*.pyc

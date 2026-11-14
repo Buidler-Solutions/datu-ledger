@@ -91,6 +91,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg && (msg.kind === 'datu-webauthn-suspend' || msg.kind === 'datu-webauthn-resume')) {
+    // The panel runs its own device-passkey ceremonies with the virtual
+    // authenticator detached, so they reach the real platform authenticator.
+    (async () => {
+      adjustProxySuspension(msg.kind === 'datu-webauthn-suspend' ? 1 : -1);
+      await syncProxyAttachment();
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
   if (msg && msg.kind === 'datu-state-changed') {
     (async () => {
       const unlocked = Array.isArray(msg.unlocked) ? msg.unlocked : [];
@@ -190,67 +201,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // ---------- SignetAuth Level 3a: WebAuthn proxy (virtual authenticator) ----------
-// Chrome 133+ exposes chrome.webAuthenticationProxy, letting an extension
-// answer navigator.credentials.create/get on behalf of an authenticator. We
-// forward to the paired Signet bridge, which signs with the identity's
-// Ed25519 key (datu_core::auth_webauthn). The bridge needs an unlocked
-// session (a grant minted by a passphrase or passkey unlock in the panel);
-// without one, the ceremony fails closed and the Relying Party falls back.
+// Chrome 115+ exposes chrome.webAuthenticationProxy: while this extension is
+// attached, every navigator.credentials ceremony in the browser is routed
+// here and forwarded to the paired Signet bridge, which answers with the
+// identity's Ed25519 key (datu_core::auth_webauthn). The bridge needs an
+// unlocked session grant (minted by a passphrase or passkey unlock in the
+// panel); while no grant is live the proxy stays detached, so the browser's
+// real passkeys keep working.
 //
-// Format notes: our authenticator is synced-credential grade: attestation
-// format "none", UP|UV flags set, signCount 0 (no per-credential state).
+// API shape (developer.chrome.com, webAuthenticationProxy): the events are
+// onCreateRequest / onGetRequest and receive { requestId, requestDetailsJson },
+// where requestDetailsJson is the toJSON() form of the options dictionary.
+// Completion takes { requestId, responseJson } with base64url fields, and
+// the extension itself builds clientDataJSON: the options carry no origin,
+// so the requesting page's origin is recovered from the active tab.
+importScripts('webauthn.js');
 
-const b64uToBytes = (s) => {
-  const t = String(s).replace(/-/g, '+').replace(/_/g, '/');
-  const pad = t.length % 4 ? '='.repeat(4 - (t.length % 4)) : '';
-  return Uint8Array.from(atob(t + pad), (c) => c.charCodeAt(0));
-};
-const bytesToB64u = (bytes) =>
-  btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-const utf8 = (s) => new TextEncoder().encode(s);
-
-async function sha256(bytes) {
-  return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-}
-
-// Minimal CTAP2 canonical CBOR for the fields WebAuthn needs (integers,
-// text and byte strings, small maps/arrays).
-function cborUint(major, n) {
-  if (n < 24) return [major << 5 | n];
-  if (n < 0x100) return [major << 5 | 24, n];
-  if (n < 0x10000) return [major << 5 | 25, n >> 8, n & 0xff];
-  return [major << 5 | 26, (n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
-}
-const cborBytes = (bytes) => [...cborUint(2, bytes.length), ...bytes];
-const cborText = (text) => {
-  const bytes = utf8(text);
-  return [...cborUint(3, bytes.length), ...bytes];
-};
-
-async function attestationObject(rpId, credentialIdHex, coseB64) {
-  const rpIdHash = await sha256(utf8(rpId));
-  const authData = new Uint8Array([
-    ...rpIdHash,
-    0x45, // UP | UV | AT
-    0, 0, 0, 0, // signCount
-    ...new Uint8Array(16), // AAGUID (all zero: no model identity)
-    (credentialIdHex.length / 2) >> 8,
-    (credentialIdHex.length / 2) & 0xff,
-    ...Uint8Array.from(credentialIdHex.match(/../g).map((h) => parseInt(h, 16))),
-    ...Uint8Array.from(atob(coseB64), (c) => c.charCodeAt(0)),
-  ]);
-  return Uint8Array.from([
-    0xa3, // map(3)
-    ...cborText('fmt'), ...cborText('none'),
-    ...cborText('attStmt'), 0xa0,
-    ...cborText('authData'), ...cborBytes(authData),
-  ]);
-}
+const proxy = globalThis.chrome && chrome.webAuthenticationProxy;
+const proxyLog = (...args) => console.info('[webauthn-proxy]', ...args);
 
 // The panel persists its SignetAuth grants here so the proxy can spend one
 // without another prompt; the grant itself expires in 15 minutes.
 async function activeGrant() {
-  const s = await chrome.storage.session.get(['datuGrants', 'wallets', 'activeWallet', 'tokens']);
+  const s = await chrome.storage.session.get(['datuGrants', 'tokens']);
   const grants = s.datuGrants || {};
   for (const [url, byName] of Object.entries(grants)) {
     const token = (s.tokens || {})[url];
@@ -271,93 +244,137 @@ async function bridgeCall({ url, token }, path, body) {
   return json;
 }
 
-function wireWebAuthnProxy() {
-  const proxy = chrome.webAuthenticationProxy;
-  if (!proxy) return; // older Chrome: the SignetAuth assertion flow still works
-  const log = (...args) => console.info('[webauthn-proxy]', ...args);
+// clientDataJSON must name the requesting page or relying parties reject the
+// assertion; the options JSON does not carry it, so use the active tab.
+async function ceremonyOrigin() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tab && tab.url) return new URL(tab.url).origin;
+  } catch {}
+  return null;
+}
 
-  proxy.onRequestCreateRequest.addListener(async (details) => {
+let proxyAttached = false;
+let proxySuspended = 0; // the panel's own passkey ceremonies suspend the proxy
+
+function adjustProxySuspension(delta) {
+  proxySuspended = Math.max(0, proxySuspended + delta);
+}
+
+async function syncProxyAttachment() {
+  if (!proxy) return;
+  const want = proxySuspended === 0 && !!(await activeGrant());
+  if (want === proxyAttached) return;
+  try {
+    if (want) await proxy.attach();
+    else await proxy.detach();
+    proxyAttached = want;
+    proxyLog(want ? 'attached: passkey ceremonies route to the Signet' : 'detached');
+  } catch (e) {
+    proxyAttached = false;
+    proxyLog('attach/detach failed:', e.message);
+  }
+}
+
+function wireWebAuthnProxy() {
+  if (!proxy) return; // older Chrome: the SignetAuth assertion flow still works
+  const W = globalThis.datuWebauthn;
+
+  proxy.onCreateRequest.addListener(async (details) => {
     try {
       const request = JSON.parse(details.requestDetailsJson || '{}');
-      const pk = request.publicKey || request;
-      const rpId = pk.rp?.id || new URL(request.origin || `https://${'localhost'}`).hostname;
+      proxyLog('create request for rp', (request.rp && request.rp.id) || '(unnamed)');
+      const origin = await ceremonyOrigin();
+      if (!origin) throw new Error('cannot determine the requesting origin');
       const session = await activeGrant();
       if (!session) throw new Error('unlock the DATU Signet panel first (passphrase or passkey)');
+      const rpId = (request.rp && request.rp.id) || new URL(origin).hostname;
       const created = await bridgeCall(session, '/v1/wallet/webauthn-create', {
         name: session.name,
         grant: session.grant,
         rp_id: rpId,
-        user_name: pk.user?.name || session.name,
+        user_name:
+          (request.user && (request.user.name || request.user.displayName)) || session.name,
       });
-      const attestation = await attestationObject(rpId, created.credential_id, created.public_key_cose_b64);
-      const responseJson = {
-        id: bytesToB64u(b64uToBytes(created.credential_id)),
-        rawId: bytesToB64u(Uint8Array.from(created.credential_id.match(/../g).map((h) => parseInt(h, 16)))),
-        type: 'public-key',
-        clientExtensionResults: {},
-        response: {
-          clientDataJSON: request.clientDataJson || pk.challenge || '',
-          attestationObject: bytesToB64u(attestation),
-          transports: ['internal'],
-        },
-      };
-      await proxy.completeCreateRequest({ requestId: details.requestId, responseJson: JSON.stringify(responseJson) });
-      log('created credential for', rpId);
+      const responseJson = await W.createResponseJson({
+        request,
+        origin,
+        credentialIdHex: created.credential_id,
+        coseB64: created.public_key_cose_b64,
+        alg: typeof created.alg === 'number' ? created.alg : -8,
+      });
+      await proxy.completeCreateRequest({
+        requestId: details.requestId,
+        responseJson: JSON.stringify(responseJson),
+      });
+      proxyLog('created credential for', rpId, 'at', origin);
     } catch (e) {
-      await proxy.completeCreateRequest({ requestId: details.requestId, error: { name: 'NotAllowedError', message: e.message } });
-      log('create failed:', e.message);
+      await proxy
+        .completeCreateRequest({
+          requestId: details.requestId,
+          error: { name: 'NotAllowedError', message: e.message },
+        })
+        .catch(() => {});
+      proxyLog('create failed:', e.message);
     }
   });
 
-  proxy.onRequestGetRequest.addListener(async (details) => {
+  proxy.onGetRequest.addListener(async (details) => {
     try {
       const request = JSON.parse(details.requestDetailsJson || '{}');
-      const pk = request.publicKey || request;
-      const rpId = pk.rpId || new URL(request.origin || 'https://localhost').hostname;
-      const allow = pk.allowCredentials || [];
+      const allow = request.allowCredentials || [];
       if (!allow.length) throw new Error('this authenticator only answers allowCredentials requests');
-      const credentialIdHex = Array.from(b64uToBytes(allow[0].id))
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('');
+      const origin = await ceremonyOrigin();
+      if (!origin) throw new Error('cannot determine the requesting origin');
       const session = await activeGrant();
       if (!session) throw new Error('unlock the DATU Signet panel first (passphrase or passkey)');
-      const clientDataJSON = {
-        type: 'webauthn.get',
-        challenge: allow[0].clientChallenge || pk.challenge,
-        origin: request.origin,
-        crossOrigin: false,
-      };
-      const clientDataB64 = btoa(JSON.stringify(clientDataJSON));
+      const rpId = request.rpId || new URL(origin).hostname;
+      const clientData = W.clientData('webauthn.get', request.challenge, origin);
       const signed = await bridgeCall(session, '/v1/wallet/webauthn-get', {
         name: session.name,
         grant: session.grant,
         rp_id: rpId,
-        credential_id: credentialIdHex,
-        client_data_json_b64: clientDataB64,
+        credential_id: W.b64uToHex(allow[0].id),
+        client_data_json_b64: W.bytesToB64(W.utf8(JSON.stringify(clientData))),
       });
-      const responseJson = {
-        id: allow[0].id,
-        rawId: allow[0].id,
-        type: 'public-key',
-        clientExtensionResults: {},
-        response: {
-          clientDataJSON: bytesToB64u(utf8(JSON.stringify(clientDataJSON))),
-          authenticatorData: signed.authenticator_data_b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
-          signature: signed.signature_b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
-          userHandle: null,
-        },
-      };
-      await proxy.completeGetRequest({ requestId: details.requestId, responseJson: JSON.stringify(responseJson) });
-      log('assertion signed for', rpId);
+      const responseJson = W.getResponseJson({
+        request,
+        origin,
+        credentialIdB64u: allow[0].id,
+        authenticatorDataB64: signed.authenticator_data_b64,
+        signatureB64: signed.signature_b64,
+      });
+      await proxy.completeGetRequest({
+        requestId: details.requestId,
+        responseJson: JSON.stringify(responseJson),
+      });
+      proxyLog('assertion signed for', rpId, 'at', origin);
     } catch (e) {
-      await proxy.completeGetRequest({ requestId: details.requestId, error: { name: 'NotAllowedError', message: e.message } });
-      log('get failed:', e.message);
+      await proxy
+        .completeGetRequest({
+          requestId: details.requestId,
+          error: { name: 'NotAllowedError', message: e.message },
+        })
+        .catch(() => {});
+      proxyLog('get failed:', e.message);
     }
   });
 
-  // Attach lazily: attachment without requests is harmless, and Chrome
-  // re-attaches on startup when the API is present.
-  proxy.attach({}).catch(() => {});
+  // While attached, isUserVerifyingPlatformAuthenticatorAvailable() would
+  // otherwise hang: answer it from unlock state.
+  proxy.onIsUvpaaRequest.addListener(async (details) => {
+    const isUvpaa = !!(await activeGrant().catch(() => null));
+    await proxy.completeIsUvpaaRequest({ requestId: details.requestId, isUvpaa }).catch(() => {});
+  });
+
+  proxy.onRequestCanceled.addListener((requestId) => proxyLog('request canceled', requestId));
+
+  // Attach exactly while an unlock is live; grants live in session storage,
+  // so expiry or panel lock-out detaches the proxy again.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'session' && (changes.datuGrants || changes.tokens)) syncProxyAttachment();
+  });
+  syncProxyAttachment();
 }
 
 try {

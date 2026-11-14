@@ -36,7 +36,7 @@ pub fn cose_ed25519_pubkey(key: &VerifyingKey) -> Vec<u8> {
     let mut out = Vec::with_capacity(42);
     out.push(0xa4); // map, 4 pairs
     out.extend_from_slice(&[0x01, 0x01]); // 1: 1   (kty OKP)
-    out.extend_from_slice(&[0x03, 0x26]); // 3: -8  (alg EdDSA)
+    out.extend_from_slice(&[0x03, 0x27]); // 3: -8  (alg EdDSA: major 1, info 7 -> -1-7)
     out.extend_from_slice(&[0x20, 0x06]); // -1: 6  (crv Ed25519)
     out.extend_from_slice(&[0x21, 0x58, 0x20]); // -2: bytes(32)
     out.extend_from_slice(key.as_bytes());
@@ -132,7 +132,7 @@ mod tests {
         assert_eq!(cose.len(), 42);
         assert_eq!(
             &cose[..8],
-            &[0xa4, 0x01, 0x01, 0x03, 0x26, 0x20, 0x06, 0x21]
+            &[0xa4, 0x01, 0x01, 0x03, 0x27, 0x20, 0x06, 0x21]
         );
         assert_eq!(&cose[8..10], &[0x58, 0x20]);
         assert_eq!(&cose[10..], key().verifying_key().as_bytes());

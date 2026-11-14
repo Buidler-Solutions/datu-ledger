@@ -53,27 +53,58 @@
   const randomBytes = (n) => root.crypto.getRandomValues(new Uint8Array(n));
   const prfSalt = () => randomBytes(32); // stored alongside the wrapped blob
 
+  // While the background is attached as the browser's WebAuthn proxy (the
+  // Signet virtual authenticator), the panel's own device-passkey ceremonies
+  // would be routed back into the extension and deadlock on the unlock they
+  // are trying to produce. They run with the proxy suspended; the messages
+  // are harmless no-ops when it was never attached (and under Node tests,
+  // where chrome.runtime does not exist).
+  const suspendProxy = () => {
+    try {
+      return root.chrome.runtime.sendMessage({ kind: 'datu-webauthn-suspend' });
+    } catch {
+      return Promise.resolve();
+    }
+  };
+  const resumeProxy = () => {
+    try {
+      root.chrome.runtime.sendMessage({ kind: 'datu-webauthn-resume' }).catch(() => {});
+    } catch {}
+  };
+  const withRealAuthenticator = async (ceremony) => {
+    try {
+      await suspendProxy();
+    } catch {}
+    try {
+      return await ceremony();
+    } finally {
+      resumeProxy();
+    }
+  };
+
   /// WebAuthn glue: create a resident passkey with the PRF extension
   /// requested. Not every authenticator supports PRF (Touch ID and iCloud
   /// Keychain passkeys often do not), so the result says whether it does.
   /// Must be called from the panel page (user gesture).
   async function createPasskey(username) {
-    const credential = await root.navigator.credentials.create({
-      publicKey: {
-        challenge: randomBytes(32),
-        user: { id: randomBytes(16), name: username, displayName: `DATU Signet - ${username}` },
-        rp: { name: 'DATU Signet' },
-        pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
-        authenticatorSelection: {
-          residentKey: 'required',
-          requireResidentKey: true,
-          userVerification: 'required',
+    return withRealAuthenticator(async () => {
+      const credential = await root.navigator.credentials.create({
+        publicKey: {
+          challenge: randomBytes(32),
+          user: { id: randomBytes(16), name: username, displayName: `DATU Signet - ${username}` },
+          rp: { name: 'DATU Signet' },
+          pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+          authenticatorSelection: {
+            residentKey: 'required',
+            requireResidentKey: true,
+            userVerification: 'required',
+          },
+          extensions: { prf: {} },
         },
-        extensions: { prf: {} },
-      },
+      });
+      const prfEnabled = Boolean(credential?.clientExtensionResults?.prf?.enabled);
+      return { credentialId: b64(new Uint8Array(credential.rawId)), prfEnabled };
     });
-    const prfEnabled = Boolean(credential?.clientExtensionResults?.prf?.enabled);
-    return { credentialId: b64(new Uint8Array(credential.rawId)), prfEnabled };
   }
 
   /// The user-presence + user-verification gesture: assert the passkey and,
@@ -81,30 +112,34 @@
   /// secret. Returns null when PRF is unavailable (callers then fall back to
   /// a passkey-gated session cache).
   async function unlockSecret(credentialIdB64, salt) {
-    const assertion = await root.navigator.credentials.get({
-      publicKey: {
-        challenge: randomBytes(32),
-        allowCredentials: [{ type: 'public-key', id: unb64(credentialIdB64) }],
-        userVerification: 'required',
-      },
-      extensions: { prf: { eval: { first: salt } } },
+    return withRealAuthenticator(async () => {
+      const assertion = await root.navigator.credentials.get({
+        publicKey: {
+          challenge: randomBytes(32),
+          allowCredentials: [{ type: 'public-key', id: unb64(credentialIdB64) }],
+          userVerification: 'required',
+        },
+        extensions: { prf: { eval: { first: salt } } },
+      });
+      const results = assertion?.clientExtensionResults?.prf?.results;
+      return results?.first ? new Uint8Array(results.first) : null;
     });
-    const results = assertion?.clientExtensionResults?.prf?.results;
-    return results?.first ? new Uint8Array(results.first) : null;
   }
 
   /// Plain presence assertion (no PRF): proves the human passed the device's
   /// user verification. Used by the fallback mode.
   async function presenceAssertion(credentialIdB64) {
-    const assertion = await root.navigator.credentials.get({
-      publicKey: {
-        challenge: randomBytes(32),
-        allowCredentials: [{ type: 'public-key', id: unb64(credentialIdB64) }],
-        userVerification: 'required',
-      },
+    return withRealAuthenticator(async () => {
+      const assertion = await root.navigator.credentials.get({
+        publicKey: {
+          challenge: randomBytes(32),
+          allowCredentials: [{ type: 'public-key', id: unb64(credentialIdB64) }],
+          userVerification: 'required',
+        },
+      });
+      if (!assertion) throw new Error('the passkey prompt was dismissed');
+      return true;
     });
-    if (!assertion) throw new Error('the passkey prompt was dismissed');
-    return true;
   }
 
   root.datuPasskey = {
