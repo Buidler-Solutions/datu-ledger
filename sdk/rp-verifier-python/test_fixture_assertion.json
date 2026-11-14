@@ -1,0 +1,9 @@
+{
+  "domain": "datu-auth-v1",
+  "rp_id": "app.example.com",
+  "origin": "https://app.example.com",
+  "nonce": "abababababababababababababababab",
+  "expires_at_ms": 4102444800000,
+  "pubkey": "76d4e19f65734405323e39b1529bff51e0f6907beb725ec0c53229b23897eddc",
+  "signature": "0e9d8273d16725991987256380bec5f1be0906bf75458607a6c765731404b43692c46d87d306ecd76c25c5e2545aeb54e57f286a8ee6d31e101338fcf8b9a501"
+}

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datu-rp-verify"
+version = "0.1.0"
+description = "SignetAuth (datu-auth-v1) relying-party verifier for the DATU ledger"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["datu", "signetauth", "webauthn", "ed25519", "authentication"]
+
+[project.optional-dependencies]
+crypto = ["cryptography>=41"]
+
+[project.scripts]
+datu-rp-verify = "datu_rp_verify:main"
+
+[tool.setuptools]
+py-modules = ["datu_rp_verify"]
