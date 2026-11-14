@@ -1,0 +1,15 @@
+{
+  "name": "@greenarmor/hello-datu",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "hello-DATU: a five-minute starter dApp for the DATU accountability DAG (SignetAuth login, party sign, coverage)",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@greenarmor/datu-client": "^0.1.0"
+  },
+  "license": "MIT"
+}

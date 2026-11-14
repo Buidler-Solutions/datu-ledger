@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>hello-DATU</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 15px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.4rem; }
+    button { font: inherit; padding: 0.45rem 0.9rem; border-radius: 8px; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    pre { background: rgba(127,127,127,0.12); padding: 0.8rem; border-radius: 8px; overflow-x: auto; font-size: 12.5px; }
+    .row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+    .ok { color: #2e7d32; }
+    .err { color: #c62828; }
+    footer { margin-top: 2rem; opacity: 0.7; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <h1>hello-DATU</h1>
+  <p id="status">checking for the Signet extension...</p>
+  <div class="row">
+    <button id="reload" disabled>list identities</button>
+    <button id="signin" disabled>Sign in with Signet</button>
+    <button id="sign" disabled>sign as holder</button>
+    <button id="mock">run without a wallet (mock)</button>
+  </div>
+  <pre id="out">ready</pre>
+  <footer>
+    Needs the DATU Signet extension loaded and a Signet service running
+    (datu signet serve, default bridge http://127.0.0.1:7588). The mock
+    button runs the same flows against a fake transport, no wallet needed.
+  </footer>
+  <script type="importmap">
+    {
+      "imports": {
+        "@greenarmor/datu-client": "../../sdk/datu-client/src/index.js",
+        "@greenarmor/datu-client/mock": "../../sdk/datu-client/src/mock.js"
+      }
+    }
+  </script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

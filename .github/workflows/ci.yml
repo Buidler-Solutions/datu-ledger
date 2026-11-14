@@ -38,10 +38,24 @@ jobs:
           node --check web/wallet-extension/background.js
           node --check web/wallet-extension/inject.js
           node --check web/wallet-extension/passkey.js
+          node --check web/wallet-extension/webauthn.js
       - name: extension pure-logic tests
-        run: node --test web/wallet-extension/test/blake3.test.mjs web/wallet-extension/test/coverage.test.mjs web/wallet-extension/test/passkey.test.mjs
+        run: node --test web/wallet-extension/test/blake3.test.mjs web/wallet-extension/test/coverage.test.mjs web/wallet-extension/test/passkey.test.mjs web/wallet-extension/test/webauthn.test.mjs
       - name: datu client SDK tests
         run: node --test sdk/datu-client/test/*.test.mjs
+      - name: react hooks package tests
+        working-directory: sdk/datu-react
+        run: |
+          npm install --no-package-lock --no-save ../datu-client
+          npm install --no-package-lock --no-save react react-dom jsdom
+          npm test
+      - name: hello-datu starter tests
+        working-directory: examples/hello-datu
+        run: |
+          npm install --no-package-lock --no-save ../../sdk/datu-client
+          npm test
+      - name: python RP verifier tests
+        run: python3 -m unittest discover -s sdk/rp-verifier-python
       - name: registrar build and tests
         working-directory: web/registrar
         run: |

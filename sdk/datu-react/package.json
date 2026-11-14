@@ -1,0 +1,61 @@
+{
+  "name": "@greenarmor/datu-react",
+  "version": "0.1.0",
+  "description": "React hooks for @greenarmor/datu-client: SignetAuth sign-in, identity list, party signing and coverage checks",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/greenarmor/datu-ledger.git",
+    "directory": "sdk/datu-react"
+  },
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "node --test test/*.test.mjs"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "dependencies": {
+    "@greenarmor/datu-client": "^0.1.0"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "keywords": [
+    "datu",
+    "signet",
+    "signetauth",
+    "react",
+    "hooks",
+    "accountability"
+  ],
+  "license": "MIT",
+  "author": "DATU Contributors",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "bugs": {
+    "url": "https://github.com/greenarmor/datu-ledger/issues"
+  },
+  "homepage": "https://github.com/greenarmor/datu-ledger/tree/main/sdk/datu-react"
+}
