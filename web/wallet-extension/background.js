@@ -1,15 +1,143 @@
-// Open the wallet as a docked side panel when the toolbar icon is clicked,
-// MetaMask-style: the panel slides in on the right of the current tab.
-const enableSidePanel = () =>
-  chrome.sidePanel
-    .setPanelBehavior({ openPanelOnActionClick: true })
-    .catch((e) => console.warn("side panel behavior:", e));
+// ---------- side panel scoping ----------
+// The panel belongs to the tab AND origin that initialized it: a toolbar
+// click there, or a dApp sign request from that tab. Every other tab never
+// opts in, and Chrome closes the panel on switching to a tab where it is
+// disabled (extensions cannot close it programmatically, so the global
+// default off is what makes it follow the tab). Per-tab options persist
+// across navigation, so the tab is also followed: navigating it to a
+// different origin disables the panel there too (the page that comes into
+// view never asked for it), and returning to the origin enables it again
+// (though only a click can reopen it: open() requires a user gesture).
+const PANEL_PATH = 'panel.html';
+const PANEL_TABS_KEY = 'datuPanelTabs';
 
-if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
-  enableSidePanel();
-  chrome.runtime.onInstalled.addListener(enableSidePanel);
-  chrome.runtime.onStartup.addListener(enableSidePanel);
+// tabId -> { origin, live }: which origin initialized the panel on which
+// tab. live=false once the tab navigated off that origin. Kept in session
+// storage because MV3 workers are killed while idle.
+const panelTabs = new Map();
+
+const urlOrigin = (url) => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+};
+
+const loadPanelTabs = async () => {
+  try {
+    const s = await chrome.storage.session.get(PANEL_TABS_KEY);
+    for (const [k, v] of Object.entries(s[PANEL_TABS_KEY] || {})) {
+      panelTabs.set(Number(k), v);
+    }
+  } catch {}
+};
+const savePanelTabs = () => {
+  const o = {};
+  for (const [k, v] of panelTabs.entries()) o[k] = v;
+  chrome.storage.session.set({ [PANEL_TABS_KEY]: o }).catch?.(() => {});
+};
+
+// Heal drift after a worker restart: a tab that navigated (or closed) while
+// the worker was down gets its panel disabled (or its entry dropped).
+function reconcilePanelTabs() {
+  for (const [tabId, entry] of [...panelTabs.entries()]) {
+    chrome.tabs
+      .get(tabId)
+      .then((tab) => {
+        const now = urlOrigin(tab.url || tab.pendingUrl || '');
+        if (entry.live && entry.origin != null && now && now !== entry.origin) {
+          entry.live = false;
+          chrome.sidePanel.setOptions({ tabId, enabled: false }).catch?.(() => {});
+          savePanelTabs();
+        }
+      })
+      .catch(() => {
+        panelTabs.delete(tabId);
+        savePanelTabs();
+      });
+  }
 }
+
+async function initSidePanel() {
+  try {
+    // Global default off: only per-tab opt-ins get the panel.
+    await chrome.sidePanel.setOptions({ enabled: false });
+  } catch (e) {
+    console.warn('side panel global default:', e?.message || e);
+  }
+  await loadPanelTabs();
+  reconcilePanelTabs();
+}
+
+// Enable and open the panel for one tab. Returns true when it opened.
+async function openPanelForTab(tabId, origin) {
+  if (tabId == null) return false;
+  try {
+    await chrome.sidePanel.setOptions({ tabId, enabled: true, path: PANEL_PATH });
+  } catch (e) {
+    console.warn('sidePanel.setOptions failed:', e?.message || e);
+    return false;
+  }
+  panelTabs.set(tabId, { origin: origin || null, live: true });
+  savePanelTabs();
+  try {
+    await chrome.sidePanel.open({ tabId });
+    return true;
+  } catch (e) {
+    console.warn('sidePanel.open failed:', e?.message || e);
+    return false;
+  }
+}
+
+// Follow the initialized tab across navigations: leaving the origin takes
+// the panel away (the new page never opted in), coming back puts it back.
+function watchPanelTabs() {
+  if (!chrome.tabs || !chrome.tabs.onUpdated) return;
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    const entry = panelTabs.get(tabId);
+    if (!entry || entry.origin == null) return;
+    const url = changeInfo.url != null ? changeInfo.url : tab && tab.url;
+    const next = urlOrigin(url || '');
+    if (!next) return;
+    if (next === entry.origin) {
+      if (!entry.live) {
+        entry.live = true;
+        chrome.sidePanel.setOptions({ tabId, enabled: true, path: PANEL_PATH }).catch?.(() => {});
+        savePanelTabs();
+      }
+      return;
+    }
+    if (entry.live) {
+      entry.live = false;
+      chrome.sidePanel.setOptions({ tabId, enabled: false }).catch?.(() => {});
+      savePanelTabs();
+    }
+  });
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    if (panelTabs.delete(tabId)) savePanelTabs();
+  });
+  chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+    if (panelTabs.delete(removedTabId)) savePanelTabs();
+  });
+}
+
+if (chrome.sidePanel && chrome.sidePanel.setOptions) {
+  initSidePanel();
+  chrome.runtime.onInstalled.addListener(() => initSidePanel());
+  chrome.runtime.onStartup.addListener(() => initSidePanel());
+}
+
+// The toolbar icon activates the panel on the tab it was clicked on; the
+// click itself is the user gesture sidePanel.open() requires. No global
+// openPanelOnActionClick: that would pin the panel to every tab.
+if (chrome.action && chrome.action.onClicked) {
+  chrome.action.onClicked.addListener((tab) => {
+    openPanelForTab(tab && tab.id, tab && urlOrigin(tab.url));
+  });
+}
+
+watchPanelTabs();
 
 // ---------- dApp sign-request relay ----------
 // A dApp page (content script inject.js) posts {kind:'datu-rpc', action:'sign'}
@@ -58,22 +186,15 @@ function broadcast(state) {
   });
 }
 
-// A dApp request needs the user's attention: slide the side panel open.
-// Chrome only permits sidePanel.open() from a service worker in response to an
-// extension event (Chrome 116+). If every avenue fails we log the real error
-// and flash a tab-scoped badge so the failure is diagnosable, not silent.
+// A dApp request needs the user's attention: slide the side panel open for
+// that tab only (the panel then follows this tab's origin). Chrome only
+// permits sidePanel.open() in response to a user gesture (an action click,
+// or an interaction on the dApp page that led to this request). If the
+// per-tab open is refused we retry by window before flashing a tab-scoped
+// badge so the failure is diagnosable, not silent.
 async function tryOpenSidePanel(tab, queueLength) {
   if (!chrome.sidePanel || !chrome.sidePanel.open) return;
-  const tabId = tab.id;
-  try {
-    if (chrome.sidePanel.setOptions) {
-      await chrome.sidePanel.setOptions({ tabId, enabled: true, path: 'panel.html' });
-    }
-    await chrome.sidePanel.open({ tabId });
-    return;
-  } catch (e) {
-    console.warn('sidePanel.open failed (tabId):', e?.message || e);
-  }
+  if (tab.id != null && (await openPanelForTab(tab.id, urlOrigin(tab.url)))) return;
   if (tab.windowId != null) {
     try {
       await chrome.sidePanel.open({ windowId: tab.windowId });
@@ -82,7 +203,7 @@ async function tryOpenSidePanel(tab, queueLength) {
       console.warn('sidePanel.open failed (windowId):', e?.message || e);
     }
   }
-  await setBadge(queueLength, tabId);
+  await setBadge(queueLength, tab.id);
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -135,7 +256,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             const first = Object.entries(s.tokens || {})[0] || [];
             if (!first[0]) throw new Error('no Signet paired - open the panel and pair first');
             const res = await fetch(`${first[0].replace(/\/+$/, '')}/v1/wallet/identities`, {
-              headers: { Authorization: `Bearer ${first[1]}` },
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${first[1]}`,
+                'Content-Type': 'application/json',
+              },
+              body: '{}',
             });
             const json = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
             if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
@@ -143,7 +269,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             return;
           }
           const res = await fetch(`${url}/v1/wallet/identities`, {
-            headers: { Authorization: `Bearer ${token}` },
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: '{}',
           });
           const json = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
           if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
