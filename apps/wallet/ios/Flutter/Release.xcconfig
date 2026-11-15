@@ -1,1 +1,9 @@
 #include "Generated.xcconfig"
+
+// DATU Signet wallet core (crates/wallet-ffi, static lib built with:
+//   cargo build -p datu-wallet-ffi --release --target <ios-triple>)
+// force_load keeps every symbol so DynamicLibrary.process() can resolve
+// datu_wallet_open / datu_wallet_request. Device and simulator slices must
+// stay separate: both are arm64, lipo cannot merge them.
+OTHER_LDFLAGS[sdk=iphoneos*] = $(inherited) -force_load $(SRCROOT)/Frameworks/datu-wallet-ios-device.a
+OTHER_LDFLAGS[sdk=iphonesimulator*] = $(inherited) -force_load $(SRCROOT)/Frameworks/datu-wallet-ios-sim.a

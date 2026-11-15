@@ -49,29 +49,45 @@ serves as before. Home shows a **native core** chip when signing is in-process.
 
 ### Building the core
 
+One script builds every slice and places the artifacts where the app
+expects them (re-run it after any change to crates the wallet uses):
+
 ```bash
-# host (macOS demo / tests)
-cargo build -p datu-wallet-ffi          # -> target/debug/libdatu_wallet_ffi.dylib
-
-# iOS staticlib (blake3 NEON asm needs deployment target >= 17.5)
-rustup target add aarch64-apple-ios
-IPHONEOS_DEPLOYMENT_TARGET=17.5 cargo build -p datu-wallet-ffi --target aarch64-apple-ios
-# -> target/aarch64-apple-ios/debug/libdatu_wallet_ffi.a
-# Xcode: add the .a to the Runner target, 'Headers' none, add -ldatu... nothing
-# else needed; Dart resolves symbols via DynamicLibrary.process()
-
-# Android .so (NDK at ~/Library/Android/sdk/ndk/28.2.13676358)
-TC=$HOME/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin
-CC_aarch64_linux_android=$TC/aarch64-linux-android24-clang \
-AR_aarch64_linux_android=$TC/llvm-ar \
-CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TC/aarch64-linux-android24-clang \
-  cargo build -p datu-wallet-ffi --target aarch64-linux-android
-# -> target/aarch64-linux-android/debug/libdatu_wallet_ffi.so
-# Gradle: drop it into android/app/src/main/jniLibs/arm64-v8a/
+apps/wallet/tool/build_mobile_core.sh
+# iOS      -> apps/wallet/ios/Frameworks/datu-wallet-ios-device.a
+#             apps/wallet/ios/Frameworks/datu-wallet-ios-sim.a (x86_64 + arm64 sim)
+# Android  -> apps/wallet/android/app/src/main/jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/
 ```
 
+What it does, so you can do it by hand if needed:
+
+- iOS: `cargo build -p datu-wallet-ffi --release --target
+  aarch64-apple-ios` (device) and `aarch64-apple-ios-sim` +
+  `x86_64-apple-ios` (simulator, merged with `lipo`). Both slices are arm64,
+  so device and simulator stay as separate `.a` files.
+- Linking is already wired in `ios/Flutter/Debug.xcconfig` and
+  `Release.xcconfig` with `OTHER_LDFLAGS[sdk=iphoneos*]` /
+  `[sdk=iphonesimulator*]` `-force_load`: every symbol is kept, so
+  `DynamicLibrary.process()` resolves `datu_wallet_open` and friends. The
+  Runner deployment target is 15.0 (Xcode 26+ refuses lower simulator
+  targets).
+- Android: builds each ABI with the NDK clang wrappers as `CC_<target>` +
+  `AR_<target>` + `CARGO_TARGET_*_LINKER` (blake3 compiles NEON assembly,
+  so the C toolchain must be set; `cargo ndk` does the same thing):
+  `aarch64-linux-android` (API 24), `armv7-linux-androideabi`,
+  `x86_64-linux-android`, copied into `jniLibs/<abi>/`.
+
+Host (macOS demo / tests): `cargo build -p datu-wallet-ffi` ->
+`target/debug/libdatu_wallet_ffi.dylib`.
+
 The Dart side is exercised end-to-end by `test/native_bridge_test.dart`
-whenever the host dylib exists (`flutter test`).
+(host dylib, `flutter test`) and by `integration_test/native_vault_test.dart`
+on real devices: it creates an identity, signs an entry and verifies it with
+the core compiled into the app:
+
+```bash
+flutter test integration_test -d <ios-simulator|android-device-id>
+```
 
 ### End-to-end native demo on macOS
 
@@ -103,12 +119,29 @@ If no bundled binary is found the app falls back to `DATU_BIN` or `datu` on
 `PATH`, and the error screen accepts a manual bridge URL + pairing token (handy
 for the demo bridges on 7482/7483).
 
-## Mobile (phase 2 - implemented, integration pending)
+## Mobile (standalone, no desktop)
 
-The native core exists (`crates/wallet-ffi`, see above) and the Dart side is
-done (`NativeWalletBridge`); what remains is wiring the artifacts into the
-platform projects: add the `.a` to the Runner target in Xcode (iOS) and the
-`.so` into `jniLibs/arm64-v8a/` (Android), then `flutter run -d <device>`.
+Implemented and validated on-device (iOS Simulator + Android emulator,
+integration test green on both): the app compiles the Rust wallet core into
+the binary, so it creates identities, signs, seals and verifies with **no
+desktop, no bridge process and no network**. Builds:
+
+```bash
+apps/wallet/tool/build_mobile_core.sh    # once, after core changes
+cd apps/wallet
+flutter build apk --debug                # -> build/app/outputs/flutter-apk/
+flutter build ios --simulator --debug    # no signing team needed
+flutter run -d <device>                  # on a phone or emulator
+```
+
+Notes: `adb install` needs a device with free `/data` (a full emulator leaves
+386 MB and fails with "not enough space"); the iOS integration test runs the
+crypto in `Runner.debug.dylib` (Xcode 26+ debug-dylib layout), which is where
+the wallet symbols live. Display name on both platforms is DATU Signet.
+
+The dApp channel (phones have no browser extension) is the next milestone:
+in-app webview provider plus universal-link signing, wire-compatible with the
+extension's action grammar and `datu-provider-v1` proof.
 
 ## Screens
 
