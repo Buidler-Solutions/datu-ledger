@@ -1,0 +1,55 @@
+name: publish-react
+
+# Publishes @greenarmor/datu-react when its version changes on main.
+# Requires the repository secret NPM_TOKEN: an npm Automation token with
+# publish rights on the @greenarmor scope (it bypasses the interactive 2FA
+# prompt, which is why a session login cannot be used here).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "sdk/datu-react/**"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: tests
+        working-directory: sdk/datu-react
+        run: |
+          npm install --no-fund --no-audit
+          node --test test/*.test.mjs
+      - name: already published?
+        id: check
+        working-directory: sdk/datu-react
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          if npm view "@greenarmor/datu-react@${version}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "@greenarmor/datu-react@${version} is already on npm - nothing to do"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: publish
+        if: steps.check.outputs.published == 'false'
+        working-directory: sdk/datu-react
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+      - name: summary
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./sdk/datu-react/package.json').version")"
+          echo "### npm: @greenarmor/datu-react@${version}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Install: \`npm install @greenarmor/datu-react\`" >> "$GITHUB_STEP_SUMMARY"
