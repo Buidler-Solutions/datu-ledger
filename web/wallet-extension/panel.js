@@ -146,13 +146,25 @@ const PROBE_PORTS = ['7488', '7588', '7482', '7483', '7480', '7481', '7484', '74
 // without SignetAuth should never be the one the panel pairs with when a
 // current one is also up.
 const bridgeFeatures = {}; // url -> Set(features)
+// Browser calls to the bridge are POSTs: Chromium attaches the extension's
+// true chrome-extension:// Origin to every POST (and forbids forging it),
+// while GETs from extensions carry no Origin at all. The pairing token is
+// bound to that Origin, so reads must go over POST too.
+async function bridgePost(url, path, token, timeoutMs = 1500) {
+  return fetch(`${url}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: '{}',
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+}
 async function probeFeatures(url, token) {
   if (bridgeFeatures[url]) return bridgeFeatures[url];
   try {
-    const res = await fetch(`${url}/v1/wallet/capabilities`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      signal: AbortSignal.timeout(1500),
-    });
+    const res = await bridgePost(url, '/v1/wallet/capabilities', token);
     if (!res.ok) return new Set();
     const json = await res.json();
     const set = new Set(Array.isArray(json.features) ? json.features : []);
@@ -170,10 +182,7 @@ async function autoPair() {
     let token = tokens[url];
     if (token) {
       const features = await probeFeatures(url, token);
-      const reachable = await fetch(`${url}/v1/wallet/identities`, {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(1500),
-      })
+      const reachable = await bridgePost(url, '/v1/wallet/identities', token)
         .then((r) => r.ok)
         .catch(() => false);
       if (reachable) {
@@ -184,7 +193,7 @@ async function autoPair() {
       await sessionSet({ tokens });
     }
     try {
-      const res = await fetch(`${url}/v1/pair`, { signal: AbortSignal.timeout(1500) });
+      const res = await bridgePost(url, '/v1/pair');
       if (!res.ok) continue;
       const data = await res.json();
       if (!data || !data.token) continue;
@@ -289,7 +298,7 @@ async function addWallet() {
     let url = $('walletUrl').value.trim().replace(/\/+$/, '');
     const token = $('token').value.trim();
     if (!url) throw new Error('enter the bridge URL');
-    if (!token) throw new Error('paste the pairing token from wallet/bridge.token');
+    if (!token) throw new Error('paste the pairing token (legacy Signets only; current ones auto-pair per extension)');
     if (!/^https?:\/\//.test(url)) url = `http://${url}`;
     try {
       await pairWallet(url, token, label);
@@ -298,7 +307,7 @@ async function addWallet() {
       if (!unreachable) throw e;
       const fallback = 'http://127.0.0.1:7488';
       if (url === fallback) throw new Error(`cannot reach ${url} - is DATU Signet running?`);
-      const res = await fetch(`${fallback}/v1/pair`).catch(() => null);
+      const res = await bridgePost(fallback, '/v1/pair', null, 3000).catch(() => null);
       if (!res || !res.ok) throw new Error(`cannot reach ${url} - is DATU Signet running?`);
       wallets = wallets.filter((w) => w.url !== url);
       delete tokens[url];
@@ -1262,7 +1271,7 @@ async function processRequest(req, passphrase) {
   const token = tokens[url];
   const isLogin = payload.path === '/v1/wallet/auth-assert';
   try {
-    if (!token) throw new Error('this Signet is not paired - paste its bridge token in Settings');
+    if (!token) throw new Error('this Signet is not paired - open Settings and connect, or re-pair from the panel');
     if (passphrase) {
       body.passphrase = passphrase;
       passCache[body.name] = passphrase;

@@ -934,16 +934,22 @@ that lies or tampers is caught locally with
 `400 signature verification failed`.
 
 ```sh
-datu wallet serve --addr 127.0.0.1:7482      # prints a pairing token; keys never leave this process
+datu wallet serve --addr 127.0.0.1:7482      # keys never leave this process
 cd web/registrar && npm install && npm run dev
 # chrome://extensions → Developer mode → "Load unpacked" → web/wallet-extension
 #   then click the toolbar icon: the wallet slides in as a side panel
-#   Settings → paste the pairing token (wallet/bridge.token) → Pair
+#   the extension pairs itself automatically (Settings is only a legacy fallback)
 ```
 
 The bridge is **paired**, not open: every `/v1` call needs
-`Authorization: Bearer <token>` (256-bit, generated once into
-`wallet/bridge.token`, mode 0600, compared in constant time), browser
+`Authorization: Bearer <token>` (256-bit, compared in constant time), and
+browser extensions each get their **own token from `POST /v1/pair`, bound to
+the exact `chrome-extension://<id>` Origin that asked for it** (Chromium
+attaches that true Origin to every extension POST and forbids forging it,
+while extension GETs carry no Origin at all, hence POST), so a token that
+leaks to or is pasted into a different extension is refused. Pair records
+live in `wallet/bridge.pairs.json` (0600); the shared `wallet/bridge.token`
+still works for local tools that send no browser Origin. Browser
 origins are restricted to extension pages plus explicit `--allow-origin`
 values, and five wrong passphrases lock that identity for 15 s (429). The
 extension (`v1.0.0`) ships icons, a strict CSP, two-step

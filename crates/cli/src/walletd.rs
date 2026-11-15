@@ -7,14 +7,22 @@
 //! signing and sealing as the CLI.
 //!
 //! Hardening:
-//! - **Pairing token**: a 256-bit token is generated once at
-//!   `<data-dir>/wallet/bridge.token` (0600). Every `/v1` call must send
-//!   `Authorization: Bearer <token>`; the token is compared in constant time.
-//!   Without it, any local process or web page could ask the bridge to sign.
+//! - **Pairing tokens**: browser extensions each get their own 256-bit
+//!   token from `POST /v1/pair`, bound to the exact `chrome-extension://<id>`
+//!   Origin that asked for it. In Chromium, POSTs from an extension context
+//!   always carry that true Origin (Chrome attaches it and forbids forging,
+//!   even for no-cors requests) while GETs carry none, hence pairing and the
+//!   extension's reads are POST. A token minted for one extension is refused
+//!   for every other origin, so a phished or pasted token cannot serve an
+//!   impostor. Pair records live at `<data-dir>/wallet/bridge.pairs.json`
+//!   (0600). The legacy shared token at `wallet/bridge.token` still
+//!   authorizes callers that present no Origin header (local tools on the
+//!   same user, which can read that file anyway) but is refused for every
+//!   browser origin. Tokens are compared in constant time.
 //! - **Origin allowlist**: browser requests must come from an extension page
 //!   (`chrome-extension://…`) or an explicitly allowed dev origin
 //!   (`--allow-origin http://127.0.0.1:5173`). Non-browser clients (no
-//!   Origin header) still need the token.
+//!   Origin header) still need a token.
 //! - **Passphrase throttling**: 5 wrong passphrases lock that identity for
 //!   15 seconds (429), so a hostile page cannot brute-force even with a token.
 //! - **Loopback by default**: pass `--addr 127.0.0.1:7482`. Binding a
@@ -24,9 +32,10 @@
 //!
 //! Routes:
 //!   GET  /                      bridge doc page (no token)
-//!   GET  /v1/pair               token handed to browser wallet extensions only
-//!                               (Origin must be chrome-extension://) - lets the
-//!                               extension pair itself; web pages are refused
+//!   POST /v1/pair               token handed to browser wallet extensions only
+//!                               (their POSTs carry the chrome-extension://
+//!   Origin; GET carries none and is refused) - lets the extension pair
+//!                               itself; web pages are refused
 //!   GET  /v1/wallet/identities  public identities (ed + seal keys)
 //!   POST /v1/wallet/create      {name, passphrase}
 //!   POST /v1/wallet/party-sign  {name, passphrase, role, document, kind?}
@@ -60,6 +69,7 @@ pub const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PASSPHRASE_FAILURES: u32 = 5;
 const LOCKOUT_MS: u64 = 15_000;
 const TOKEN_FILE: &str = "wallet/bridge.token";
+const PAIRS_FILE: &str = "wallet/bridge.pairs.json";
 /// SignetAuth session grants: minted after a passphrase-authenticated
 /// login, valid for auth-assert only, sliding window.
 pub const GRANT_TTL_MS: u64 = 15 * 60_000;
@@ -127,6 +137,7 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
     let wallet = Wallet::open(data_dir);
     let identities = wallet.list().unwrap_or_default();
     let token = load_or_create_token(data_dir)?;
+    let book = Arc::new(PairBook::load(data_dir, token.clone())?);
     let mut origins = allow_origins;
     origins.push("http://127.0.0.1:5173".into());
     origins.push("http://localhost:5173".into());
@@ -144,10 +155,14 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
             id.seal_public
         );
     }
-    println!("  pairing token: {}", data_dir.join(TOKEN_FILE).display());
+    println!("  pairing: extensions pair themselves via /v1/pair");
+    println!("    each extension gets its own token, bound to its chrome-extension:// id");
+    println!("    registry: {}", data_dir.join(PAIRS_FILE).display());
+    println!(
+        "  local-tool token (no browser Origin): {}",
+        data_dir.join(TOKEN_FILE).display()
+    );
     println!("    {token}");
-    println!("  the browser wallet extension can pair itself - no paste needed");
-    println!("  (manual fallback: paste the token into the panel's Settings)");
     println!(
         "  allowed browser origins: chrome-extension://… , {}",
         origins.join(" , ")
@@ -160,7 +175,6 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
     println!("ctrl-c to stop");
 
     let dir = data_dir.to_path_buf();
-    let token = Arc::new(token);
     let origins = Arc::new(origins);
     let grants = Arc::new(Grants::default());
     for stream in listener.incoming() {
@@ -169,11 +183,11 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
             Err(_) => continue,
         };
         let dir = dir.clone();
-        let token = Arc::clone(&token);
+        let book = Arc::clone(&book);
         let origins = Arc::clone(&origins);
         let grants = Arc::clone(&grants);
         std::thread::spawn(move || {
-            let _ = handle(stream, &dir, &token, &origins, &grants);
+            let _ = handle(stream, &dir, &book, &origins, &grants);
         });
     }
     Ok(())
@@ -182,12 +196,12 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
 fn handle(
     stream: TcpStream,
     data_dir: &Path,
-    token: &str,
+    book: &PairBook,
     origins: &[String],
     grants: &Grants,
 ) -> Result<(), String> {
     let mut stream = stream;
-    if let Err(e) = handle_inner(&mut stream, data_dir, token, origins, grants) {
+    if let Err(e) = handle_inner(&mut stream, data_dir, book, origins, grants) {
         if let Some(rest) = e.strip_prefix("TOO_MANY_ATTEMPTS:") {
             let _ = respond_json(
                 &mut stream,
@@ -208,7 +222,7 @@ fn handle(
 fn handle_inner(
     stream: &mut TcpStream,
     data_dir: &Path,
-    token: &str,
+    book: &PairBook,
     origins: &[String],
     grants: &Grants,
 ) -> Result<(), String> {
@@ -227,33 +241,48 @@ fn handle_inner(
     }
 
     // Self-pairing for browser wallet extensions: a human never copies the
-    // token. Only an extension page carries a chrome-extension:// Origin - web
-    // pages cannot forge it - and the extension only gains the right to *ask*
-    // for signatures (still passphrase-gated) plus read access.
-    if route == "/v1/pair" && method == "GET" {
-        let origin = headers.get("origin").cloned().unwrap_or_default();
-        if origin.starts_with("chrome-extension://") {
-            println!("[pair] browser wallet extension paired: {origin}");
+    // token. In Chromium, every POST from an extension context carries its
+    // true chrome-extension:// Origin (Chrome attaches it and forbids
+    // forging it, even for no-cors requests), while GETs from extensions
+    // carry no Origin at all - so pairing is POST-only. The minted token is
+    // bound to this exact origin, so it is useless to any other extension
+    // even if it leaks. The extension only gains the right to *ask* for
+    // signatures (still passphrase-gated) plus read access.
+    if route == "/v1/pair" {
+        if method == "POST" {
+            let origin = headers.get("origin").cloned().unwrap_or_default();
+            if origin.starts_with("chrome-extension://") {
+                let pair_token = book.pair(&origin)?;
+                println!("[pair] browser wallet extension paired: {origin}");
+                return respond_json(
+                    stream,
+                    "200 OK",
+                    &serde_json::json!({
+                        "ok": true,
+                        "service": "datu-wallet-bridge",
+                        "origin": origin,
+                        "token": pair_token,
+                    }),
+                );
+            }
             return respond_json(
                 stream,
-                "200 OK",
+                "403 Forbidden",
                 &serde_json::json!({
-                    "ok": true,
-                    "service": "datu-wallet-bridge",
-                    "token": token,
+                    "error": "auto-pairing is only offered to browser wallet extensions (POST from a chrome-extension:// origin); web pages must be paired explicitly",
                 }),
             );
         }
         return respond_json(
             stream,
-            "403 Forbidden",
+            "405 Method Not Allowed",
             &serde_json::json!({
-                "error": "auto-pairing is only offered to browser wallet extensions (chrome-extension:// origin); web pages must be paired explicitly",
+                "error": "pairing requires POST: browser GETs carry no chrome-extension:// Origin header",
             }),
         );
     }
 
-    if let Err((status, message)) = check_access(&headers, token, origins) {
+    if let Err((status, message)) = check_access(&headers, book, origins) {
         return respond_json(stream, status, &serde_json::json!({ "error": message }));
     }
 
@@ -286,8 +315,11 @@ fn handle_inner(
         }
         // Capability probe: lets a client (the extension, the SDK) tell this
         // service apart from an older one that lacks SignetAuth, and pick the
-        // newer service when several are running on localhost.
-        ("GET", "/v1/wallet/capabilities") => respond_json(
+        // newer service when several are running on localhost. POST is the
+        // canonical form for extension callers (their POSTs carry the
+        // chrome-extension:// Origin the pairing token is bound to); GET
+        // stays for local tools.
+        ("GET", "/v1/wallet/capabilities") | ("POST", "/v1/wallet/capabilities") => respond_json(
             stream,
             "200 OK",
             &serde_json::json!({
@@ -300,10 +332,11 @@ fn handle_inner(
                     "grants",
                     "origin-pinning",
                     "webauthn",
+                    "origin-bound-pairing",
                 ],
             }),
         ),
-        ("GET", "/v1/wallet/identities") => {
+        ("GET", "/v1/wallet/identities") | ("POST", "/v1/wallet/identities") => {
             let identities = wallet.list().map_err(|e| e.to_string())?;
             let items: Vec<serde_json::Value> = identities
                 .iter()
@@ -1017,9 +1050,116 @@ fn const_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+struct PairEntry {
+    origin: String,
+    token: String,
+    created_at_ms: u64,
+}
+
+/// The pairing registry. Browser extensions each get their own token,
+/// bound to the `chrome-extension://<id>` origin that asked for it, so a
+/// token that leaks to (or is pasted into) a different extension is
+/// refused. The legacy shared token remains valid only for callers that
+/// send no Origin header: local tools running as the same user, which can
+/// read the token file itself, so binding adds nothing there.
+struct PairBook {
+    data_dir: std::path::PathBuf,
+    legacy: String,
+    pairs: Mutex<Vec<PairEntry>>,
+}
+
+impl PairBook {
+    fn load(data_dir: &Path, legacy: String) -> Result<Self, String> {
+        let mut pairs = Vec::new();
+        let path = data_dir.join(PAIRS_FILE);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(list) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(items) = list["pairs"].as_array() {
+                    for item in items {
+                        if let (Some(origin), Some(token)) =
+                            (item["origin"].as_str(), item["token"].as_str())
+                        {
+                            pairs.push(PairEntry {
+                                origin: origin.to_string(),
+                                token: token.to_string(),
+                                created_at_ms: item["created_at_ms"].as_u64().unwrap_or(0),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            data_dir: data_dir.to_path_buf(),
+            legacy,
+            pairs: Mutex::new(pairs),
+        })
+    }
+
+    fn save(&self, pairs: &[PairEntry]) -> Result<(), String> {
+        let path = self.data_dir.join(PAIRS_FILE);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let entries: Vec<_> = pairs
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "origin": p.origin,
+                    "token": p.token,
+                    "created_at_ms": p.created_at_ms,
+                })
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&serde_json::json!({
+            "version": 1,
+            "pairs": entries,
+        }))
+        .map_err(|e| e.to_string())?;
+        std::fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
+    /// The token for `origin`, minting and persisting one on first sight.
+    /// Re-pairing the same extension is idempotent and keeps its token.
+    fn pair(&self, origin: &str) -> Result<String, String> {
+        let mut pairs = self
+            .pairs
+            .lock()
+            .map_err(|_| "pair registry lock poisoned".to_string())?;
+        if let Some(found) = pairs.iter().find(|p| p.origin == origin) {
+            return Ok(found.token.clone());
+        }
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let entry = PairEntry {
+            origin: origin.to_string(),
+            token: hex::encode(bytes),
+            created_at_ms: now_ms(),
+        };
+        let token = entry.token.clone();
+        pairs.push(entry);
+        self.save(&pairs)?;
+        Ok(token)
+    }
+}
+
+enum TokenDecision {
+    Allow,
+    ForeignPair,
+    LegacyFromBrowser,
+    Unknown,
+}
+
 fn check_access(
     headers: &HashMap<String, String>,
-    token: &str,
+    book: &PairBook,
     origins: &[String],
 ) -> Result<(), (&'static str, String)> {
     if let Some(origin) = headers.get("origin") {
@@ -1034,19 +1174,68 @@ fn check_access(
             ));
         }
     }
-    let authed = headers
+    let Some(presented) = headers
         .get("authorization")
         .and_then(|h| h.strip_prefix("Bearer "))
-        .map(|presented| const_eq(presented.trim().as_bytes(), token.as_bytes()))
-        .unwrap_or(false);
-    if !authed {
+        .map(|t| t.trim().to_string())
+    else {
         return Err((
             "401 Unauthorized",
-            "missing or wrong pairing token - paste the token printed by `datu wallet serve` (wallet/bridge.token)"
+            "missing pairing token - open the DATU Signet panel so the extension can pair itself"
                 .into(),
         ));
+    };
+    let origin = headers.get("origin");
+    let decision = {
+        let pairs = book.pairs.lock().map_err(|_| {
+            (
+                "500 Internal Server Error",
+                "pair registry lock poisoned".to_string(),
+            )
+        })?;
+        let mut decision = TokenDecision::Unknown;
+        for p in pairs.iter() {
+            if const_eq(presented.as_bytes(), p.token.as_bytes()) {
+                decision = match origin {
+                    // The extension this token was minted for.
+                    Some(o) if o == &p.origin => TokenDecision::Allow,
+                    // A different extension presenting it: an impostor or a
+                    // pasted token that belongs elsewhere. Refuse, loudly.
+                    Some(_) => TokenDecision::ForeignPair,
+                    // No Origin: a local tool on the same user, which could
+                    // read the token files itself anyway.
+                    None => TokenDecision::Allow,
+                };
+                break;
+            }
+        }
+        if matches!(decision, TokenDecision::Unknown)
+            && const_eq(presented.as_bytes(), book.legacy.as_bytes())
+        {
+            decision = match origin {
+                // The legacy shared token no longer authorizes any browser
+                // client: extensions must hold their own per-origin token.
+                Some(_) => TokenDecision::LegacyFromBrowser,
+                None => TokenDecision::Allow,
+            };
+        }
+        decision
+    };
+    match decision {
+        TokenDecision::Allow => Ok(()),
+        TokenDecision::ForeignPair => Err((
+            "403 Forbidden",
+            "this pairing token belongs to a different browser extension - open the DATU Signet panel to pair this one".into(),
+        )),
+        TokenDecision::LegacyFromBrowser => Err((
+            "401 Unauthorized",
+            "the shared wallet/bridge.token is not accepted from browser extensions (tokens are per-extension now) - open the DATU Signet panel to pair".into(),
+        )),
+        TokenDecision::Unknown => Err((
+            "401 Unauthorized",
+            "missing or wrong pairing token - open the DATU Signet panel so the extension can pair itself".into(),
+        )),
     }
-    Ok(())
 }
 
 // ---- passphrase throttling ----
@@ -1245,14 +1434,28 @@ mod tests {
         token: Option<&str>,
         body: &str,
     ) -> (String, String) {
+        http_origin(port, method, path, token, None, body)
+    }
+
+    fn http_origin(
+        port: u16,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        origin: Option<&str>,
+        body: &str,
+    ) -> (String, String) {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let auth = token
             .map(|t| format!("Authorization: Bearer {t}\r\n"))
             .unwrap_or_default();
+        let origin = origin
+            .map(|o| format!("Origin: {o}\r\n"))
+            .unwrap_or_default();
         stream
             .write_all(
                 format!(
-                    "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}{origin}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 )
                 .as_bytes(),
@@ -1265,6 +1468,188 @@ mod tests {
         let rest = parts.next().unwrap_or("").to_string();
         let body = rest.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
         (status, body)
+    }
+
+    fn spawn_bridge(data: &std::path::Path) -> u16 {
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let serve_dir = data.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = serve(&serve_dir, &format!("127.0.0.1:{port}"), Vec::new());
+        });
+        port
+    }
+
+    fn wait_for_token(data: &std::path::Path) -> String {
+        let token_path = data.join(TOKEN_FILE);
+        let started = Instant::now();
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&token_path) {
+                let token = text.trim().to_string();
+                if token.len() >= 32 {
+                    return token;
+                }
+            }
+            if started.elapsed() > Duration::from_secs(10) {
+                panic!("bridge did not come up");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Pairing tokens are per-extension: minted over POST (whose Origin
+    /// Chrome guarantees for extension callers) for one chrome-extension://
+    /// origin, refused for any other, and the legacy shared token no longer
+    /// authorizes browser origins (local tools without an Origin still pass,
+    /// since they can read the token file itself).
+    #[test]
+    fn pair_tokens_are_bound_to_the_extension_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let port = spawn_bridge(&data);
+        let legacy = wait_for_token(&data);
+
+        // Pairing needs an extension origin; web pages are refused.
+        let (status, _) = http_origin(
+            port,
+            "POST",
+            "/v1/pair",
+            None,
+            Some("http://localhost:5173"),
+            "{}",
+        );
+        assert!(status.contains("403"), "web pages cannot pair: {status}");
+
+        // Browser GETs carry no Origin at all, so pairing is POST-only.
+        let (status, _) = http_origin(
+            port,
+            "GET",
+            "/v1/pair",
+            None,
+            Some("chrome-extension://genuine"),
+            "",
+        );
+        assert!(
+            status.contains("405"),
+            "GET pairing must be refused: {status}"
+        );
+
+        // The genuine extension pairs and gets its own token.
+        let (status, body) = http_origin(
+            port,
+            "POST",
+            "/v1/pair",
+            None,
+            Some("chrome-extension://genuine"),
+            "{}",
+        );
+        assert!(status.contains("200"), "{status} {body}");
+        let pair1: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(pair1["origin"], "chrome-extension://genuine");
+        let genuine = pair1["token"].as_str().unwrap().to_string();
+        assert_ne!(genuine, legacy);
+
+        // Re-pairing the same extension is idempotent: same token back.
+        let (status, body) = http_origin(
+            port,
+            "POST",
+            "/v1/pair",
+            None,
+            Some("chrome-extension://genuine"),
+            "{}",
+        );
+        assert!(status.contains("200"), "{status} {body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["token"],
+            genuine.as_str()
+        );
+
+        // The token works for its own origin (POST carries the Origin)...
+        let (status, body) = http_origin(
+            port,
+            "POST",
+            "/v1/wallet/identities",
+            Some(&genuine),
+            Some("chrome-extension://genuine"),
+            "",
+        );
+        assert!(status.contains("200"), "{status} {body}");
+
+        // ...and for a local tool without an Origin (same user, file-readable)...
+        let (status, _) = http(port, "GET", "/v1/wallet/identities", Some(&genuine), "");
+        assert!(status.contains("200"));
+
+        // ...but NOT for a different extension presenting it: an impostor
+        // holding a phished or pasted token is refused.
+        let (status, body) = http_origin(
+            port,
+            "POST",
+            "/v1/wallet/identities",
+            Some(&genuine),
+            Some("chrome-extension://imposter"),
+            "",
+        );
+        assert!(
+            status.contains("403"),
+            "an imposter extension must be refused: {status} {body}"
+        );
+
+        // A second extension pairs separately and works for its own origin.
+        let (status, body) = http_origin(
+            port,
+            "POST",
+            "/v1/pair",
+            None,
+            Some("chrome-extension://second"),
+            "{}",
+        );
+        assert!(status.contains("200"), "{status} {body}");
+        let second = serde_json::from_str::<serde_json::Value>(&body).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(second, genuine);
+        let (status, _) = http_origin(
+            port,
+            "POST",
+            "/v1/wallet/identities",
+            Some(&second),
+            Some("chrome-extension://second"),
+            "",
+        );
+        assert!(status.contains("200"));
+
+        // The legacy shared token is retired for browser origins...
+        let (status, body) = http_origin(
+            port,
+            "POST",
+            "/v1/wallet/identities",
+            Some(&legacy),
+            Some("chrome-extension://genuine"),
+            "",
+        );
+        assert!(
+            status.contains("401"),
+            "legacy token must not serve browser clients: {status} {body}"
+        );
+        // ...while local tools (no Origin) keep working, back-compatibly.
+        let (status, _) = http(port, "GET", "/v1/wallet/identities", Some(&legacy), "");
+        assert!(status.contains("200"));
+
+        // The registry is persisted so a bridge restart keeps the bindings.
+        let saved = std::fs::read_to_string(data.join(PAIRS_FILE)).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        let origins: Vec<&str> = saved["pairs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["origin"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            origins,
+            vec!["chrome-extension://genuine", "chrome-extension://second"]
+        );
     }
 
     /// Deferred delivery over the bridge HTTP surface, end to end: token
