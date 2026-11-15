@@ -44,7 +44,12 @@ jobs:
         working-directory: sdk/datu-client
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret is not set, so npm publish cannot authenticate. Fix (one time): create an npm Automation token at npmjs.com (Access Tokens, bypasses 2FA), then run: gh secret set NPM_TOKEN -R greenarmor/datu-ledger"
+            exit 1
+          fi
+          npm publish --access public
       - name: summary
         run: |
           set -euo pipefail
