@@ -126,7 +126,37 @@ Formats (implemented in `datu_core::auth::webauthn`):
 An RP cannot distinguish this mode from a platform passkey except by
 attestation absence, which is also normal for synced passkeys.
 
-## 6. Test vectors
+## 6. Provider genuineness handshake (datu-provider-v1)
+
+Before asking a human for anything, a dApp can prove the Signet provider is
+genuine. The dApp sends a fresh nonce (32..=128 hex chars) through the
+extension's `prove` bridge action; the extension relays it as
+
+```
+POST /v1/provider-proof
+Authorization: Bearer <pairing token>
+{"nonce": "<hex>"}
+```
+
+and only a caller holding a valid pairing token gets an answer: the bridge's
+own Ed25519 key (`wallet/bridge.key`, distinct from every identity key)
+signs
+
+```
+datu-provider-v1\n<nonce_hex>\n<origin>\n<version>\n<expires_at_ms>\n
+```
+
+where `<origin>` is the requesting extension's chrome-extension:// origin,
+`<version>` the bridge version, and expiry ~30 s. The proof proves pairing,
+not custody (only `datu-auth-v1` assertions prove a human holds keys), needs
+no passphrase, and is rate-limited. `proveGenuine()` in
+`@greenarmor/datu-client` verifies the signature locally and TOFU-pins the
+bridge key per bridge URL. An impostor extension holds no pairing token, so
+it can never obtain a proof: a dApp must treat an answered-but-invalid proof
+as a definite impostor (never prompt for a passphrase there), while no answer
+at all means the bridge is down, not malicious.
+
+## 7. Test vectors
 
 Canonical bytes for a worked example (also pinned in the Rust, extension
 and dApp test suites):

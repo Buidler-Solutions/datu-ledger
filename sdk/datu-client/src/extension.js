@@ -94,6 +94,10 @@ export function createExtensionTransport({ timeoutMs = DEFAULT_TIMEOUT_MS, pingM
       const result = await send('identities', { bridgeUrl }, 15_000);
       return result.body || result;
     },
+    prove: async ({ bridgeUrl, nonce } = {}) => {
+      const result = await send('prove', { bridgeUrl, nonce }, 15_000);
+      return result.body || result;
+    },
     sign: ({ bridgeUrl, path, body, summary }) =>
       send('sign', { bridgeUrl, path, body, summary }, timeoutMs),
     onState: (fn) => {

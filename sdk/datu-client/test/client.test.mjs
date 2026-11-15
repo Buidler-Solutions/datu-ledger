@@ -197,3 +197,63 @@ test('argument validation is explicit', async () => {
   // Sync validation throws immediately; assert.throws is the right tool.
   assert.throws(() => datu.node.entry(), /entry id is required/);
 });
+
+test('proveGenuine accepts a valid provider proof (nonce, key, pin)', async () => {
+  const bridge = keypair();
+  const rpc = mockTransport({ proofKey: bridge });
+  const datu = await connect({ transport: rpc });
+  const verdict = await datu.proveGenuine();
+  assert.equal(verdict.genuine, true);
+  assert.equal(verdict.verified, true);
+  assert.equal(verdict.reachable, true);
+  assert.equal(verdict.bridgeUrl, 'http://127.0.0.1:7588');
+  assert.equal(verdict.version, '0.2.0');
+  assert.equal(verdict.bridgePubkey, bridge.pubkeyHex);
+  assert.match(verdict.nonce, /^[0-9a-f]{32}$/, 'the SDK mints the challenge nonce');
+  assert.equal(verdict.proof.domain, 'datu-provider-v1');
+  assert.equal(rpc.calls[0].path, '/v1/provider-proof');
+  assert.equal(rpc.calls[0].body.nonce, verdict.nonce, 'the proof answers the issued nonce');
+});
+
+test('proveGenuine treats an invalid answer as an impostor, not downtime', async () => {
+  const bridge = keypair();
+  const rpc = mockTransport({ proofKey: bridge });
+  const datu = await connect({ transport: rpc });
+  const real = rpc.prove;
+  rpc.prove = async (opts) => ({ ...(await real(opts)), signature: '00'.repeat(64) });
+  const verdict = await datu.proveGenuine({ nonce: 'ab'.repeat(16) });
+  assert.equal(verdict.genuine, false);
+  assert.equal(verdict.reachable, true, 'it answered, so it is a definite impostor');
+  assert.match(verdict.reason, /signature invalid/);
+});
+
+test('proveGenuine rejects a proof that answers another nonce', async () => {
+  const bridge = keypair();
+  const rpc = mockTransport({ proofKey: bridge });
+  const datu = await connect({ transport: rpc });
+  const real = rpc.prove;
+  rpc.prove = async (opts) => ({ ...(await real(opts)), nonce: 'ff'.repeat(32) });
+  const verdict = await datu.proveGenuine({ nonce: 'ab'.repeat(16) });
+  assert.equal(verdict.genuine, false);
+  assert.match(verdict.reason, /does not answer the nonce/);
+});
+
+test('proveGenuine rejects a bridge key that differs from the expected key', async () => {
+  const bridge = keypair();
+  const other = keypair();
+  const rpc = mockTransport({ proofKey: bridge });
+  const datu = await connect({ transport: rpc });
+  const verdict = await datu.proveGenuine({ nonce: 'ab'.repeat(16), expectedBridgePubkey: other.pubkeyHex });
+  assert.equal(verdict.genuine, false);
+  assert.equal(verdict.reachable, true);
+  assert.match(verdict.reason, /expected key/);
+});
+
+test('proveGenuine reports no answer as unreachable, never as malicious', async () => {
+  const rpc = mockTransport();
+  const datu = await connect({ transport: rpc });
+  const verdict = await datu.proveGenuine({ nonce: 'ab'.repeat(16) });
+  assert.equal(verdict.genuine, false);
+  assert.equal(verdict.reachable, false, 'nothing answered: bridge down, not an impostor');
+  assert.match(verdict.reason, /no Signet paired/);
+});

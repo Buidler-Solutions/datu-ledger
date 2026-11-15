@@ -5,6 +5,7 @@
  *   const datu = await connect({ transport: mockTransport({ ... }) });
  */
 import { AUTH_DOMAIN, authSignedBytes } from './auth.js';
+import { PROVIDER_DOMAIN, providerProofBytes } from './provider.js';
 import { DatuError, ErrorCode } from './errors.js';
 
 /**
@@ -12,7 +13,7 @@ import { DatuError, ErrorCode } from './errors.js';
  * privateKey } from node:crypto's generateKeyPairSync('ed25519'), or any object
  * with `sign(bytes)` returning a 64-byte signature and `pubkeyHex`.
  */
-export function mockTransport({ identities = [], keys = {}, state = null, latencyMs = 0 } = {}) {
+export function mockTransport({ identities = [], keys = {}, proofKey = null, state = null, latencyMs = 0 } = {}) {
   const listeners = new Set();
   const calls = [];
   const delay = () => new Promise((resolve) => setTimeout(resolve, latencyMs));
@@ -21,6 +22,28 @@ export function mockTransport({ identities = [], keys = {}, state = null, latenc
     calls,
     ping: async () => ({ pong: true, version: 'mock' }),
     identities: async () => ({ identities }),
+    prove: async ({ nonce } = {}) => {
+      calls.push({ path: '/v1/provider-proof', body: { nonce } });
+      await delay();
+      if (state && state.fail) throw new Error(state.fail.message);
+      if (!proofKey) {
+        throw new Error('no Signet paired - open the panel and pair first');
+      }
+      const proof = {
+        ok: true,
+        domain: PROVIDER_DOMAIN,
+        nonce,
+        origin: 'chrome-extension://mock',
+        version: '0.2.0',
+        expires_at_ms: Date.now() + 30_000,
+      };
+      return {
+        ...proof,
+        bridge_pubkey: proofKey.pubkeyHex,
+        signature: await proofKey.sign(providerProofBytes(proof)),
+        bridgeUrl: 'http://127.0.0.1:7588',
+      };
+    },
     sign: async ({ path, body }) => {
       calls.push({ path, body });
       await delay();

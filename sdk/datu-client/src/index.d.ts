@@ -39,6 +39,34 @@ export interface SignResult {
   body: any;
 }
 
+export interface ProviderProof {
+  ok?: boolean;
+  domain?: 'datu-provider-v1';
+  nonce: Hex;
+  origin: string;
+  version: string;
+  expires_at_ms: number;
+  bridge_pubkey: Hex;
+  signature: Hex;
+  bridgeUrl?: string;
+}
+
+export interface ProveGenuineResult {
+  /** True only when a paired provider answered a valid (or unverified) proof. */
+  genuine: boolean;
+  /** False means no answer at all: the bridge is down, not malicious. */
+  reachable: boolean;
+  /** True when the signature verified locally; null/false without a verifier. */
+  verified?: boolean;
+  pinned?: boolean;
+  reason?: string;
+  bridgeUrl?: string;
+  version?: string;
+  bridgePubkey?: Hex;
+  proof?: ProviderProof;
+  nonce: Hex;
+}
+
 export interface CoverageWitness {
   signer: Hex;
   timestamp_ms: number;
@@ -80,6 +108,7 @@ export declare const ErrorCode: Record<ErrorCodeValue, ErrorCodeValue>;
 export interface ExtensionTransport {
   ping(): Promise<{ pong?: boolean; version?: string } | null>;
   identities(bridgeUrl?: string): Promise<{ identities: DatuIdentity[]; bridgeUrl?: string }>;
+  prove(args: { bridgeUrl?: string; nonce?: Hex }): Promise<ProviderProof>;
   sign(args: { bridgeUrl?: string; path: string; body: any; summary?: string }): Promise<SignResult>;
   onState(fn: (state: { connected?: boolean; wallets?: unknown[]; unlocked?: string[] }) => void): () => void;
 }
@@ -137,6 +166,13 @@ export interface DatuClient {
     /** Trusted-host only (never a browser page): sign in without the extension. */
     passphrase?: string;
   }): Promise<{ assertion: AuthAssertion; verified: boolean | null; challenge: AuthChallenge }>;
+  proveGenuine(opts?: {
+    bridgeUrl?: string;
+    nonce?: Hex;
+    /** Explicit trust: reject any other bridge key (wins over the TOFU pin). */
+    expectedBridgePubkey?: Hex;
+    nowMs?: number;
+  }): Promise<ProveGenuineResult>;
   partySign(args: { name?: string; role: string; document: any; kind?: string; summary?: string }): Promise<SignResult>;
   signEntry(args: { name?: string; request: any; summary?: string }): Promise<SignResult>;
   seal(args: { name?: string; document: any; fields: string[] | string; to?: string[] | string; toFields?: string[] | string; summary?: string }): Promise<SignResult>;
@@ -169,6 +205,16 @@ export declare function authSignedBytes(challenge: AuthChallenge): Uint8Array;
 export declare function challengeIsLive(challenge: AuthChallenge, nowMs?: number): boolean;
 export declare function verifyEd25519(pubkeyHex: Hex, message: Uint8Array | string, signatureHex: Hex): Promise<'ok' | 'invalid' | 'unavailable'>;
 export declare function verifyAssertion(assertion: AuthAssertion, challenge: AuthChallenge): Promise<VerifyResult>;
+
+export declare const PROVIDER_DOMAIN: 'datu-provider-v1';
+export declare function providerProofBytes(proof: {
+  nonce: string;
+  origin: string;
+  version: string;
+  expires_at_ms: number;
+}): Uint8Array;
+export declare function verifyProviderProof(proof: any, challenge: { nonce: string; nowMs?: number }): Promise<VerifyResult>;
+export declare function pinBridgeKey(bridgeUrl: string, bridgePubkey: string, expected?: string): { ok: boolean; reason?: string; pinnedNow: boolean };
 
 declare const _default: { connect: typeof connect };
 export default _default;

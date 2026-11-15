@@ -1,6 +1,6 @@
 {
   "name": "@greenarmor/datu-client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Integrate a dApp with the DATU accountability DAG: SignetAuth login, signing, sealing, node reads and coverage verification",
   "type": "module",
   "sideEffects": false,
@@ -26,6 +26,10 @@
     "./auth": {
       "types": "./src/auth.d.ts",
       "default": "./src/auth.js"
+    },
+    "./provider": {
+      "types": "./src/provider.d.ts",
+      "default": "./src/provider.js"
     },
     "./errors": {
       "types": "./src/errors.d.ts",

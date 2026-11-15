@@ -36,6 +36,13 @@
 //!                               (their POSTs carry the chrome-extension://
 //!   Origin; GET carries none and is refused) - lets the extension pair
 //!                               itself; web pages are refused
+//!   POST /v1/provider-proof     {nonce} -> `datu-provider-v1` proof signed by
+//!                               the bridge's own key (wallet/bridge.key):
+//!                               fresh evidence that the caller holds a valid
+//!                               pairing token, so an impostor extension with
+//!                               no token cannot answer a dApp's genuineness
+//!                               challenge (datu-client proveGenuine). No
+//!                               passphrase needed; rate-limited
 //!   GET  /v1/wallet/identities  public identities (ed + seal keys)
 //!   POST /v1/wallet/create      {name, passphrase}
 //!   POST /v1/wallet/party-sign  {name, passphrase, role, document, kind?}
@@ -70,6 +77,11 @@ const MAX_PASSPHRASE_FAILURES: u32 = 5;
 const LOCKOUT_MS: u64 = 15_000;
 const TOKEN_FILE: &str = "wallet/bridge.token";
 const PAIRS_FILE: &str = "wallet/bridge.pairs.json";
+const BRIDGE_KEY_FILE: &str = "wallet/bridge.key";
+const PROVIDER_DOMAIN: &str = "datu-provider-v1";
+const PROVIDER_TTL_MS: u64 = 30_000;
+const PROVIDER_RATE_MAX: u32 = 60;
+const PROVIDER_RATE_WINDOW_MS: u64 = 60_000;
 /// SignetAuth session grants: minted after a passphrase-authenticated
 /// login, valid for auth-assert only, sliding window.
 pub const GRANT_TTL_MS: u64 = 15 * 60_000;
@@ -158,6 +170,10 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
     println!("  pairing: extensions pair themselves via /v1/pair");
     println!("    each extension gets its own token, bound to its chrome-extension:// id");
     println!("    registry: {}", data_dir.join(PAIRS_FILE).display());
+    println!(
+        "  provider proofs: bridge key {} (dApp genuineness checks)",
+        data_dir.join(BRIDGE_KEY_FILE).display()
+    );
     println!(
         "  local-tool token (no browser Origin): {}",
         data_dir.join(TOKEN_FILE).display()
@@ -333,9 +349,32 @@ fn handle_inner(
                     "origin-pinning",
                     "webauthn",
                     "origin-bound-pairing",
+                    "provider-proof",
                 ],
             }),
         ),
+        // Genuineness handshake (Signet provider authenticity): the dApp
+        // challenges the provider with a fresh nonce; only a caller holding
+        // a valid pairing token gets this bridge-keyed proof back. No
+        // passphrase, no unlock - but rate-limited, and it proves nothing
+        // about custody (only auth-assert does).
+        ("POST", "/v1/provider-proof") => {
+            if !provider_rate_ok() {
+                return Err(
+                    "TOO_MANY_ATTEMPTS: too many provider-proof requests, slow down".into(),
+                );
+            }
+            let body_json = parse_body(&body)?;
+            let nonce = str_field(&body_json, "nonce")?.to_lowercase();
+            if nonce.len() < 32
+                || nonce.len() > 128
+                || !nonce.chars().all(|c| c.is_ascii_hexdigit())
+            {
+                return Err("nonce must be 32..=128 hex characters".into());
+            }
+            let origin = headers.get("origin").cloned().unwrap_or_default();
+            respond_json(stream, "200 OK", &book.provider_proof(&origin, &nonce))
+        }
         ("GET", "/v1/wallet/identities") | ("POST", "/v1/wallet/identities") => {
             let identities = wallet.list().map_err(|e| e.to_string())?;
             let items: Vec<serde_json::Value> = identities
@@ -1050,6 +1089,40 @@ fn const_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// The bridge's own Ed25519 key: it signs provider proofs (the genuineness
+/// handshake), never ledger structures. Domain separation (`datu-provider-v1`)
+/// keeps these signatures useless as any other kind of DATU signature.
+fn load_or_create_bridge_key(data_dir: &Path) -> Result<ed25519_dalek::SigningKey, String> {
+    let path = data_dir.join(BRIDGE_KEY_FILE);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(bytes) = hex::decode(text.trim()) {
+            if bytes.len() == 32 {
+                let mut seed = [0u8; 32];
+                seed.copy_from_slice(&bytes);
+                return Ok(ed25519_dalek::SigningKey::from_bytes(&seed));
+            }
+        }
+        return Err(format!(
+            "cannot read the bridge key {} - expected 32 bytes of hex",
+            path.display()
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    use rand::RngCore;
+    let mut seed = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    std::fs::write(&path, hex::encode(seed))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
+}
+
 struct PairEntry {
     origin: String,
     token: String,
@@ -1066,6 +1139,8 @@ struct PairBook {
     data_dir: std::path::PathBuf,
     legacy: String,
     pairs: Mutex<Vec<PairEntry>>,
+    /// The bridge's provider-proof key (wallet/bridge.key).
+    provider: ed25519_dalek::SigningKey,
 }
 
 impl PairBook {
@@ -1093,6 +1168,7 @@ impl PairBook {
             data_dir: data_dir.to_path_buf(),
             legacy,
             pairs: Mutex::new(pairs),
+            provider: load_or_create_bridge_key(data_dir)?,
         })
     }
 
@@ -1148,6 +1224,55 @@ impl PairBook {
         self.save(&pairs)?;
         Ok(token)
     }
+
+    /// The canonical `datu-provider-v1` signed bytes. Must match
+    /// sdk/datu-client/src/provider.js exactly.
+    fn provider_signed_bytes(
+        nonce: &str,
+        origin: &str,
+        version: &str,
+        expires_at_ms: u64,
+    ) -> Vec<u8> {
+        format!("{PROVIDER_DOMAIN}\n{nonce}\n{origin}\n{version}\n{expires_at_ms}\n").into_bytes()
+    }
+
+    /// Fresh, replay-proof evidence for a paired caller: an Ed25519 signature
+    /// by the bridge key over the caller's nonce, its own origin, the bridge
+    /// version and a short expiry. A provider that holds no valid pairing
+    /// token (an impostor extension) can never obtain one.
+    fn provider_proof(&self, origin: &str, nonce: &str) -> serde_json::Value {
+        let version = env!("CARGO_PKG_VERSION");
+        let expires_at_ms = now_ms() + PROVIDER_TTL_MS;
+        let bytes = Self::provider_signed_bytes(nonce, origin, version, expires_at_ms);
+        let signature = hex::encode(datu_core::auth::sign_bytes(&self.provider, &bytes));
+        serde_json::json!({
+            "ok": true,
+            "domain": PROVIDER_DOMAIN,
+            "nonce": nonce,
+            "origin": origin,
+            "version": version,
+            "expires_at_ms": expires_at_ms,
+            "bridge_pubkey": hex::encode(self.provider.verifying_key().as_bytes()),
+            "signature": signature,
+        })
+    }
+}
+
+/// Simple fixed-window limiter so a hostile paired page cannot hammer the
+/// proof route (it needs no passphrase, so it must stay cheap to call).
+fn provider_rate_ok() -> bool {
+    static WINDOW: OnceLock<Mutex<(u64, u32)>> = OnceLock::new();
+    let cell = WINDOW.get_or_init(|| Mutex::new((0, 0)));
+    let Ok(mut w) = cell.lock() else {
+        return false;
+    };
+    let now = now_ms();
+    if now.saturating_sub(w.0) >= PROVIDER_RATE_WINDOW_MS {
+        w.0 = now;
+        w.1 = 0;
+    }
+    w.1 += 1;
+    w.1 <= PROVIDER_RATE_MAX
 }
 
 enum TokenDecision {
@@ -1650,6 +1775,129 @@ mod tests {
             origins,
             vec!["chrome-extension://genuine", "chrome-extension://second"]
         );
+    }
+
+    /// The genuineness handshake: only a correctly paired caller gets a
+    /// bridge-keyed proof over its own nonce, and the proof verifies.
+    #[test]
+    fn provider_proof_over_http() {
+        use ed25519_dalek::{Signature, Verifier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let port = spawn_bridge(&data);
+        let legacy = wait_for_token(&data);
+
+        let (status, body) = http_origin(
+            port,
+            "POST",
+            "/v1/pair",
+            None,
+            Some("chrome-extension://genuine"),
+            "{}",
+        );
+        assert!(status.contains("200"), "{status} {body}");
+        let token = serde_json::from_str::<serde_json::Value>(&body).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(token, legacy);
+
+        // No pairing token: no proof an impostor could reuse.
+        let (status, _) = http_origin(
+            port,
+            "POST",
+            "/v1/provider-proof",
+            None,
+            Some("chrome-extension://genuine"),
+            &json!({"nonce": "ab".repeat(16)}).to_string(),
+        );
+        assert!(
+            status.contains("401"),
+            "unpaired callers get no proof: {status}"
+        );
+
+        // A different extension presenting the token: refused.
+        let (status, _) = http_origin(
+            port,
+            "POST",
+            "/v1/provider-proof",
+            Some(&token),
+            Some("chrome-extension://imposter"),
+            &json!({"nonce": "ab".repeat(16)}).to_string(),
+        );
+        assert!(
+            status.contains("403"),
+            "impostor origins get no proof: {status}"
+        );
+
+        // The paired extension gets a proof over its exact nonce.
+        let nonce = "cd".repeat(16);
+        let (status, body) = http_origin(
+            port,
+            "POST",
+            "/v1/provider-proof",
+            Some(&token),
+            Some("chrome-extension://genuine"),
+            &json!({"nonce": nonce}).to_string(),
+        );
+        assert!(status.contains("200"), "{status} {body}");
+        let proof: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(proof["domain"], "datu-provider-v1");
+        assert_eq!(proof["nonce"], nonce);
+        assert_eq!(proof["origin"], "chrome-extension://genuine");
+        let version = proof["version"].as_str().unwrap().to_string();
+        let expires = proof["expires_at_ms"].as_u64().unwrap();
+        assert!(expires > now_ms(), "proof must not come back expired");
+
+        // The signature verifies over the canonical bytes with the published key.
+        let pubkey: [u8; 32] = hex::decode(proof["bridge_pubkey"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pubkey).unwrap();
+        let bytes = PairBook::provider_signed_bytes(
+            &nonce,
+            "chrome-extension://genuine",
+            &version,
+            expires,
+        );
+        let sig =
+            Signature::from_slice(&hex::decode(proof["signature"].as_str().unwrap()).unwrap())
+                .unwrap();
+        assert!(
+            vk.verify(&bytes, &sig).is_ok(),
+            "proof signature must verify"
+        );
+
+        // Tampering with the signature is caught.
+        let mut raw = hex::decode(proof["signature"].as_str().unwrap()).unwrap();
+        raw[0] ^= 1;
+        let bad = Signature::from_slice(&raw).unwrap();
+        assert!(vk.verify(&bytes, &bad).is_err());
+
+        // The bridge key persists so proofs stay attributable across restarts.
+        assert!(data.join(BRIDGE_KEY_FILE).exists());
+
+        // Nonce shape is enforced.
+        let (status, _) = http_origin(
+            port,
+            "POST",
+            "/v1/provider-proof",
+            Some(&token),
+            Some("chrome-extension://genuine"),
+            &json!({"nonce": "not-hex"}).to_string(),
+        );
+        assert!(status.contains("400"), "{status}");
+        let (status, _) = http_origin(
+            port,
+            "POST",
+            "/v1/provider-proof",
+            Some(&token),
+            Some("chrome-extension://genuine"),
+            &json!({"nonce": "ab".repeat(8)}).to_string(),
+        );
+        assert!(status.contains("400"), "{status}");
     }
 
     /// Deferred delivery over the bridge HTTP surface, end to end: token

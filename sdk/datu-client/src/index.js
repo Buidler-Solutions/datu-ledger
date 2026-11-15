@@ -20,6 +20,12 @@ import {
   verifyAssertion,
   verifyEd25519,
 } from './auth.js';
+import {
+  PROVIDER_DOMAIN,
+  pinBridgeKey,
+  providerProofBytes,
+  verifyProviderProof,
+} from './provider.js';
 import { DatuError, ErrorCode, mapError } from './errors.js';
 
 export {
@@ -30,6 +36,10 @@ export {
   randomNonceHex,
   verifyAssertion,
   verifyEd25519,
+  PROVIDER_DOMAIN,
+  pinBridgeKey,
+  providerProofBytes,
+  verifyProviderProof,
   DatuError,
   ErrorCode,
   createExtensionTransport,
@@ -102,6 +112,46 @@ export async function connect({
 
   /** Bridge passthrough for screens that already build full bodies. */
   const bridge = (path, body, summary) => sign({ name: body && body.name, path, body, summary });
+
+  /**
+   * Genuineness handshake (datu-provider-v1): challenge whoever claims to be
+   * the Signet extension with a fresh nonce. Only the extension holding a
+   * pairing token can obtain this bridge-keyed proof, so:
+   *   genuine:true  - a paired provider answered (verified:false only means
+   *                   this browser has no local Ed25519 verifier)
+   *   genuine:false + reachable:true - it answered with an invalid proof:
+   *                   an impostor; never ask for a passphrase here
+   *   genuine:false + reachable:false - no answer at all (bridge down):
+   *                   say "cannot reach the Signet service", not "malicious"
+   */
+  async function proveGenuine({ bridgeUrl: wantedBridge, nonce, expectedBridgePubkey, nowMs } = {}) {
+    const challenge = nonce || randomNonceHex();
+    let proof;
+    try {
+      proof = await rpc.prove({ bridgeUrl: wantedBridge || bridgeUrl, nonce: challenge });
+    } catch (e) {
+      return { genuine: false, reachable: false, reason: mapError(e).message, nonce: challenge };
+    }
+    const verdict = await verifyProviderProof(proof, { nonce: challenge, nowMs });
+    if (verdict.ok === false) {
+      return { genuine: false, reachable: true, reason: verdict.reason, proof, nonce: challenge };
+    }
+    const pin = pinBridgeKey(proof.bridgeUrl, proof.bridge_pubkey, expectedBridgePubkey);
+    if (!pin.ok) {
+      return { genuine: false, reachable: true, reason: pin.reason, proof, nonce: challenge };
+    }
+    return {
+      genuine: true,
+      verified: verdict.ok === true,
+      reachable: true,
+      pinned: pin.pinnedNow,
+      bridgeUrl: proof.bridgeUrl,
+      version: proof.version,
+      bridgePubkey: proof.bridge_pubkey,
+      proof,
+      nonce: challenge,
+    };
+  }
 
   /**
    * Start a SignetAuth login: mint the challenge (this app is the relying
@@ -333,6 +383,7 @@ export async function connect({
     bridge,
     startLogin,
     signIn,
+    proveGenuine,
     partySign,
     signEntry,
     seal,

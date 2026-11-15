@@ -285,6 +285,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       })();
       return true;
     }
+    // Genuineness handshake (prove): the dApp challenges the provider with a
+    // fresh nonce; only the extension holding a pairing token can get this
+    // bridge-keyed proof, so an impostor provider cannot answer. No prompt.
+    if (msg.action === 'prove') {
+      (async () => {
+        try {
+          const s = await chrome.storage.session.get(['tokens', 'activeWallet']);
+          const tokens = s.tokens || {};
+          const wanted = String((msg.payload || {}).bridgeUrl || '').replace(/\/+$/, '');
+          const url =
+            (wanted && tokens[wanted] && wanted) || s.activeWallet || Object.keys(tokens)[0];
+          const token = tokens[url];
+          if (!token) throw new Error('no Signet paired - open the panel and pair first');
+          const nonce = String((msg.payload || {}).nonce || '');
+          const res = await fetch(`${url}/v1/provider-proof`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ nonce }),
+          });
+          const json = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+          if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+          sendResponse({ ok: true, result: { ...json, bridgeUrl: url } });
+        } catch (e) {
+          sendResponse({ ok: false, error: e.message });
+        }
+      })();
+      return true;
+    }
     (async () => {
       const queue = await readQueue();
       queue.push({

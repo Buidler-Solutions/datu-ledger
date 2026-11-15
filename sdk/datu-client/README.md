@@ -58,6 +58,36 @@ datu signet auth-verify --rp-id app.example.com --origin https://app.example.com
 
 Wire standard: `specs/signetauth.md`.
 
+## Prove the wallet is genuine (before asking a human for anything)
+
+An impostor extension can imitate every page-facing API, but it holds no
+pairing token, so it can never obtain the bridge-keyed proof this challenge
+demands. Run it before sign-in screens and passphrase prompts.
+
+```js
+const verdict = await datu.proveGenuine();
+if (verdict.genuine && verdict.verified) {
+  // genuine Signet extension on a paired bridge
+} else if (verdict.genuine) {
+  // paired provider answered; this browser just has no local Ed25519
+  // verifier (verified === false), decide your own policy
+} else if (verdict.reachable) {
+  // it ANSWERED with an invalid proof: a definite impostor.
+  // hard-block the page and never ask for a passphrase here
+} else {
+  // no answer at all: the Signet service is down or not paired.
+  // say "cannot reach the Signet service"; never call it malicious
+}
+```
+
+The proof (domain `datu-provider-v1`) echoes your nonce, expires in ~30 s, and
+is signed by the bridge's own Ed25519 key. That key is TOFU-pinned per
+`bridgeUrl` (localStorage), so a swapped bridge is caught on the next check;
+pass `expectedBridgePubkey` to pin explicit trust instead. The handshake
+needs no passphrase and proves pairing, not custody: only `signIn` proves a
+human holds the keys. `providerProofBytes`, `verifyProviderProof`,
+`pinBridgeKey` and `PROVIDER_DOMAIN` are exported for custom hosts.
+
 ## Sign documents and entries
 
 ```js

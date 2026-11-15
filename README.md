@@ -955,7 +955,13 @@ values, and five wrong passphrases lock that identity for 15 s (429). The
 extension (`v1.0.0`) ships icons, a strict CSP, two-step
 **review → confirm** before signing, and auto-clears passphrase and decrypted
 views after 2 minutes idle; the token itself lives only in
-`chrome.storage.session` and is forgotten when the browser closes.
+`chrome.storage.session` and is forgotten when the browser closes. A dApp can
+prove the provider is genuine before asking a human for anything: `POST
+/v1/provider-proof` (no passphrase, rate-limited) returns a `datu-provider-v1`
+proof (nonce echo, ~30 s expiry) signed by the bridge's own Ed25519 key
+(`wallet/bridge.key`); the SDK's `proveGenuine()` verifies it locally and
+TOFU-pins the bridge key per URL, and an impostor extension, holding no
+pairing token, can never obtain one.
 
 Flow: the registrar seals `holder_name`/`birth_date` to the registry office
 and to the landowner's seal key found in the document, signs as `registrar`,
@@ -984,7 +990,8 @@ tokenless, offline-capable operation.
 ## SDK for dApps
 
 `sdk/datu-client` (published as `@greenarmor/datu-client`) wraps the whole integration
-surface: SignetAuth login in one call, party signatures, sealing and deferred
+surface: SignetAuth login in one call, provider genuineness checks
+(`proveGenuine()`), party signatures, sealing and deferred
 delivery, node reads, coverage verification, typed errors, TypeScript
 declarations, and mock transports so a dApp's tests need no wallet.
 

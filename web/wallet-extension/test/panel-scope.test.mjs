@@ -212,6 +212,46 @@ test('a refused per-tab open retries by window, then falls back to a badge', asy
   assert.deepEqual(scoped.at(-1), { tabId: 9, text: '2' });
 });
 
+test('prove answers a genuineness challenge with a paired bridge POST', async () => {
+  const savedFetch = globalThis.fetch;
+  const fetched = [];
+  const proof = {
+    ok: true,
+    domain: 'datu-provider-v1',
+    nonce: 'ab'.repeat(16),
+    origin: 'chrome-extension://t',
+    version: '0.2.0',
+    expires_at_ms: Date.now() + 30_000,
+    bridge_pubkey: '00'.repeat(32),
+    signature: '00'.repeat(64),
+  };
+  globalThis.fetch = async (url, options = {}) => {
+    fetched.push({ url, options });
+    return { ok: true, status: 200, json: async () => proof };
+  };
+  try {
+    sessionStore.tokens = { 'http://127.0.0.1:7588': 'tok' };
+    sessionStore.activeWallet = 'http://127.0.0.1:7588';
+    const sent = [];
+    listeners.onMessage[0](
+      { kind: 'datu-rpc', action: 'prove', id: 'prove-1', payload: { nonce: 'ab'.repeat(16) } },
+      { tab: { id: 12, url: 'http://localhost:5174/dapp' } },
+      (r) => sent.push(r)
+    );
+    await flush();
+    assert.equal(fetched.length, 1);
+    assert.equal(fetched[0].url, 'http://127.0.0.1:7588/v1/provider-proof');
+    assert.equal(fetched[0].options.method, 'POST');
+    assert.equal(fetched[0].options.headers.Authorization, 'Bearer tok');
+    assert.equal(JSON.parse(fetched[0].options.body).nonce, 'ab'.repeat(16));
+    assert.deepEqual(sent, [{ ok: true, result: { ...proof, bridgeUrl: 'http://127.0.0.1:7588' } }]);
+  } finally {
+    globalThis.fetch = savedFetch;
+    delete sessionStore.tokens;
+    delete sessionStore.activeWallet;
+  }
+});
+
 test('the panel is never enabled globally and never via setPanelBehavior', () => {
   assert.equal(calls.setPanelBehavior.length, 0);
   for (const o of calls.setOptions) {
