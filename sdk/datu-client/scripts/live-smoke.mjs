@@ -16,7 +16,11 @@ const origin = process.env.DATU_ORIGIN || 'http://127.0.0.1:5173';
 
 const token = (
   await (
-    await fetch(`${bridgeUrl}/v1/pair`, { headers: { Origin: 'chrome-extension://live-smoke' } })
+    await fetch(`${bridgeUrl}/v1/pair`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'chrome-extension://live-smoke' },
+      body: '{}',
+    })
   ).json()
 ).token;
 
@@ -25,7 +29,9 @@ const transport = {
   ping: async () => ({ pong: true, version: 'live-smoke' }),
   identities: async () => {
     const res = await fetch(`${bridgeUrl}/v1/wallet/identities`, {
-      headers: { Authorization: `Bearer ${token}` },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: '{}',
     });
     return res.json();
   },
