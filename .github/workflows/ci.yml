@@ -25,11 +25,13 @@ jobs:
         run: cargo test --workspace --release
       - name: release binaries for drills
         run: cargo build --release -p datu-cli -p datu-indexer
-      - name: drills (backup/restore, crash recovery, bounded soak)
+      - name: drills (backup/restore, crash recovery, bounded soak, fork, key rotation)
         run: |
           ./deploy/drills/backup-restore.sh
           ./deploy/drills/crash-recovery.sh
           ./deploy/drills/soak.sh 100
+          ./deploy/drills/fork-drill.sh
+          ./deploy/drills/key-rotation.sh
       - name: dependency inventory (SBOM-lite, denied licenses)
         run: python3 deploy/checks/inventory.py
       - name: canonical bytes fixtures (Rust, JS, Python)
@@ -80,6 +82,30 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  rust-macos:
+    name: rust workspace tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (whole workspace)
+        run: cargo test --workspace
+      - name: release binaries build
+        run: cargo build --release -p datu-cli -p datu-indexer
+
+  docs:
+    name: rustdoc builds warning-free
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo doc (warnings are errors)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --no-deps
 
   web:
     name: web builds and extension scripts
