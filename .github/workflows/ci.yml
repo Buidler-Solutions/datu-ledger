@@ -32,6 +32,10 @@ jobs:
           ./deploy/drills/soak.sh 100
       - name: dependency inventory (SBOM-lite, denied licenses)
         run: python3 deploy/checks/inventory.py
+      - name: canonical bytes fixtures (Rust, JS, Python)
+        run: |
+          node deploy/checks/verify-canonical.mjs
+          python3 deploy/checks/verify-canonical.py
 
   indexer-dialects:
     name: projection drivers (SQLite + PostgreSQL + MySQL)
