@@ -6,6 +6,10 @@ on:
 
 permissions:
   contents: write
+  # Keyless signing (Sigstore) exchanges the workflow's OIDC token for a
+  # short-lived certificate; verification instructions live in
+  # deploy/operations/release-signing.md.
+  id-token: write
 
 jobs:
   binaries:
@@ -36,9 +40,16 @@ jobs:
       - name: musl toolchain
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: build
-        run: cargo build --release --locked -p datu-cli --target ${{ matrix.target }}
-      - name: package
+      - name: build (reproducible recipe)
+        run: |
+          set -euo pipefail
+          # Same recipe as deploy/checks/reproducible.sh: remapped paths and
+          # a pinned epoch make the binary bytes depend on the tag's source,
+          # not on the runner's workspace, so anyone can rebuild and compare.
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+          export RUSTFLAGS="--remap-path-prefix=$(pwd)=/usr/src/datu --remap-path-prefix=$HOME/.cargo/registry=/usr/src/cargo"
+          cargo build --release --locked -p datu-cli --target ${{ matrix.target }}
+      - name: package (deterministic archive)
         shell: bash
         run: |
           set -euo pipefail
@@ -47,7 +58,9 @@ jobs:
           mkdir -p "dist/${name}"
           cp "target/${{ matrix.target }}/release/datu" "dist/${name}/"
           cp README.md LICENSE "dist/${name}/"
-          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          # sorted entries, pinned mtimes, gzip mtime 0: stable across
+          # machines and reruns (deploy/checks/deterministic-tar.py)
+          python3 deploy/checks/deterministic-tar.py dist "${name}"
           (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
       - uses: actions/upload-artifact@v5
         with:
@@ -99,9 +112,23 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts
-          find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -print0 \
             | sort -z | xargs -0 shasum -a 256 > SHA256SUMS
           cat SHA256SUMS
+      - uses: sigstore/cosign-installer@v3
+      - name: sign the checksums (keyless)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          # Sigstore keyless: cosign exchanges this workflow's OIDC token
+          # for a short-lived certificate and signs with a one-time key;
+          # the signature and certificate are published beside the sums.
+          # Verification: deploy/operations/release-signing.md
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true

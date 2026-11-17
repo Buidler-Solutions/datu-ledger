@@ -107,6 +107,15 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --no-deps
 
+  reproducible:
+    name: release build is bit-reproducible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: two checkouts, two builds, hashes must match
+        run: ./deploy/checks/reproducible.sh
+
   web:
     name: web builds and extension scripts
     runs-on: ubuntu-latest
