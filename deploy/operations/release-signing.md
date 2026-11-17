@@ -60,6 +60,21 @@ The two remap destinations (`/usr/src/datu`, `/usr/src/cargo`) and the
 pinned `SOURCE_DATE_EPOCH` are the recipe; changing any of them changes
 the bytes. The reproducible-build gate runs on every push in CI.
 
+What reproduces exactly, and what does not:
+
+- Same environment, different checkout path: byte-identical. That is
+  what the CI gate proves on every push (two checkouts, one runner).
+- Different environment: bytes differ even from identical sources. The
+  compiler pin (Rust 1.96.0, `rust-toolchain.toml`) is necessary but
+  not sufficient: Mach-O carries the macOS SDK version in
+  `LC_BUILD_VERSION`, and ELF carries the binutils version. A local
+  rebuild against a different Xcode or linker will hash differently
+  while behaving identically.
+- Consequence: checksums plus the Sigstore signature are the
+  provenance guarantee; a rebuild from source is how you audit
+  behavior. Treat a matching hash as confirmation your environment
+  matches the release runner, not as the only acceptable outcome.
+
 ## Upgrading to a hardware signing key
 
 If a deployment ever requires a long-lived identity instead of keyless,
