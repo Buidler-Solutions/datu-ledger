@@ -1107,7 +1107,7 @@ pub fn checkpoint_from_json(value: &serde_json::Value) -> Result<Checkpoint, Str
 fn read_request(stream: &TcpStream) -> Option<(String, String, Vec<u8>)> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut budget = MAX_HEADER_BYTES;
-    let mut read_line = |reader: &mut BufReader<TcpStream>, limit: usize| -> Option<String> {
+    let read_line = |reader: &mut BufReader<TcpStream>, limit: usize| -> Option<String> {
         let mut line = String::new();
         reader
             .by_ref()
@@ -2362,7 +2362,7 @@ mod request_limit_tests {
     #[test]
     fn oversized_header_line_is_refused() {
         let mut raw = b"GET / HTTP/1.1\r\nX: ".to_vec();
-        raw.extend(std::iter::repeat(b'a').take(MAX_HEADER_BYTES));
+        raw.extend(std::iter::repeat_n(b'a', MAX_HEADER_BYTES));
         raw.extend_from_slice(b"\r\n\r\n");
         assert!(parse(raw).is_none(), "header line beyond budget is dropped");
     }
