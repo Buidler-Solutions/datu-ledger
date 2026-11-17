@@ -39,6 +39,15 @@ pub use datu_wallet::wire::{entry_from_submission, entry_full_json};
 
 /// Hard cap on an HTTP request body (a single entry JSON is ≤ ~350 KB).
 pub const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// Request-line plus headers budget: a slowloris or header-flood client
+/// cannot grow an allocation past this, and the read timeout bounds stalls.
+pub const MAX_HEADER_BYTES: usize = 16 * 1024;
+pub const MAX_HEADER_COUNT: usize = 64;
+/// Concurrent connection ceiling: thread-per-connection is fine, unbounded
+/// threads are not.
+pub const MAX_CONNECTIONS: usize = 256;
+/// Per-socket I/O deadline (read and write).
+pub const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Default per-peer submission budget for `POST /v1/entries`.
 pub const DEFAULT_SUBMIT_PER_MIN: usize = 60;
@@ -204,11 +213,23 @@ pub fn serve(
     let limiter = (submit_per_min > 0).then(|| Arc::new(PeerLimiter::new(submit_per_min)));
     let haves_limiter = (haves_per_min > 0).then(|| Arc::new(PeerLimiter::new(haves_per_min)));
     let empty_table = Arc::new(PeerTable::new());
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for stream in listener.incoming() {
-        let stream = match stream {
+        let mut stream = match stream {
             Ok(s) => s,
             Err(_) => continue,
         };
+        let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if now > MAX_CONNECTIONS {
+            active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = respond_json(
+                &mut stream,
+                "503 Service Unavailable",
+                &serde_json::json!({ "error": "too many concurrent connections" }),
+            );
+            continue;
+        }
+        let active = active.clone();
         let dir = dir.clone();
         let policy = policy.clone();
         let network = network.clone();
@@ -227,6 +248,7 @@ pub fn serve(
                 governance,
                 peers,
             );
+            active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         });
     }
     Ok(())
@@ -244,6 +266,8 @@ fn handle(
     peers: Arc<PeerTable>,
 ) -> Result<(), String> {
     let mut stream = stream;
+    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     if let Err(e) = handle_inner(
         &mut stream,
         data_dir,
@@ -1082,15 +1106,33 @@ pub fn checkpoint_from_json(value: &serde_json::Value) -> Result<Checkpoint, Str
 
 fn read_request(stream: &TcpStream) -> Option<(String, String, Vec<u8>)> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-    let mut parts = line.split_whitespace();
+    let mut budget = MAX_HEADER_BYTES;
+    let mut read_line = |reader: &mut BufReader<TcpStream>, limit: usize| -> Option<String> {
+        let mut line = String::new();
+        reader
+            .by_ref()
+            .take(limit as u64)
+            .read_line(&mut line)
+            .ok()?;
+        if line.is_empty() || (line.len() >= limit && line.as_bytes().last() != Some(&10)) {
+            return None; // empty or unterminated within the budget
+        }
+        Some(line)
+    };
+    let request_line = read_line(&mut reader, budget)?;
+    budget = budget.checked_sub(request_line.len())?;
+    let mut parts = request_line.split_whitespace();
     let method = parts.next()?.to_string();
     let path = parts.next().unwrap_or("/").to_string();
     let mut content_length = 0usize;
+    let mut headers = 0usize;
     loop {
-        let mut header = String::new();
-        reader.read_line(&mut header).ok()?;
+        headers += 1;
+        if headers > MAX_HEADER_COUNT {
+            return None;
+        }
+        let header = read_line(&mut reader, budget)?;
+        budget = budget.checked_sub(header.len())?;
         let header = header.trim_end();
         if header.is_empty() {
             break;
@@ -2282,5 +2324,89 @@ mod tests {
         assert!(status.contains("200"), "{status} {body}");
         let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(listing["peers"].as_array().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod request_limit_tests {
+    use super::*;
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
+
+    /// Send `raw` from a client and parse it as one request on the server
+    /// side. Returns what read_request made of it.
+    fn parse(raw: Vec<u8>) -> Option<(String, String, Vec<u8>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut c = TcpStream::connect(addr).unwrap();
+            let _ = c.write_all(&raw);
+            let _ = c.shutdown(std::net::Shutdown::Write);
+            // hold the socket open so the server side can finish reading
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+        let parsed = read_request(&stream);
+        client.join().unwrap();
+        parsed
+    }
+
+    #[test]
+    fn a_well_formed_request_parses() {
+        let (m, p, b) = parse(b"GET /v1/status HTTP/1.1\r\nHost: x\r\n\r\n".to_vec()).unwrap();
+        assert_eq!((m.as_str(), p.as_str()), ("GET", "/v1/status"));
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn oversized_header_line_is_refused() {
+        let mut raw = b"GET / HTTP/1.1\r\nX: ".to_vec();
+        raw.extend(std::iter::repeat(b'a').take(MAX_HEADER_BYTES));
+        raw.extend_from_slice(b"\r\n\r\n");
+        assert!(parse(raw).is_none(), "header line beyond budget is dropped");
+    }
+
+    #[test]
+    fn too_many_headers_are_refused() {
+        let mut raw = b"GET / HTTP/1.1\r\n".to_vec();
+        for i in 0..(MAX_HEADER_COUNT + 2) {
+            raw.extend_from_slice(format!("X-{i}: v\r\n").as_bytes());
+        }
+        raw.extend_from_slice(b"\r\n");
+        assert!(
+            parse(raw).is_none(),
+            "header count beyond budget is dropped"
+        );
+    }
+
+    #[test]
+    fn oversized_body_is_refused_without_allocating() {
+        let raw = format!(
+            "POST /v1/entries HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        assert!(parse(raw.into_bytes()).is_none());
+    }
+
+    #[test]
+    fn partial_request_times_out_instead_of_hanging() {
+        // Client sends a request line but never finishes the headers; the
+        // server-side read timeout must end the read, not block forever.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut c = TcpStream::connect(addr).unwrap();
+            c.write_all(b"GET /v1/status HTTP/1.1\r\nHost: x\r\n")
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        });
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        let parsed = read_request(&stream);
+        assert!(parsed.is_none(), "stalled request is not accepted");
+        client.join().unwrap();
     }
 }
