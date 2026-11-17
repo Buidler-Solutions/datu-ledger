@@ -568,8 +568,8 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare("SELECT COUNT(*) FROM entries WHERE namespace = ?1 AND author = ?2")?;
-        let count: u64 = stmt.query_row(params![namespace, author], |row| row.get(0))?;
-        Ok(count)
+        let count: i64 = stmt.query_row(params![namespace, author], |row| row.get(0))?;
+        Ok(count as u64)
     }
 
     /// Zero-based ordinal of an entry inside its author's entries in the
@@ -582,9 +582,9 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT COUNT(*) FROM entries WHERE author = ?1 AND namespace = ?2 AND seq <= ?3",
         )?;
-        let count: u64 =
+        let count: i64 =
             stmt.query_row(params![author, namespace, seq as i64], |row| row.get(0))?;
-        Ok(count.saturating_sub(1))
+        Ok((count as u64).saturating_sub(1))
     }
 
     /// Entries with an internal `ord` greater than the cursor, oldest
