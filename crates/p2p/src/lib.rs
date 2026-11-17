@@ -565,13 +565,17 @@ fn answer_exchange(
 }
 
 /// What a full pull from one peer changed locally.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PullStats {
     pub entries_new: usize,
     pub entries_existing: usize,
     /// Skipped by our local writer policy (gated namespace, unadmitted
     /// author, read-only). Skipped, never fatal: the peer keeps serving.
     pub entries_denied: usize,
+    /// Why entries were denied, reason -> count. "Skipped by policy"
+    /// alone cannot tell a revoked key from a read-only flag; operators
+    /// need the reason to act.
+    pub denials: std::collections::BTreeMap<String, usize>,
     pub checkpoints_new: usize,
 }
 
@@ -641,7 +645,10 @@ pub fn pull_and_merge(
                 match store.insert_entry(entry) {
                     Ok(true) => stats.entries_new += 1,
                     Ok(false) => stats.entries_existing += 1,
-                    Err(StoreError::Denied(_)) => stats.entries_denied += 1,
+                    Err(StoreError::Denied(reason)) => {
+                    stats.entries_denied += 1;
+                    *stats.denials.entry(reason.clone()).or_insert(0) += 1;
+                }
                     Err(e) => {
                         return Err(format!(
                             "peer {peer_addr} serves history contradicting ours: {e} - \

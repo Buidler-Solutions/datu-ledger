@@ -289,6 +289,11 @@ pub struct ImportSummary {
     /// wedge everyone else's sync. Everything denied here stays perfectly
     /// valid and keeps flowing between open observers.
     pub entries_denied: usize,
+    /// Why entries were denied, reason -> count. Denials are silent data
+    /// loss from an operator's point of view unless the reason is shown:
+    /// "skipped by policy" alone cannot distinguish a revoked key from a
+    /// missing party signature.
+    pub denials: std::collections::BTreeMap<String, usize>,
     pub checkpoints_new: usize,
     pub checkpoints_existing: usize,
 }
@@ -1053,7 +1058,10 @@ impl Store {
             match self.insert_entry(entry) {
                 Ok(true) => summary.entries_new += 1,
                 Ok(false) => summary.entries_existing += 1,
-                Err(StoreError::Denied(_)) => summary.entries_denied += 1,
+                Err(StoreError::Denied(reason)) => {
+                    summary.entries_denied += 1;
+                    *summary.denials.entry(reason.clone()).or_insert(0) += 1;
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -1173,7 +1181,10 @@ impl Store {
             match self.insert_entry(entry) {
                 Ok(true) => summary.entries_new += 1,
                 Ok(false) => summary.entries_existing += 1,
-                Err(StoreError::Denied(_)) => summary.entries_denied += 1,
+                Err(StoreError::Denied(reason)) => {
+                    summary.entries_denied += 1;
+                    *summary.denials.entry(reason.clone()).or_insert(0) += 1;
+                }
                 Err(e) => return Err(e),
             }
         }

@@ -14,8 +14,8 @@
 //! and `datu bundle` travel by USB, email, or any channel that moves bytes.
 
 use crate::{
-    effective_policy, load_node_reader, network_hello, our_network_id, pull_peer, read_network,
-    short, sign_checkpoint_into,
+    denial_reasons, effective_policy, load_node_reader, network_hello, our_network_id, pull_peer,
+    read_network, short, sign_checkpoint_into,
 };
 
 /// Learned peers dialed per cycle: keeps a big table from meaning a big
@@ -414,8 +414,9 @@ pub fn run(
                     }
                     if stats.denied > 0 {
                         println!(
-                            "[sync] {peer}: {} entries skipped by local policy",
-                            stats.denied
+                            "[sync] {peer}: {} entries skipped by local policy{}",
+                            stats.denied,
+                            denial_reasons(&stats.denials)
                         );
                     }
                 }

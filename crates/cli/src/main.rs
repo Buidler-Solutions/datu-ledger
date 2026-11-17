@@ -388,7 +388,7 @@ enum PolicyCmd {
         /// Party role gated documents must carry a verified signature for (repeatable, any key)
         #[arg(long = "require-role", value_delimiter = ',')]
         require_roles: Vec<String>,
-        /// Per-namespace party rule: NS:ROLE[@FIELD][=KEY] (repeatable).
+        /// Per-namespace party rule: `NS:ROLE[@FIELD][=KEY]` (repeatable).
         /// `gov.titles.*:holder@holder_key` binds the holder role to the key
         /// named in the document's holder_key field.
         #[arg(long = "rule")]
@@ -431,7 +431,7 @@ enum NetworkCmd {
         roots: Vec<String>,
         /// Pin the governance manifest root key (hex): this node compiles
         /// its writer policy from the on-ledger chain
-        /// gov.mesh.<network-id>.policy (fail-closed without a valid chain)
+        /// `gov.mesh.<network-id>.policy` (fail-closed without a valid chain)
         #[arg(long = "manifest-root")]
         manifest_root: Option<String>,
     },
@@ -682,7 +682,7 @@ enum WalletCmd {
         /// Relying party identifier, e.g. app.example.com
         #[arg(long)]
         rp_id: String,
-        /// Origin the login request came from, e.g. https://app.example.com
+        /// Origin the login request came from, e.g. <https://app.example.com>
         #[arg(long)]
         origin: String,
         /// Single-use nonce issued by the relying party (32 hex chars)
@@ -2067,7 +2067,11 @@ fn cmd_bundle_import(node: &Node, mesh: &str, input: &Path) -> Result<(), String
         summary.entries_new,
         summary.entries_existing,
         if summary.entries_denied > 0 {
-            format!(", {} skipped by this node's policy", summary.entries_denied)
+            format!(
+                ", {} skipped by this node's policy{}",
+                summary.entries_denied,
+                denial_reasons(&summary.denials)
+            )
         } else {
             String::new()
         },
@@ -2717,7 +2721,11 @@ fn cmd_sync(
             stats.new_entries,
             stats.known,
             if stats.denied > 0 {
-                format!(", {} skipped by this node's policy", stats.denied)
+                format!(
+                    ", {} skipped by this node's policy{}",
+                    stats.denied,
+                    denial_reasons(&stats.denials)
+                )
             } else {
                 String::new()
             },
@@ -2728,12 +2736,27 @@ fn cmd_sync(
     Ok(())
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct SyncStats {
     pub new_entries: usize,
     pub known: usize,
     pub denied: usize,
+    pub denials: std::collections::BTreeMap<String, usize>,
     pub new_checkpoints: usize,
+}
+
+/// Denials are silent data loss unless the reason is shown: render
+/// reason -> count pairs after the skip count so an operator can tell a
+/// revoked key from a read-only flag at a glance.
+pub(crate) fn denial_reasons(denials: &std::collections::BTreeMap<String, usize>) -> String {
+    if denials.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = denials
+        .iter()
+        .map(|(reason, count)| format!("{reason} (x{count})"))
+        .collect();
+    format!(" - {}", parts.join("; "))
 }
 
 /// Pull everything a peer has that this store lacks, over whichever
@@ -2766,6 +2789,7 @@ pub(crate) fn pull_peer(
             new_entries: stats.entries_new,
             known: stats.entries_existing,
             denied: stats.entries_denied,
+            denials: stats.denials,
             new_checkpoints: stats.checkpoints_new,
         })
     }
@@ -2869,7 +2893,10 @@ fn pull_peer_http(store: &Store, peer: &str, page: usize) -> Result<SyncStats, S
             match store.insert_entry(&entry) {
                 Ok(true) => stats.new_entries += 1,
                 Ok(false) => stats.known += 1,
-                Err(datu_store::StoreError::Denied(_)) => stats.denied += 1,
+                Err(datu_store::StoreError::Denied(reason)) => {
+                    stats.denied += 1;
+                    *stats.denials.entry(reason.clone()).or_insert(0) += 1;
+                }
                 Err(datu_store::StoreError::Conflict { .. }) => {
                     return Err(format!(
                         "peer serves history contradicting ours at author {} seq {}: {} - this is fork evidence, not a sync error; collect the peer's witness stream and run `datu prove-fork`",
@@ -2936,7 +2963,11 @@ fn cmd_delta_merge(node: &Node, mesh: &str, input: &Path) -> Result<(), String> 
         summary.entries_new,
         summary.entries_existing,
         if summary.entries_denied > 0 {
-            format!(", {} skipped by this node's policy", summary.entries_denied)
+            format!(
+                ", {} skipped by this node's policy{}",
+                summary.entries_denied,
+                denial_reasons(&summary.denials)
+            )
         } else {
             String::new()
         },
