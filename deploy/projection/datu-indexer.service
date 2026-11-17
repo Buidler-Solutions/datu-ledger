@@ -1,0 +1,24 @@
+# Per-user systemd unit for the projection indexer (same pattern as the node
+# runbook: absolute paths, restart on failure, journald logs).
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/projection/datu-indexer.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now datu-indexer.service
+#   journalctl --user -u datu-indexer -f
+[Unit]
+Description=DATU projection indexer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/datu-indexer \
+  --data-dir %h/.datu \
+  --db-url postgres://datu:change-me@127.0.0.1:5432/datu \
+  --namespace gov.* \
+  --verify signatures \
+  --every 5
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

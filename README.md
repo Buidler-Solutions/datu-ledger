@@ -309,7 +309,11 @@ contract's pending/ready verdict with its reasons:
 
 - `GET /v1/status` - node counters, the enforced policy, and (when a manifest
   is pinned) a `manifest` block with `freshness` + the reason for it
-- `GET /v1/entries?limit&ns&author` - recent entries
+- `GET /v1/entries?limit&ns&author` - recent entries; each item carries `seq`
+  (the author's global feed number) and `ns_seq` (zero-based ordinal inside
+  that author's entries in the same namespace, derived on read)
+- `GET /v1/entries?after=<cursor>&limit=N` - the resumable indexer tail:
+  oldest-first, `next_cursor` in the answer (opaque token)
 - `GET /v1/entry/{id}` - full entry (payload base64, both signatures)
 - `GET /v1/feed/{author}` - head **plus `next`** ({seq, prev}) so dApps build
   correct sign requests without racing the chain
@@ -442,17 +446,55 @@ answered politely and empty, foreign-mesh addresses are not even learned.
 #### The ecosphere: one explorer, every transaction
 
 An observer node (`--http`, no `policy.json`) that seeds from the network
-holds the union of everything reachable - and its explorer's **ecosphere**
-tab draws it: every entry a node in a live mesh, every `prev` and `ref` a
-link between them. Nodes are colored by namespace and sized by how many
-entries attach to them, so authors and their lineages form constellations.
-Drag a node and the mesh follows; drag empty space to pan, scroll to zoom;
-click a node for a callout bubble with the record's facts and a link to
-the full locally-verified view (its links light up while selected). Below
-the mesh: every node address this node knows, its source
-(`seed`/`configured`/`mdns`/`pex`/`announce`), last
-successful sync and state. A holder or a validator running the same command
-sees the same ecosystem converge in their own mirror.
+holds the union of everything reachable - and its explorer **lands on the
+ecosphere**: every entry a node, every `prev` and `ref` a link. The mesh
+view opens by default (lineages braided, gently drifting); one button
+cycles the other lenses:
+
+- **layered**: the textbook DAG, roots on top, one stratum per causal depth
+- **bubbles**: one bubble per author key, sized by entry count, pulsing on
+  its own heartbeat; records ricochet inside their sphere; cross-author
+  citations carry traveling sparks; dashed generation rings wrap the causal
+  depth around the pinned gold genesis core (radial DAG); bubbles wander,
+  jostle and can be dragged, springing back to their ring. Zoom all the way
+  in and the bubble opens into a free-drifting **strand view**
+- a **namespace filter** at the canvas's top left rebuilds the illustration
+  from a single namespace, one bubble per author who wrote there, with that
+  namespace's own ordinals (`ns_seq`, derived per author per namespace)
+
+Drag a node and the mesh follows; drag empty space to pan; click a node for
+its callout and the locally verified record. Below the canvas: the peer
+table (address, node, mesh, source `seed`/`configured`/`mdns`/`pex`/`announce`,
+last sync, state) and the witness/dispute summary. A holder or a validator
+running the same command sees the same ecosystem converge in its own mirror.
+
+#### Projection layer (optional)
+
+The ledger is evidence; apps sometimes need joins, search and aggregates.
+`datu-indexer` (crate `crates/indexer`) follows a node's store, verifies every
+entry (`--verify signatures` by default), and projects it into an ordinary SQL
+database: `entries`, `entry_refs`, `feeds`, `checkpoints`, `rejected`, plus a
+durable cursor. It is a sidecar, not a protocol requirement: the node API and
+the explorer work without it, and the projection is rebuildable (`--reindex`).
+
+```sh
+cargo build --release -p datu-indexer                        # SQLite (default)
+cargo build --release -p datu-indexer --features postgres     # + PostgreSQL
+cargo build --release -p datu-indexer --features mysql        # + MySQL
+
+./target/release/datu-indexer --data-dir /var/lib/datu/node   --db-url postgres://datu:secret@db.internal:5432/datu   --namespace 'gov.*' --every 5
+./target/release/datu-indexer --db-url postgres://datu:secret@db.internal:5432/datu --status
+```
+
+Deployment: `deploy/projection/` (compose: node + indexer + PostgreSQL, plus a
+systemd --user unit). Worked example: `examples/projection-titles/` (project ->
+titles view -> read API). Rung 1 without any projection: `examples/datu-outbox/`
+(outbox table + worker).
+
+Remote mirrors and third-party indexers follow the additive HTTP cursor
+`GET /v1/entries?after=<cursor>` instead of the store. Traditional apps that
+do not want a projection can adopt the ledger with an `outbox` table and a
+signing worker (rung 1), or read the node API directly (rung 2).
 
 ### Offline reconciliation by files
 

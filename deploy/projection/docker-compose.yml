@@ -1,0 +1,70 @@
+# DATU node + projection indexer + PostgreSQL, one command.
+#   cp .env.example .env   # then edit DATU_SEED and PG_PASSWORD
+#   docker compose -f deploy/projection/docker-compose.yml up -d --build
+#   docker compose -f deploy/projection/docker-compose.yml logs -f indexer
+services:
+  node:
+    build:
+      context: ../..
+      dockerfile: deploy/projection/Dockerfile
+    command:
+      - datu
+      - node
+      - --data-dir
+      - /data/node
+      - --seed
+      - ${DATU_SEED:-anchor.example:7476}
+      - --every
+      - ${NODE_EVERY:-15}
+      - --witness
+      - --http
+      - 0.0.0.0:7474
+    volumes:
+      - datu-data:/data
+    ports:
+      - "${EXPLORER_PORT:-7474}:7474"
+    restart: unless-stopped
+
+  indexer:
+    build:
+      context: ../..
+      dockerfile: deploy/projection/Dockerfile
+    command:
+      - datu-indexer
+      - --data-dir
+      - /data/node
+      - --db-url
+      - postgres://datu:${PG_PASSWORD:-change-me}@db:5432/datu
+      - --namespace
+      - ${DATU_NAMESPACES:-gov.*}
+      - --verify
+      - signatures
+      - --every
+      - ${INDEX_EVERY:-5}
+    volumes:
+      - datu-data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: datu
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-change-me}
+      POSTGRES_DB: datu
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U datu -d datu"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  datu-data:
+  pg-data:

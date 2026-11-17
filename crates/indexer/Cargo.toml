@@ -1,0 +1,32 @@
+[package]
+name = "datu-indexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Optional projection layer: follow a DATU store and project verified entries into a SQL database"
+
+[[bin]]
+name = "datu-indexer"
+path = "src/main.rs"
+
+[features]
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
+postgres = ["dep:postgres"]
+mysql = ["dep:mysql"]
+
+[dependencies]
+datu-core.workspace = true
+datu-store.workspace = true
+clap.workspace = true
+rusqlite = { workspace = true, optional = true }
+postgres = { version = "0.19", optional = true }
+mysql = { version = "25", optional = true }
+serde_json.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+rand.workspace = true
+tempfile.workspace = true
+datu-core = { workspace = true }
