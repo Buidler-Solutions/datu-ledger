@@ -83,6 +83,13 @@ pub const SOURCE_MDNS: &str = "mdns";
 const SOURCE_PEX: &str = "pex";
 const SOURCE_ANNOUNCE: &str = "announce";
 
+/// A learned address (mdns / pex / announce) that never synced is dropped
+/// from the table after this many consecutive failures...
+const STALE_FAILURES: u64 = 12;
+/// ...and only once it has been known this long, so a node that is merely
+/// restarting is not forgotten.
+const STALE_MIN_AGE_MS: u64 = 10 * 60 * 1000;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PeerEntry {
     pub addr: String,
@@ -99,6 +106,9 @@ pub struct PeerEntry {
     pub last_attempt_ms: u64,
     #[serde(default)]
     pub last_error: String,
+    /// Consecutive failed dials since the last success (0 = never failed).
+    #[serde(default)]
+    pub failures: u64,
 }
 
 impl PeerEntry {
@@ -231,6 +241,7 @@ impl PeerTable {
                         last_success_ms: 0,
                         last_attempt_ms: 0,
                         last_error: String::new(),
+                        failures: 0,
                     },
                 );
             }
@@ -253,14 +264,40 @@ impl PeerTable {
         if let Some(entry) = self.lock().get_mut(addr.trim()) {
             entry.last_success_ms = now;
             entry.last_error.clear();
+            entry.failures = 0;
         }
     }
 
     pub fn record_failure(&self, addr: &str, error: &str) {
         let now = now_ms();
+        let addr = addr.trim();
+        let mut guard = self.lock();
+        let Some(entry) = guard.get_mut(addr) else {
+            return;
+        };
+        entry.last_attempt_ms = now;
+        entry.last_error = error.chars().take(120).collect();
+        entry.failures = entry.failures.saturating_add(1);
+        // Stale mDNS records and dead hearsay: an address only the network
+        // told us about, which has never once answered and keeps failing,
+        // is noise in the explorer. The operator's own seed/configured
+        // addresses are never swept.
+        let learned = !matches!(entry.source.as_str(), SOURCE_SEED | SOURCE_CONFIGURED);
+        if learned
+            && entry.last_success_ms == 0
+            && entry.failures >= STALE_FAILURES
+            && now.saturating_sub(entry.first_seen_ms) >= STALE_MIN_AGE_MS
+        {
+            guard.remove(addr);
+        }
+    }
+
+    /// Test hook: backdate an entry as if it had been known longer.
+    #[doc(hidden)]
+    pub fn age_for_test(&self, addr: &str, age_ms: u64) {
+        let now = now_ms();
         if let Some(entry) = self.lock().get_mut(addr.trim()) {
-            entry.last_attempt_ms = now;
-            entry.last_error = error.chars().take(120).collect();
+            entry.first_seen_ms = now.saturating_sub(age_ms);
         }
     }
 

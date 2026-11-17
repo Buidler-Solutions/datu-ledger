@@ -166,3 +166,41 @@ fn table_persists_in_the_data_dir() {
     assert_eq!(PeerTable::load(&dir).len(), 1);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A learned address that never syncs and keeps failing is swept away, so
+/// stale mDNS records do not accumulate in the explorer; the operator's own
+/// seeds and addresses that do answer are kept.
+#[test]
+fn stale_learned_peers_are_swept() {
+    let table = PeerTable::new();
+    table.upsert("10.0.0.31:7476", "cc31", "", "mdns");
+    table.upsert("10.0.0.32:7476", "cc32", "", "seed");
+    // Age both past the sweep window without waiting ten real minutes.
+    for addr in ["10.0.0.31:7476", "10.0.0.32:7476"] {
+        table.upsert(addr, "", "", "mdns");
+    }
+    // Re-create as freshly aged: the test pokes the entry directly.
+    table.age_for_test("10.0.0.31:7476", 11 * 60 * 1000);
+    table.age_for_test("10.0.0.32:7476", 11 * 60 * 1000);
+    for _ in 0..12 {
+        table.record_failure("10.0.0.31:7476", "connection refused");
+        table.record_failure("10.0.0.32:7476", "connection refused");
+    }
+    let snapshot = table.snapshot();
+    assert!(
+        snapshot.iter().all(|p| p.addr != "10.0.0.31:7476"),
+        "learned dead address is gone"
+    );
+    assert!(
+        snapshot.iter().any(|p| p.addr == "10.0.0.32:7476"),
+        "operator seed survives the sweep"
+    );
+    // A learned peer that actually synced is never swept either.
+    table.upsert("10.0.0.33:7476", "cc33", "", "mdns");
+    table.record_success("10.0.0.33:7476", "cc33", "");
+    table.age_for_test("10.0.0.33:7476", 11 * 60 * 1000);
+    for _ in 0..12 {
+        table.record_failure("10.0.0.33:7476", "connection refused");
+    }
+    assert!(table.snapshot().iter().any(|p| p.addr == "10.0.0.33:7476"));
+}
