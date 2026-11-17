@@ -341,13 +341,40 @@ fn handle_inner(
             respond_json(stream, "200 OK", &json)
         }
         ("GET", "/v1/entries") => {
+            // Two shapes: classic offset paging (ns/author filters) and the
+            // indexer tail `?after=<cursor>`: oldest-first, resumable, with
+            // the next opaque cursor in the answer. The cursor encodes the
+            // store's internal insertion ordinal and nothing else.
+            let after = query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("after="))
+                .and_then(decode_cursor);
             let (ns, author, limit, offset) = parse_list_query(&query);
+            if let Some(after_ord) = after {
+                let batch = store
+                    .entries_after(after_ord, limit)
+                    .map_err(|e| e.to_string())?;
+                let next_cursor = batch
+                    .last()
+                    .map(|(ord, _)| encode_cursor(*ord))
+                    .unwrap_or_else(|| encode_cursor(after_ord));
+                let items: Vec<serde_json::Value> = batch
+                    .iter()
+                    .map(|(_, e)| entry_summary_json(&store, e).map_err(|e| e.to_string()))
+                    .collect::<Result<_, _>>()?;
+                respond_json(
+                    stream,
+                    "200 OK",
+                    &serde_json::json!({ "entries": items, "next_cursor": next_cursor }),
+                )?;
+                return Ok(());
+            }
             let entries = store
                 .list_page(ns.as_deref(), author.as_deref(), limit, offset)
                 .map_err(|e| e.to_string())?;
             let items: Vec<serde_json::Value> = entries
                 .iter()
-                .map(|e| entry_summary_json(e).map_err(|e| e.to_string()))
+                .map(|e| entry_summary_json(&store, e).map_err(|e| e.to_string()))
                 .collect::<Result<_, _>>()?;
             respond_json(stream, "200 OK", &serde_json::json!({ "entries": items }))
         }
@@ -473,7 +500,7 @@ fn handle_inner(
             };
             let items: Vec<serde_json::Value> = feed
                 .iter()
-                .map(|e| entry_summary_json(e).map_err(|e| e.to_string()))
+                .map(|e| entry_summary_json(&store, e).map_err(|e| e.to_string()))
                 .collect::<Result<_, _>>()?;
             respond_json(
                 stream,
@@ -934,6 +961,15 @@ fn handle_inner(
     }
 }
 
+/// Opaque indexer cursor: "cur1:" plus the store's insertion ordinal.
+/// Treat it as a token; never parse it on the client side.
+fn encode_cursor(ord: i64) -> String {
+    format!("cur1:{ord}")
+}
+fn decode_cursor(raw: &str) -> Option<i64> {
+    raw.trim().strip_prefix("cur1:")?.parse::<i64>().ok()
+}
+
 fn parse_list_query(query: &str) -> (Option<String>, Option<String>, usize, usize) {
     let mut ns = None;
     let mut author = None;
@@ -964,12 +1000,16 @@ fn payload_preview(entry: &Entry) -> String {
         .collect()
 }
 
-fn entry_summary_json(entry: &Entry) -> Result<serde_json::Value, String> {
+fn entry_summary_json(store: &Store, entry: &Entry) -> Result<serde_json::Value, String> {
+    let ns_seq = store
+        .namespace_seq(&entry.body.author, &entry.body.namespace, entry.body.seq)
+        .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
         "id": hex::encode(entry.id().map_err(|e| e.to_string())?),
         "author": entry.body.author,
         "namespace": entry.body.namespace,
         "seq": entry.body.seq,
+        "ns_seq": ns_seq,
         "prev": entry.body.prev.map(hex::encode),
         "timestamp_ms": entry.body.timestamp_ms,
         "refs": entry.body.refs.iter().map(hex::encode).collect::<Vec<_>>(),
@@ -1080,7 +1120,7 @@ fn respond(
     body: &str,
 ) -> Result<(), String> {
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream
@@ -1133,6 +1173,7 @@ const EXPLORER_HTML: &str = r##"<!doctype html>
  #modalhead{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.65rem 1rem;border-bottom:1px solid #21262d}
  #modalbody{overflow:auto;padding:1rem;white-space:pre-wrap;font-size:.72rem;line-height:1.5}
  input{background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:.4rem;border-radius:6px;width:340px;max-width:100%}
+ select{background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:.4rem;border-radius:6px;max-width:100%}
  button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:.4rem 1rem;border-radius:6px;cursor:pointer}
  .tag{background:#1f6feb33;color:#79c0ff;border-radius:4px;padding:0 .35rem;font-size:.7rem}
  #disputes{display:none;background:#f8514922;border:1px solid #f8514966;color:#ffa198;border-radius:6px;padding:.6rem 1rem;margin-top:1rem;font-size:.8rem}
@@ -1146,6 +1187,11 @@ const EXPLORER_HTML: &str = r##"<!doctype html>
  .tile .num{font-size:1.45rem;color:#e6edf3;line-height:1.15}
  .tile .lbl{font-size:.6rem;color:#8b949e;text-transform:uppercase;letter-spacing:.07em}
  .tile.blue .num{color:#79c0ff}.tile.gold .num{color:#e3b341}.tile.red .num{color:#ffa198}
+ #nsFilterBox{position:absolute;top:10px;left:10px;z-index:3;display:flex;align-items:center;gap:.4rem;
+  background:#0d1117cc;border:1px solid #21262d;border-radius:8px;padding:.35rem .45rem;backdrop-filter:blur(3px)}
+ #nsFilterBox select{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;
+  padding:.3rem .45rem;font-size:.76rem;max-width:46vw}
+ #nsFilterBox .tagline{font-size:.7rem;color:#8b949e}
  #nsLegend{position:absolute;top:10px;right:10px;max-width:48%;display:flex;gap:.4rem;flex-wrap:wrap;justify-content:flex-end;pointer-events:none;z-index:3;background:#0d1117aa;border:1px solid #21262d;border-radius:8px;padding:.45rem;backdrop-filter:blur(3px)}
  #nsLegend .chip{pointer-events:auto}
  .chip{background:#161b22;border:1px solid #30363d;border-radius:99px;padding:.16rem .6rem;font-size:.7rem;cursor:pointer}
@@ -1163,22 +1209,26 @@ const EXPLORER_HTML: &str = r##"<!doctype html>
   .tile .num{font-size:1.1rem}
   .tile .lbl{font-size:.55rem}
   #nsLegend{max-width:70%}
+  #nsFilterBox{top:6px;left:6px;padding:.25rem .35rem}
+  #nsFilterBox .tagline{display:none}
+  #nsFilterBox select{max-width:52vw}
  }
 </style></head><body>
 <div id="ecosphere" class="hero">
  <div class="herohead">
   <h1>DATU Ledger Explorer <span class="tag">self-verifying mirror</span></h1>
   <div class="muted herosub">every author strand a bubble · every prev/ref a link · many lineages, one ecosystem, no consensus</div>
-  <button id="laytoggle" onclick="toggleLayout()" style="margin-left:auto">mesh view</button>
+  <button id="laytoggle" onclick="toggleLayout()" style="margin-left:auto">layered view</button>
  </div>
  <div id="heroStats" class="tiles"></div>
  <div id="insights" class="muted" style="font-size:.74rem;margin:.15rem 0 .8rem"></div>
  <div id="graphwrap" style="position:relative;display:inline-block;width:100%">
   <canvas id="graph" width="960" height="560" style="width:100%;border:1px solid #21262d;border-radius:10px;cursor:grab;display:block;touch-action:none"></canvas>
+  <div id="nsFilterBox"><span class="tagline">namespace</span>
+   <select id="nsFilter" onchange="applyNsFilter(this.value)"><option value="">all</option></select></div>
   <div id="nsLegend" class="legend"></div>
   <div id="callout" style="display:none;position:absolute;background:#161b22;border:1px solid #58a6ff66;border-radius:6px;padding:.5rem .6rem;font-size:.72rem;max-width:270px;box-shadow:0 4px 14px #0009;pointer-events:auto;z-index:5"></div>
  </div>
- <div class="muted" style="font-size:.72rem;margin-top:.5rem">the mesh never sleeps - every strand drifts slowly and randomly across its bubble's full sphere · the bubbles themselves wander and jostle, the genesis core keeping them at a respectful orbit, and a dragged bubble springs slowly back to its generation ring · drag a node and the mesh follows · drag empty space to pan · pinch or ctrl + scroll to zoom · tap a node for the callout · click a node for the callout · color = namespace, size = link count · hover a chip to spotlight its namespace, click to pin · the gold pulsing core is the founder's genesis: hover for its label, drag it away and it drifts slowly back to center · link arrows point from a record to the record it cites · sparks travel the cross-author citations, flowing from the citing record to the cited one · every bubble breathes on its own heartbeat · the field is the DAG drawn radially: genesis at the heart, every bubble resting on the ring of its causal generation, arrows and sparks always pointing from a record to the record it cites · each bubble is one author's strand: zoom all the way in and the bubble opens into a full strand view, border gone, its records drifting freely across the frame while their links keep them chained, zoom all the way out and they re-coil back into the bubble · mesh view braids the strands, layered view stacks the DAG roots-on-top</div>
  <div id="ecostats" class="muted" style="margin:.6rem 0 0;font-size:.78rem"></div>
 </div>
 <div class="bar"><input id="q" placeholder="entry id (64 hex) or author (64 hex)"><button onclick="search()">load</button>
@@ -1201,7 +1251,7 @@ function esc(s){const d=document.createElement('div');d.textContent=s;return d.i
 function hideEco(){document.getElementById('ecosphere').style.display='none';document.getElementById('callout').style.display='none'}
 // ── ecosphere: every entry a node, every prev/ref a link in the mesh ─────
 const GENESIS_ID='37616bce5bfb8b773f7c99a9e52bcd7aa43294301ab074a908fbc9a334315d63';
-let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'bubbles',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null};
+let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'mesh',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null};
 function fitCanvas(){const cv=document.getElementById('graph');if(!cv)return;
  // portrait phones get a taller canvas so the mesh has room; landscape and
  // desktop keep the wide hero
@@ -1211,7 +1261,9 @@ function hue(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))%360;return h}
 function buildMesh(entries,cap){
  NET.nodes=[];NET.byId=new Map();NET.links=[];
  const use=entries.slice(0,cap);
- for(const e of use){const n={id:e.id,ns:e.namespace||'x',seq:e.seq,author:e.author,ts:e.timestamp_ms,
+ for(const e of use){const n={id:e.id,ns:e.namespace||'x',seq:e.seq,
+  nseq:e.ns_seq!==undefined?e.ns_seq:e.seq,
+  author:e.author,ts:e.timestamp_ms,
   prev:e.payload_preview||'',h:hue(e.namespace||'x'),root:e.id===GENESIS_ID,deg:0,x:0,y:0,vx:0,vy:0};
   NET.nodes.push(n);NET.byId.set(n.id,n)}
  for(const e of use){const n=NET.byId.get(e.id);if(!n)continue;
@@ -1329,11 +1381,17 @@ function simStep(){
    const ring=95+(c.dep||1)*100+Math.sin(nowC/2400+(c.ph||0))*7;
    const d=Math.hypot(c.cx,c.cy)||1;
    c.vx+=(c.cx/d*ring-c.cx)*.005;c.vy+=(c.cy/d*ring-c.cy)*.005;
+   // orbital drift: a slow slide along the ring, direction per bubble
+   const tx=-c.cy/d,ty=c.cx/d;
+   c.vx+=tx*c.orb;c.vy+=ty*c.orb;
    c.wa=(c.wa===undefined?(c.ph||0):c.wa)+(Math.random()-.5)*.06;
    c.vx+=Math.cos(c.wa)*.012;c.vy+=Math.sin(c.wa)*.012;
    c.vx*=.95;c.vy*=.95;
    const sp=Math.hypot(c.vx,c.vy);if(sp>.35){c.vx*=.35/sp;c.vy*=.35/sp}
-   c.cx+=c.vx;c.cy+=c.vy}}
+   c.cx+=c.vx;c.cy+=c.vy;
+   // the sphere carries its records: interior physics stays in the
+   // bubble's own frame while the bubble itself glides
+   if(c.vx||c.vy)for(const n of c.nodes){n.x+=c.vx;n.y+=c.vy}}}
  // integration: the mesh centers softly, the layered view anchors each
  // node to its stratum, bubble records roam free inside their sphere; a
  // dragged node is pinned to the pointer, every strand wanders a little
@@ -1484,7 +1542,7 @@ function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;cons
  for(const n of [NET.hover,NET.sel]){if(!n)continue;const[sx,sy]=worldToScreen(n,cv);
   ctx.strokeStyle='#c9d1d9';ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(sx,sy,8,0,7);ctx.stroke();
   ctx.fillStyle=n.root?'#e3b341':'#c9d1d9';ctx.font='11px ui-monospace,Menlo,monospace';
-  ctx.fillText(n.root?'genesis':n.ns+' #'+n.seq,sx+11,sy-9)}
+  ctx.fillText(n.root?'genesis':n.ns+' #'+(n.nseq??n.seq),sx+11,sy-9)}
  if(NET.sel){const[sx,sy]=worldToScreen(NET.sel,cv);
   const co=document.getElementById('callout'),wr=document.getElementById('graphwrap');
   co.style.left=Math.min(Math.max(sx+16,4),Math.max(wr.clientWidth-280,4))+'px';
@@ -1514,9 +1572,9 @@ function bubbleAt(ev){const cv=document.getElementById('graph');
  return best}
 function calloutFor(p){const co=document.getElementById('callout');
  co.style.display='block';
- co.innerHTML=`<div><b style="color:hsl(${p.h} 70% 70%)">${esc(p.ns)}</b> <span class="muted">#${p.seq}</span>${p.root?' <span class="tag" style="background:#d2992233;color:#e3b341">lineage mark</span>':''}</div>`+
+ co.innerHTML=`<div><b style="color:hsl(${p.h} 70% 70%)">${esc(p.ns)}</b> <span class="muted">#${p.nseq??p.seq}</span>${p.root?' <span class="tag" style="background:#d2992233;color:#e3b341">lineage mark</span>':''}</div>`+
   `<div class="muted">${short(p.id)} · by ${short(p.author)}</div>`+
-  `<div class="muted">${new Date(p.ts).toLocaleString()} · ${p.deg} link(s)</div>`+
+  `<div class="muted">${new Date(p.ts).toLocaleString()} · ${p.deg} link(s) · feed #${p.seq}</div>`+
   `<div style="margin-top:.3rem;word-break:break-all">${esc(p.prev.slice(0,90))}</div>`+
   `<div style="margin-top:.4rem"><a href="#" onclick="show('${p.id}');return false">open full record →</a></div>`;
  co.onclick=e=>{if(e.target===co){co.style.display='none';NET.sel=null}}}
@@ -1534,7 +1592,9 @@ function wireGraph(){if(NET.wired){wake();return}NET.wired=true;const cv=documen
    const r=cv.getBoundingClientRect();
    const px=(ev.clientX-r.left)*(cv.width/r.width),py=(ev.clientY-r.top)*(cv.height/r.height);
    if(d.n){const w=screenToWorld(px,py,cv);d.x=w[0];d.y=w[1]}
-   else if(d.c){const w=screenToWorld(px,py,cv);d.c.cx=w[0];d.c.cy=w[1];d.c.vx=0;d.c.vy=0}
+   else if(d.c){const w=screenToWorld(px,py,cv);
+    const dx=w[0]-d.c.cx,dy=w[1]-d.c.cy;d.c.cx=w[0];d.c.cy=w[1];d.c.vx=0;d.c.vy=0;
+    for(const n of d.c.nodes){n.x+=dx;n.y+=dy}}
    else{NET.pan.x=d.pan.x+(ev.clientX-d.pan.mx);NET.pan.y=d.pan.y+(ev.clientY-d.pan.my)}
    wake();return}
   NET.hover=nodeAt(ev);cv.style.cursor=NET.hover?'pointer':'grab'};
@@ -1565,7 +1625,9 @@ function wireGraph(){if(NET.wired){wake();return}NET.wired=true;const cv=documen
   if(NET.drag&&ev.touches.length===1){NET.moved++;const t=ev.touches[0];const d=NET.drag;
    if(d.n||d.c){const p=tpos(t);const w=screenToWorld(p[0],p[1],cv);
     if(d.n){d.x=w[0];d.y=w[1]}
-    else{d.c.cx=w[0];d.c.cy=w[1];d.c.vx=0;d.c.vy=0}}
+    else{const dx=w[0]-d.c.cx,dy=w[1]-d.c.cy;
+     d.c.cx=w[0];d.c.cy=w[1];d.c.vx=0;d.c.vy=0;
+     for(const n of d.c.nodes){n.x+=dx;n.y+=dy}}}
    else{NET.pan.x=d.pan.x+(t.clientX-d.pan.mx);NET.pan.y=d.pan.y+(t.clientY-d.pan.my)}
    wake()}},{passive:false});
  cv.addEventListener('touchend',ev=>{if(!ev.touches.length){NET.pinch=null;
@@ -1620,6 +1682,9 @@ function buildClusters(){
   c.dep=dep===1e9?1:dep;
   let j=0;for(let i=0;i<8;i++)j=(j*33+(parseInt(c.author.substr(i*2,2),16)||0))%9973;
   c.ph=j%628/100;
+  // each bubble also slides around its ring on its own slow orbit,
+  // some clockwise some not, so the field visibly circulates
+  c.orb=((j%2)?1:-1)*(.004+(j%7)*.001);
   const ang=(j%360)*Math.PI/180,r=130+(j%170);
   c.cx=Math.cos(ang)*r;c.cy=Math.sin(ang)*r}
  const root=NET.byId.get(GENESIS_ID);
@@ -1635,6 +1700,16 @@ function toggleLayout(){const btn=document.getElementById('laytoggle');
  else{NET.mode='bubbles';buildClusters();btn.textContent='mesh view';NET.alpha=.6}
  NET.sub='bubbles';NET.strand=null;NET.camT=null;
  NET.sel=null;document.getElementById('callout').style.display='none';wake()}
+// Namespace-driven view: rebuild the ecosphere from just one namespace, so
+// each namespace can be read as its own small DAG (one bubble per author
+// that wrote in it). The selector lists namespaces with their entry counts.
+function applyNsFilter(ns){NET.nsFilter=ns||null;
+ const all=NET.entriesAll||[];
+ const use=NET.nsFilter?all.filter(e=>e.namespace===NET.nsFilter):all;
+ buildMesh(use,2500);
+ if(NET.mode==='layers')layoutLayers();else if(NET.mode==='bubbles')buildClusters();
+ NET.sel=null;NET.hover=null;document.getElementById('callout').style.display='none';
+ wake()}
 async function loadEcosystem(){
  document.getElementById('ecosphere').style.display='block';
  fitCanvas();
@@ -1645,7 +1720,14 @@ async function loadEcosystem(){
   if(batch.length<page||entries.length>=20000){if(entries.length>=20000)capped=true;break}
   offset+=page}
  const [ps,st]=await Promise.all([j('/v1/peers'),j('/v1/status')]);
- const meshCapped=buildMesh(entries,2500);
+ NET.entriesAll=entries;
+ const sel=document.getElementById('nsFilter');
+ if(sel){const counts=new Map();
+  for(const e of entries){const k=e.namespace||'x';counts.set(k,(counts.get(k)||0)+1)}
+  sel.innerHTML='<option value="">all namespaces</option>'+
+   [...counts.entries()].sort((a,b)=>b[1]-a[1]).map(([ns,n])=>`<option value="${esc(ns)}"${ns===NET.nsFilter?' selected':''}>${esc(ns)} · ${n}</option>`).join('')}
+ const use=NET.nsFilter?entries.filter(e=>e.namespace===NET.nsFilter):entries;
+ const meshCapped=buildMesh(use,2500);
  if(NET.mode==='layers')layoutLayers();else if(NET.mode==='bubbles')buildClusters();
  NET.sel=null;NET.hover=null;NET.pan={x:0,y:0};NET.zoom=1;NET.sub='bubbles';NET.strand=null;NET.camT=null;document.getElementById('callout').style.display='none';wireGraph();
  const known=(ps.known||[]);
@@ -1699,6 +1781,11 @@ function countUp(el,val){const t0=performance.now(),dur=700;
   el.textContent=Math.round(val*(1-Math.pow(1-k,3))).toLocaleString();
   if(k<1)requestAnimationFrame(f)};
  requestAnimationFrame(f)}
+// Landing: the ecosphere is the explorer's front page. Never let the
+// browser restore a scroll position on a lower table - every load starts
+// at the top, on the ecosystem view.
+if(typeof history!=='undefined'&&'scrollRestoration' in history)history.scrollRestoration='manual';
+if(typeof window!=='undefined'&&window.scrollTo)window.scrollTo(0,0);
 loadEcosystem();
 async function loadEntries(){hideEco();
  const rows=document.getElementById('rows');
@@ -1805,7 +1892,6 @@ async function checkGovernance(){const s=await j('/v1/status');const g=s.manifes
  if(!g||g.freshness==='current'){el.style.display='none';return}
  el.style.display='block';
  el.textContent='⚠ governance '+g.freshness+' - '+g.reason}
-loadEntries();
 checkDisputes();
 checkGovernance();
 </script></body></html>

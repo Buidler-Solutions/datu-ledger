@@ -547,3 +547,94 @@ fn rollback_is_provable_against_retained_witness_checkpoints() {
         "the retained witness stream proves the rollback"
     );
 }
+
+#[test]
+fn namespace_seq_derives_per_namespace_ordinals() {
+    let store = Store::open_in_memory().unwrap();
+    let k = keys();
+    // author writes interleaved across two namespaces: seq 0..4
+    let names = [
+        "gov.records",
+        "audit.claims",
+        "gov.records",
+        "gov.records",
+        "audit.claims",
+    ];
+    let mut prev: Option<[u8; 32]> = None;
+    let mut signed = Vec::new();
+    for (i, ns) in names.iter().enumerate() {
+        let mut b = body(i as u64, prev, format!("rec {i}").as_bytes());
+        b.namespace = (*ns).to_string();
+        let e = Entry::sign(b, &k.ed, &k.pq).unwrap();
+        store.insert_entry(&e).unwrap();
+        prev = Some(e.id().unwrap());
+        signed.push(e);
+    }
+    let author = signed[0].body.author.clone();
+    // gov.records ordinals: 0, 1, 2 ; audit.claims ordinals: 0, 1
+    let gov: Vec<u64> = signed
+        .iter()
+        .filter(|e| e.body.namespace == "gov.records")
+        .map(|e| {
+            store
+                .namespace_seq(&author, "gov.records", e.body.seq)
+                .unwrap()
+        })
+        .collect();
+    let audit: Vec<u64> = signed
+        .iter()
+        .filter(|e| e.body.namespace == "audit.claims")
+        .map(|e| {
+            store
+                .namespace_seq(&author, "audit.claims", e.body.seq)
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(gov, vec![0, 1, 2]);
+    assert_eq!(audit, vec![0, 1]);
+    // inserting later entries never renumbers earlier ones
+    let mut b = body(5, prev, b"late");
+    b.namespace = "gov.records".into();
+    let late = Entry::sign(b, &k.ed, &k.pq).unwrap();
+    store.insert_entry(&late).unwrap();
+    assert_eq!(
+        store
+            .namespace_seq(&author, "gov.records", signed[0].body.seq)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .namespace_seq(&author, "gov.records", late.body.seq)
+            .unwrap(),
+        3
+    );
+}
+
+#[test]
+fn entries_after_follows_the_insertion_cursor() {
+    let store = Store::open_in_memory().unwrap();
+    let k = keys();
+    let mut prev: Option<[u8; 32]> = None;
+    for i in 0..4u64 {
+        let e = Entry::sign(body(i, prev, format!("e{i}").as_bytes()), &k.ed, &k.pq).unwrap();
+        prev = Some(e.id().unwrap());
+        store.insert_entry(&e).unwrap();
+    }
+    // genesis inserts first; the tail is oldest-first and excludes the cursor
+    let first = store.entries_after(0, 2).unwrap();
+    assert_eq!(first.len(), 2);
+    assert!(first[0].0 < first[1].0);
+    let cursor = first[1].0;
+    let rest = store.entries_after(cursor, 10).unwrap();
+    assert!(rest.iter().all(|(ord, _)| *ord > cursor));
+    assert_eq!(
+        store.max_ord().unwrap(),
+        rest.last().map(|(o, _)| *o).unwrap()
+    );
+    // replaying from the end applies nothing
+    assert!(store
+        .entries_after(store.max_ord().unwrap(), 10)
+        .unwrap()
+        .is_empty());
+}

@@ -567,6 +567,46 @@ impl Store {
         Ok(count)
     }
 
+    /// Zero-based ordinal of an entry inside its author's entries in the
+    /// same namespace: the namespace's own sequence, derived on read. The
+    /// signed `seq` stays the author's global feed number, so a key's whole
+    /// history remains one tamper-evident chain while each namespace can be
+    /// read as its own numbered log. The set of predecessors is fixed, so
+    /// an entry's ordinal never changes once written.
+    pub fn namespace_seq(&self, author: &str, namespace: &str, seq: u64) -> StoreResult<u64> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(*) FROM entries WHERE author = ?1 AND namespace = ?2 AND seq <= ?3",
+        )?;
+        let count: u64 =
+            stmt.query_row(params![author, namespace, seq as i64], |row| row.get(0))?;
+        Ok(count.saturating_sub(1))
+    }
+
+    /// Entries with an internal `ord` greater than the cursor, oldest
+    /// first: the tail a projection/indexer follows. The `ord` is returned
+    /// alongside so the caller can persist a durable cursor (surfaced to
+    /// HTTP callers only as an opaque token).
+    pub fn entries_after(&self, after: i64, limit: usize) -> StoreResult<Vec<(i64, Entry)>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT ord, {ENTRY_COLS} FROM entries WHERE ord > ?1 ORDER BY ord ASC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![after, limit as i64], |row| {
+            let ord: i64 = row.get(0)?;
+            Ok((ord, row_to_entry_at(row, 1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Highest internal insertion ordinal (0 when the store is empty).
+    pub fn max_ord(&self) -> StoreResult<i64> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT COALESCE(MAX(ord), 0) FROM entries")?;
+        let ord: i64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(ord)
+    }
+
     pub fn entry_ids(&self) -> StoreResult<Vec<[u8; 32]>> {
         let mut stmt = self.conn.prepare("SELECT id FROM entries ORDER BY ord")?;
         let rows = stmt.query_map([], |row| {
