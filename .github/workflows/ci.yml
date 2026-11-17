@@ -32,8 +32,11 @@ jobs:
           ./deploy/drills/soak.sh 100
           ./deploy/drills/fork-drill.sh
           ./deploy/drills/key-rotation.sh
-      - name: dependency inventory (SBOM-lite, denied licenses)
-        run: python3 deploy/checks/inventory.py
+      - name: dependency inventory + SPDX SBOM (denied licenses)
+        run: |
+          python3 deploy/checks/inventory.py
+          python3 deploy/checks/spdx.py
+          python3 -c "import json; d = json.load(open('sbom.spdx.json')); assert d['spdxVersion'] == 'SPDX-2.3' and d['packages'], 'SBOM must stay valid SPDX 2.3'"
       - name: canonical bytes fixtures (Rust, JS, Python)
         run: |
           node deploy/checks/verify-canonical.mjs
