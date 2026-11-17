@@ -593,27 +593,41 @@ impl Store {
         author: Option<&str>,
         limit: usize,
     ) -> StoreResult<Vec<Entry>> {
+        self.list_page(namespace, author, limit, 0)
+    }
+
+    /// [`Self::list`] with an offset: page through the whole store (the
+    /// explorer's globe view walks every page to pin every entry).
+    pub fn list_page(
+        &self,
+        namespace: Option<&str>,
+        author: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> StoreResult<Vec<Entry>> {
         let (sql, binds): (String, Vec<String>) = match (namespace, author) {
             (Some(ns), Some(a)) => (
                 format!(
-                    "SELECT {ENTRY_COLS} FROM entries WHERE namespace = ?1 AND author = ?2 ORDER BY ord DESC LIMIT {limit}"
+                    "SELECT {ENTRY_COLS} FROM entries WHERE namespace = ?1 AND author = ?2 ORDER BY ord DESC LIMIT {limit} OFFSET {offset}"
                 ),
                 vec![ns.to_string(), a.to_string()],
             ),
             (Some(ns), None) => (
                 format!(
-                    "SELECT {ENTRY_COLS} FROM entries WHERE namespace = ?1 ORDER BY ord DESC LIMIT {limit}"
+                    "SELECT {ENTRY_COLS} FROM entries WHERE namespace = ?1 ORDER BY ord DESC LIMIT {limit} OFFSET {offset}"
                 ),
                 vec![ns.to_string()],
             ),
             (None, Some(a)) => (
                 format!(
-                    "SELECT {ENTRY_COLS} FROM entries WHERE author = ?1 ORDER BY ord DESC LIMIT {limit}"
+                    "SELECT {ENTRY_COLS} FROM entries WHERE author = ?1 ORDER BY ord DESC LIMIT {limit} OFFSET {offset}"
                 ),
                 vec![a.to_string()],
             ),
             (None, None) => (
-                format!("SELECT {ENTRY_COLS} FROM entries ORDER BY ord DESC LIMIT {limit}"),
+                format!(
+                    "SELECT {ENTRY_COLS} FROM entries ORDER BY ord DESC LIMIT {limit} OFFSET {offset}"
+                ),
                 vec![],
             ),
         };

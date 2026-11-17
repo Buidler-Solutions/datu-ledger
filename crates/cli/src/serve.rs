@@ -13,6 +13,9 @@
 //!   GET  /v1/feed/{author}     author's feed + head (for dApps building a
 //!                              sign request: seq/prev of the next entry)
 //!   GET  /v1/checkpoints       every signer's latest witness root
+//!   GET  /v1/peers             ?announce=&key=&network= - the peer table
+//!                              (HTTP peer exchange: shares known nodes,
+//!                              records the asker's announce)
 //!   GET  /v1/conflicts         recorded feed disputes (preserved evidence)
 //!   GET  /v1/conflict/{id}     full incoming entry of one dispute
 //!   POST /v1/entries           submit a signed entry (JSON, base64 payload;
@@ -24,6 +27,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use datu_core::bloom::BloomFilter;
 use datu_core::{Checkpoint, CheckpointBody, Entry};
+use datu_p2p::peers::{PeerTable, SHARE_LIMIT};
 use datu_p2p::NetworkPolicy;
 use datu_store::{Store, StoreError, WritePolicy};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -125,6 +129,7 @@ pub fn serve(
     policy: Option<WritePolicy>,
     submit_per_min: usize,
     haves_per_min: usize,
+    peers: Option<Arc<PeerTable>>,
 ) -> Result<(), String> {
     // Fail fast if there is no node to serve.
     let store = Store::open_with_policy(&data_dir.join("node.db"), policy.clone())
@@ -193,10 +198,12 @@ pub fn serve(
         println!("  sync:      {haves_per_min} haves requests/min per peer IP (--haves-per-min, 0 = off)");
     }
     println!("  feed head: GET  http://{addr}/v1/feed/{{author}}");
+    println!("  peers:     GET  http://{addr}/v1/peers   (peer exchange over HTTP)");
     println!("ctrl-c to stop");
     let dir = data_dir.to_path_buf();
     let limiter = (submit_per_min > 0).then(|| Arc::new(PeerLimiter::new(submit_per_min)));
     let haves_limiter = (haves_per_min > 0).then(|| Arc::new(PeerLimiter::new(haves_per_min)));
+    let empty_table = Arc::new(PeerTable::new());
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(s) => s,
@@ -208,6 +215,7 @@ pub fn serve(
         let limiter = limiter.clone();
         let haves_limiter = haves_limiter.clone();
         let governance = governance.clone();
+        let peers = peers.clone().unwrap_or_else(|| empty_table.clone());
         std::thread::spawn(move || {
             let _ = handle(
                 stream,
@@ -217,12 +225,14 @@ pub fn serve(
                 limiter,
                 haves_limiter,
                 governance,
+                peers,
             );
         });
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle(
     stream: TcpStream,
     data_dir: &Path,
@@ -231,6 +241,7 @@ fn handle(
     limiter: Option<Arc<PeerLimiter>>,
     haves_limiter: Option<Arc<PeerLimiter>>,
     governance: Arc<Option<Governance>>,
+    peers: Arc<PeerTable>,
 ) -> Result<(), String> {
     let mut stream = stream;
     if let Err(e) = handle_inner(
@@ -241,6 +252,7 @@ fn handle(
         limiter,
         haves_limiter,
         governance,
+        peers,
     ) {
         let _ = respond_json(
             &mut stream,
@@ -251,6 +263,7 @@ fn handle(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_inner(
     stream: &mut TcpStream,
     data_dir: &Path,
@@ -259,6 +272,7 @@ fn handle_inner(
     limiter: Option<Arc<PeerLimiter>>,
     haves_limiter: Option<Arc<PeerLimiter>>,
     governance: Arc<Option<Governance>>,
+    peers: Arc<PeerTable>,
 ) -> Result<(), String> {
     let request = match read_request(stream) {
         Some(r) => r,
@@ -327,9 +341,9 @@ fn handle_inner(
             respond_json(stream, "200 OK", &json)
         }
         ("GET", "/v1/entries") => {
-            let (ns, author, limit) = parse_list_query(&query);
+            let (ns, author, limit, offset) = parse_list_query(&query);
             let entries = store
-                .list(ns.as_deref(), author.as_deref(), limit)
+                .list_page(ns.as_deref(), author.as_deref(), limit, offset)
                 .map_err(|e| e.to_string())?;
             let items: Vec<serde_json::Value> = entries
                 .iter()
@@ -495,6 +509,85 @@ fn handle_inner(
                 })
                 .collect::<Result<_, String>>()?;
             respond_json(stream, "200 OK", &serde_json::json!({ "witnesses": items }))
+        }
+        // The peer table, read by three audiences: the explorer's ecosystem
+        // view, other nodes doing HTTP peer exchange, and humans. `announce`
+        // (with `key`/`network`) records the asker so their node becomes
+        // discoverable by the next asker - the same deal as the native wire.
+        ("GET", "/v1/peers") => {
+            let mut announce = None;
+            let mut node_key = String::new();
+            let mut asker_mesh = String::new();
+            for pair in query.split('&') {
+                let mut parts = pair.splitn(2, '=');
+                let key = parts.next().unwrap_or("");
+                let value = parts.next().unwrap_or("");
+                if value.is_empty() {
+                    continue;
+                }
+                match key {
+                    "announce" => announce = Some(value.to_string()),
+                    "key" => node_key = value.to_string(),
+                    "network" => asker_mesh = value.to_string(),
+                    _ => {}
+                }
+            }
+            let our_mesh = network
+                .as_ref()
+                .map(|n| n.network_id.clone())
+                .unwrap_or_default();
+            if let Some(announce) = announce
+                .as_deref()
+                .filter(|a| datu_p2p::peers::plausible_announce(a))
+            {
+                peers.record_announce(announce, &node_key, &asker_mesh, &our_mesh);
+            }
+            // The wall, politely: a cross-mesh ask is answered, but empty.
+            let shared: Vec<serde_json::Value> = if asker_mesh == our_mesh {
+                peers
+                    .shareable(&our_mesh, SHARE_LIMIT)
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "addr": p.addr,
+                            "node_key": p.node_key,
+                            "network_id": p.network_id,
+                            "last_success_ms": p.last_success_ms,
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let known: Vec<serde_json::Value> = peers
+                .snapshot()
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "addr": e.addr,
+                        "node_key": e.node_key,
+                        "network_id": e.network_id,
+                        "source": e.source,
+                        "first_seen_ms": e.first_seen_ms,
+                        "last_success_ms": e.last_success_ms,
+                        "last_attempt_ms": e.last_attempt_ms,
+                        "last_error": e.last_error,
+                    })
+                })
+                .collect();
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::json!({
+                    "ok": true,
+                    "network": {
+                        "mode": network.as_ref().map(|n| n.mode.as_str()).unwrap_or("open"),
+                        "network_id": our_mesh,
+                    },
+                    "peers": shared,
+                    "known": known,
+                }),
+            )
         }
         // Witness time-attestation over HTTP: the offline-verifiable proof
         // that a checkpoint's signer had seen this entry as of the claimed
@@ -841,10 +934,11 @@ fn handle_inner(
     }
 }
 
-fn parse_list_query(query: &str) -> (Option<String>, Option<String>, usize) {
+fn parse_list_query(query: &str) -> (Option<String>, Option<String>, usize, usize) {
     let mut ns = None;
     let mut author = None;
     let mut limit = 50usize;
+    let mut offset = 0usize;
     for pair in query.split('&') {
         let mut parts = pair.splitn(2, '=');
         let key = parts.next().unwrap_or("");
@@ -856,10 +950,11 @@ fn parse_list_query(query: &str) -> (Option<String>, Option<String>, usize) {
             "ns" => ns = Some(value.to_string()),
             "author" => author = Some(value.to_string()),
             "limit" => limit = value.parse().unwrap_or(50).min(500),
+            "offset" => offset = value.parse().unwrap_or(0).min(1_000_000),
             _ => {}
         }
     }
-    (ns, author, limit)
+    (ns, author, limit, offset)
 }
 
 fn payload_preview(entry: &Entry) -> String {
@@ -875,6 +970,7 @@ fn entry_summary_json(entry: &Entry) -> Result<serde_json::Value, String> {
         "author": entry.body.author,
         "namespace": entry.body.namespace,
         "seq": entry.body.seq,
+        "prev": entry.body.prev.map(hex::encode),
         "timestamp_ms": entry.body.timestamp_ms,
         "refs": entry.body.refs.iter().map(hex::encode).collect::<Vec<_>>(),
         "payload_preview": payload_preview(entry),
@@ -1024,34 +1120,587 @@ const BLAKE3_JS: &str = include_str!("../../../web/wallet-extension/blake3.js");
 const COVERAGE_JS: &str = include_str!("../../../web/wallet-extension/coverage.js");
 
 const EXPLORER_HTML: &str = r##"<!doctype html>
-<html><head><meta charset="utf-8"><title>DATU Ledger Explorer</title>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>DATU Ledger Explorer</title>
 <style>
  body{font-family:ui-monospace,Menlo,monospace;background:#0d1117;color:#c9d1d9;margin:0;padding:2rem}
  h1{font-size:1.2rem} a{color:#58a6ff;text-decoration:none} .muted{color:#8b949e}
  table{border-collapse:collapse;width:100%;margin-top:1rem}
  td,th{border-bottom:1px solid #21262d;padding:.45rem .6rem;text-align:left;font-size:.8rem}
  th{color:#8b949e;text-transform:uppercase;font-size:.7rem}
- #detail{margin-top:2rem;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:1rem;white-space:pre-wrap;font-size:.75rem;display:none}
- input{background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:.4rem;border-radius:6px;width:340px}
+ #modal{display:none;position:fixed;inset:0;background:#000a;z-index:50;align-items:center;justify-content:center;padding:2rem;backdrop-filter:blur(2px)}
+ #modal.open{display:flex}
+ #modalbox{background:#161b22;border:1px solid #30363d;border-radius:10px;max-width:860px;width:100%;max-height:84vh;display:flex;flex-direction:column;box-shadow:0 10px 44px #000c}
+ #modalhead{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.65rem 1rem;border-bottom:1px solid #21262d}
+ #modalbody{overflow:auto;padding:1rem;white-space:pre-wrap;font-size:.72rem;line-height:1.5}
+ input{background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:.4rem;border-radius:6px;width:340px;max-width:100%}
  button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:.4rem 1rem;border-radius:6px;cursor:pointer}
  .tag{background:#1f6feb33;color:#79c0ff;border-radius:4px;padding:0 .35rem;font-size:.7rem}
  #disputes{display:none;background:#f8514922;border:1px solid #f8514966;color:#ffa198;border-radius:6px;padding:.6rem 1rem;margin-top:1rem;font-size:.8rem}
  #governance{display:none;background:#d2992222;border:1px solid #d2992266;color:#e3b341;border-radius:6px;padding:.6rem 1rem;margin-top:1rem;font-size:.8rem}
+ .hero{background:linear-gradient(180deg,#111826 0%,#0d1117 100%);border:1px solid #21262d;border-radius:12px;padding:1.4rem 1.6rem 1.2rem;margin-bottom:1.4rem}
+ .herohead{display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap}
+ .hero h1{font-size:1.5rem;margin:0}
+ .herosub{font-size:.78rem}
+ .tiles{display:flex;gap:.7rem;flex-wrap:wrap;margin:.9rem 0 .2rem}
+ .tile{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:.55rem .95rem;min-width:104px}
+ .tile .num{font-size:1.45rem;color:#e6edf3;line-height:1.15}
+ .tile .lbl{font-size:.6rem;color:#8b949e;text-transform:uppercase;letter-spacing:.07em}
+ .tile.blue .num{color:#79c0ff}.tile.gold .num{color:#e3b341}.tile.red .num{color:#ffa198}
+ #nsLegend{position:absolute;top:10px;right:10px;max-width:48%;display:flex;gap:.4rem;flex-wrap:wrap;justify-content:flex-end;pointer-events:none;z-index:3;background:#0d1117aa;border:1px solid #21262d;border-radius:8px;padding:.45rem;backdrop-filter:blur(3px)}
+ #nsLegend .chip{pointer-events:auto}
+ .chip{background:#161b22;border:1px solid #30363d;border-radius:99px;padding:.16rem .6rem;font-size:.7rem;cursor:pointer}
+ .chip:hover{border-color:#58a6ff}
+ .chip .dot{display:inline-block;width:.6rem;height:.6rem;border-radius:50%;margin-right:.35rem;vertical-align:middle}
+ .bar{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-bottom:.4rem}
+ .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+ @media (max-width:640px){
+  body{padding:.8rem}
+  .hero{padding:.9rem .75rem;border-radius:9px}
+  .hero h1{font-size:1.15rem}
+  .herosub{font-size:.68rem}
+  input{width:100%}
+  .tile{min-width:82px;padding:.45rem .6rem}
+  .tile .num{font-size:1.1rem}
+  .tile .lbl{font-size:.55rem}
+  #nsLegend{max-width:70%}
+ }
 </style></head><body>
-<h1>DATU Ledger Explorer <span class="tag">self-verifying mirror</span></h1>
-<div><input id="q" placeholder="entry id (64 hex) or author (64 hex)"><button onclick="search()">load</button>
-<button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button> <button onclick="loadAttestations()">attestations</button> <button onclick="loadConflicts()">disputes</button></div>
+<div id="ecosphere" class="hero">
+ <div class="herohead">
+  <h1>DATU Ledger Explorer <span class="tag">self-verifying mirror</span></h1>
+  <div class="muted herosub">every author strand a bubble · every prev/ref a link · many lineages, one ecosystem, no consensus</div>
+  <button id="laytoggle" onclick="toggleLayout()" style="margin-left:auto">mesh view</button>
+ </div>
+ <div id="heroStats" class="tiles"></div>
+ <div id="insights" class="muted" style="font-size:.74rem;margin:.15rem 0 .8rem"></div>
+ <div id="graphwrap" style="position:relative;display:inline-block;width:100%">
+  <canvas id="graph" width="960" height="560" style="width:100%;border:1px solid #21262d;border-radius:10px;cursor:grab;display:block;touch-action:none"></canvas>
+  <div id="nsLegend" class="legend"></div>
+  <div id="callout" style="display:none;position:absolute;background:#161b22;border:1px solid #58a6ff66;border-radius:6px;padding:.5rem .6rem;font-size:.72rem;max-width:270px;box-shadow:0 4px 14px #0009;pointer-events:auto;z-index:5"></div>
+ </div>
+ <div class="muted" style="font-size:.72rem;margin-top:.5rem">the mesh never sleeps - every strand drifts slowly and randomly across its bubble's full sphere · the bubbles themselves wander and jostle, the genesis core keeping them at a respectful orbit, and a dragged bubble springs slowly back to its generation ring · drag a node and the mesh follows · drag empty space to pan · pinch or ctrl + scroll to zoom · tap a node for the callout · click a node for the callout · color = namespace, size = link count · hover a chip to spotlight its namespace, click to pin · the gold pulsing core is the founder's genesis: hover for its label, drag it away and it drifts slowly back to center · link arrows point from a record to the record it cites · sparks travel the cross-author citations, flowing from the citing record to the cited one · every bubble breathes on its own heartbeat · the field is the DAG drawn radially: genesis at the heart, every bubble resting on the ring of its causal generation, arrows and sparks always pointing from a record to the record it cites · each bubble is one author's strand: zoom all the way in and the bubble opens into a full strand view, border gone, its records drifting freely across the frame while their links keep them chained, zoom all the way out and they re-coil back into the bubble · mesh view braids the strands, layered view stacks the DAG roots-on-top</div>
+ <div id="ecostats" class="muted" style="margin:.6rem 0 0;font-size:.78rem"></div>
+</div>
+<div class="bar"><input id="q" placeholder="entry id (64 hex) or author (64 hex)"><button onclick="search()">load</button>
+<button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button> <button onclick="loadAttestations()">attestations</button> <button onclick="loadConflicts()">disputes</button> <button onclick="loadEcosystem();window.scrollTo({top:0,behavior:'smooth'})">ecosphere</button></div>
 <div id="disputes"></div>
 <div id="governance"></div>
-<table id="rows"><tr><th>id</th><th>author</th><th>namespace</th><th>seq</th><th>payload</th></tr></table>
-<div id="detail"></div>
+<div class="tablewrap"><table id="rows"><tr><th>id</th><th>author</th><th>namespace</th><th>seq</th><th>payload</th></tr></table></div>
+<div id="modal" onclick="if(event.target===this)closeModal()">
+ <div id="modalbox">
+  <div id="modalhead"><b id="modaltitle" style="font-size:.85rem">record</b><button onclick="closeModal()">close ✕</button></div>
+  <div id="modalbody"></div>
+ </div>
+</div>
 <script src="/blake3.js"></script>
 <script src="/coverage.js"></script>
 <script>
 async function j(u){const r=await fetch(u);return r.json()}
 function short(h){return h?h.slice(0,8)+'…':''}
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
-async function loadEntries(){
+function hideEco(){document.getElementById('ecosphere').style.display='none';document.getElementById('callout').style.display='none'}
+// ── ecosphere: every entry a node, every prev/ref a link in the mesh ─────
+const GENESIS_ID='37616bce5bfb8b773f7c99a9e52bcd7aa43294301ab074a908fbc9a334315d63';
+let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'bubbles',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null};
+function fitCanvas(){const cv=document.getElementById('graph');if(!cv)return;
+ // portrait phones get a taller canvas so the mesh has room; landscape and
+ // desktop keep the wide hero
+ if(window.innerWidth<640){cv.width=640;
+  cv.height=Math.min(920,Math.max(560,Math.round(640*window.innerHeight/Math.max(1,window.innerWidth))))}}
+function hue(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))%360;return h}
+function buildMesh(entries,cap){
+ NET.nodes=[];NET.byId=new Map();NET.links=[];
+ const use=entries.slice(0,cap);
+ for(const e of use){const n={id:e.id,ns:e.namespace||'x',seq:e.seq,author:e.author,ts:e.timestamp_ms,
+  prev:e.payload_preview||'',h:hue(e.namespace||'x'),root:e.id===GENESIS_ID,deg:0,x:0,y:0,vx:0,vy:0};
+  NET.nodes.push(n);NET.byId.set(n.id,n)}
+ for(const e of use){const n=NET.byId.get(e.id);if(!n)continue;
+  const targets=[e.prev].concat(e.refs||[]);
+  for(const t of targets){if(!t)continue;const m=NET.byId.get(t);if(!m||m===n)continue;
+   NET.links.push({a:n,b:m});n.deg++;m.deg++}}
+ // deterministic start: ring by namespace hue, jitter by entry id, so the
+ // same ledger settles into the same shape on every visit
+ for(const n of NET.nodes){let j=0;for(let i=0;i<8;i++)j=(j*33+(parseInt(n.id.substr(i*2,2),16)||0))%9973;
+  const a=(n.h/360)*Math.PI*2+(j%64-32)*.02, r=110+(j%150);
+  n.x=Math.cos(a)*r;n.y=Math.sin(a)*r}
+ const root=NET.byId.get(GENESIS_ID);if(root){root.x=0;root.y=0}
+ NET.alpha=1;return entries.length>use.length}
+function simStep(){
+ const a=NET.alpha;const S=(NET.mode==='bubbles'&&NET.sub==='strand')?NET.strand:null;
+ if(NET.mode==='mesh'){
+  const cell=64,grid=new Map();
+  for(const n of NET.nodes){const k=Math.floor(n.x/cell)+':'+Math.floor(n.y/cell);
+   let b=grid.get(k);if(!b){b=[];grid.set(k,b)}b.push(n)}
+  // repulsion: each node pushes back only against grid neighbors
+  for(const n of NET.nodes){const gx=Math.floor(n.x/cell),gy=Math.floor(n.y/cell);
+   for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++){const b=grid.get((gx+dx)+':'+(gy+dy));if(!b)continue;
+    for(const m of b){if(m===n)continue;
+     let ddx=n.x-m.x,ddy=n.y-m.y,d2=ddx*ddx+ddy*ddy;
+     if(d2<1){ddx=.5;ddy=(n.x<m.x?-.5:.5);d2=.5}
+     if(d2>cell*cell*4)continue;
+     const d=Math.sqrt(d2),f=2400*a/(d2+40);
+     n.vx+=ddx/d*f;n.vy+=ddy/d*f}}}
+  // springs: every link pulls its two ends toward rest length
+  for(const l of NET.links){const dx=l.b.x-l.a.x,dy=l.b.y-l.a.y,d=Math.sqrt(dx*dx+dy*dy)||1;
+   const f=(d-52)*.06*a;l.a.vx+=dx/d*f;l.a.vy+=dy/d*f;l.b.vx-=dx/d*f;l.b.vy-=dy/d*f}}
+ if(S){
+  // strand view: the focused strand's records drift freely inside the
+  // viewport, mesh physics scoped to the strand alone (grid repulsion +
+  // chain springs + wander + a soft recall at the frame's edge); the
+  // other bubbles park where they were, so exiting re-coils in place
+  const cell=48,grid=new Map();
+  for(const n of S.nodes){const k=Math.floor(n.x/cell)+':'+Math.floor(n.y/cell);
+   let b=grid.get(k);if(!b){b=[];grid.set(k,b)}b.push(n)}
+  for(const n of S.nodes){const gx=Math.floor(n.x/cell),gy=Math.floor(n.y/cell);
+   for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++){const b=grid.get((gx+dx)+':'+(gy+dy));if(!b)continue;
+    for(const m of b){if(m===n)continue;
+     let ddx=n.x-m.x,ddy=n.y-m.y,d2=ddx*ddx+ddy*ddy;
+     if(d2<1){ddx=.5;ddy=(n.x<m.x?-.5:.5);d2=.5}
+     if(d2>cell*cell*4)continue;
+     const d=Math.sqrt(d2),f=Math.min(.3,(900+2200*a)/(d2+40));
+     n.vx+=ddx/d*f;n.vy+=ddy/d*f}}}
+  // the strand's own prev/ref links stay live springs, so the records
+  // wander but never stop being chained
+  for(const l of NET.links){if(l.a.c!==S||l.b.c!==S)continue;
+   const dx=l.b.x-l.a.x,dy=l.b.y-l.a.y,d=Math.sqrt(dx*dx+dy*dy)||1;
+   const f=Math.max(-.3,Math.min(.3,(d-56)*(.012+.025*a)));
+   l.a.vx+=dx/d*f;l.a.vy+=dy/d*f;l.b.vx-=dx/d*f;l.b.vy-=dy/d*f}
+  // soft containment: free to roam the whole frame, called back gently
+  const cv=document.getElementById('graph');
+  const lim=Math.max(60,(Math.min(cv.width,cv.height)/2)/NET.zoom-30);
+  for(const n of S.nodes){const dx=n.x-S.cx,dy=n.y-S.cy,d=Math.hypot(dx,dy);
+   if(d>lim){const f=Math.min(.3,(d-lim)*.004);n.vx-=dx/d*f;n.vy-=dy/d*f}}}
+ if(NET.mode==='bubbles'&&NET.clusters){
+  // bubble field: inside every bubble the strand's records are slow
+  // ricocheting balls - constant cruise on straight lines, elastic
+  // bounces off each other and off their bubble's ring, a whisper of
+  // randomness on every carom so the pattern never loops. They never
+  // rest, and they never leave the sphere.
+  for(const c of NET.clusters){if(c===S)continue;const ns=c.nodes;
+   const cell=28,grid=new Map();
+   for(const n of ns){const k=Math.floor(n.x/cell)+':'+Math.floor(n.y/cell);
+    let b=grid.get(k);if(!b){b=[];grid.set(k,b)}b.push(n)}
+   for(const n of ns){const gx=Math.floor(n.x/cell),gy=Math.floor(n.y/cell);
+    for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++){const b=grid.get((gx+dx)+':'+(gy+dy));if(!b)continue;
+     for(const m of b){if(m===n||m.id<n.id)continue;
+      const ddx=n.x-m.x,ddy=n.y-m.y,d=Math.hypot(ddx,ddy);
+      if(d>14||d<1e-6)continue;
+      // separate the pair, then swap their normal components: an
+      // equal-mass elastic carom, with a tiny random skew so no two
+      // bounces repeat
+      const nx=ddx/d,ny=ddy/d,ov=(14-d)/2;
+      n.x+=nx*ov;n.y+=ny*ov;m.x-=nx*ov;m.y-=ny*ov;
+      const rvn=(n.vx-m.vx)*nx+(n.vy-m.vy)*ny;
+      if(rvn<0){n.vx-=rvn*nx;n.vy-=rvn*ny;m.vx+=rvn*nx;m.vy+=rvn*ny;
+       const sk=(Math.random()-.5)*.12,ca=Math.cos(sk),sa=Math.sin(sk);
+       let tx=n.vx*ca-n.vy*sa,ty=n.vx*sa+n.vy*ca;n.vx=tx;n.vy=ty;
+       tx=m.vx*ca-m.vy*sa;ty=m.vx*sa+m.vy*ca;m.vx=tx;m.vy=ty}}}}
+   // a record caught outside its sphere (say, fresh out of strand view)
+   // steers home, then the ring takes over again
+   const rim=c.R-5;
+   for(const n of ns){const dx=n.x-c.cx,dy=n.y-c.cy,d=Math.hypot(dx,dy);
+    if(d>rim+2){n.vx=n.vx*.9+(-dx/d*.22)*.1;n.vy=n.vy*.9+(-dy/d*.22)*.1}}}}
+ if(NET.mode==='bubbles'&&NET.clusters){
+  // bubbles: clusters repel, cross-cluster citations pull their bubbles
+  // together; the rooted (genesis) bubble is nailed to the exact center -
+  // no force ever displaces it - so the author bubbles always ring it
+  // (the focused strand's center is pinned too, so its free drift stays
+  // framed and its bubble reforms in place on the way out)
+  const cs=NET.clusters;
+  const free=c=>c!==S&&!c.rooted;
+  // pairwise repulsion: bubbles jostle each other, and the genesis core
+  // pushes back hardest so the author organisms keep a respectful orbit
+  for(let i=0;i<cs.length;i++)for(let k=i+1;k<cs.length;k++){const A=cs[i],B=cs[k];
+   let dx=A.cx-B.cx,dy=A.cy-B.cy,d=Math.sqrt(dx*dx+dy*dy);
+   const minD=A.R+B.R+((A.rooted||B.rooted)?74:48);
+   if(d<1){dx=1;dy=0;d=1}
+   if(d<minD){const f=(minD-d)/d*(A.rooted||B.rooted?.6:.42)*a;
+    if(free(A)){A.vx+=dx/d*f;A.vy+=dy/d*f}if(free(B)){B.vx-=dx/d*f;B.vy-=dy/d*f}}}
+  for(const l of NET.links){const A=l.a.c,B=l.b.c;if(!A||!B||A===B)continue;
+   const dx=B.cx-A.cx,dy=B.cy-A.cy,d=Math.sqrt(dx*dx+dy*dy)||1;
+   const rest=A.R+B.R+52,f=Math.max(-2,Math.min(2,(d-rest)*.02*a));
+   if(free(A)){A.vx+=dx/d*f;A.vy+=dy/d*f}if(free(B)){B.vx-=dx/d*f;B.vy-=dy/d*f}}
+  // every bubble is an organism: it keeps its generation ring (which
+  // breathes), wanders on its own slow random compass, damps, and is
+  // speed-capped so the whole field swells instead of shaking
+  const nowC=performance.now();
+  for(const c of cs){if(c===S)continue;
+   if(c.rooted){c.cx=0;c.cy=0;c.vx=0;c.vy=0;continue}
+   const ring=95+(c.dep||1)*100+Math.sin(nowC/2400+(c.ph||0))*7;
+   const d=Math.hypot(c.cx,c.cy)||1;
+   c.vx+=(c.cx/d*ring-c.cx)*.005;c.vy+=(c.cy/d*ring-c.cy)*.005;
+   c.wa=(c.wa===undefined?(c.ph||0):c.wa)+(Math.random()-.5)*.06;
+   c.vx+=Math.cos(c.wa)*.012;c.vy+=Math.sin(c.wa)*.012;
+   c.vx*=.95;c.vy*=.95;
+   const sp=Math.hypot(c.vx,c.vy);if(sp>.35){c.vx*=.35/sp;c.vy*=.35/sp}
+   c.cx+=c.vx;c.cy+=c.vy}}
+ // integration: the mesh centers softly, the layered view anchors each
+ // node to its stratum, bubble records roam free inside their sphere; a
+ // dragged node is pinned to the pointer, every strand wanders a little
+ // so the mesh never looks dead, and bubble motion is speed-capped to
+ // stay slow and glassy
+ for(const n of NET.nodes){
+  if(NET.mode==='layers'){n.vx+=(n.lx-n.x)*.05;n.vy+=(n.ly-n.y)*.05}
+  else if(S&&n.c===S){/* free drift: chained and contained above */}
+  else if(NET.mode==='bubbles'&&n.c){/* a ricocheting ball inside its
+   sphere: cruising straight, caroming off peers and ring */}
+  else{n.vx-=n.x*.003*a;n.vy-=n.y*.003*a;
+   if(n.root){n.vx-=n.x*.004;n.vy-=n.y*.004}}
+  if(!n.root){const sl=S&&n.c===S,fl=NET.mode==='bubbles'&&n.c&&n.c!==S;
+   // strand view drifts glassy-slow, field balls fly near-straight with
+   // only a whisper of curve, the mesh keeps its livelier wander
+   n.wa=(n.wa===undefined?Math.random()*6.283:n.wa)+(Math.random()-.5)*(sl?.06:fl?.03:.22);
+   const wv=sl?.011:fl?.008:.035;
+   n.vx+=Math.cos(n.wa)*wv;n.vy+=Math.sin(n.wa)*wv}
+  if(NET.drag&&NET.drag.n===n){n.x=NET.drag.x;n.y=NET.drag.y;n.vx=0;n.vy=0;continue}
+  n.vx*=.82;n.vy*=.82;
+  if(NET.mode==='bubbles'){const sp=Math.hypot(n.vx,n.vy)||1e-9;
+   // bounce: a field record never rests - it cruises at a steady slow
+   // pace on a slowly turning course (forces only steer it); one caught
+   // outside its sphere (say, fresh out of strand view) hurries back at
+   // up to twice cruise before settling into the cruise again
+   if(n.c&&n.c!==S&&!n.root){const c=n.c,rim=c.R-5;
+    const d=Math.hypot(n.x-c.cx,n.y-c.cy);
+    if(d>rim+6){if(sp>.6){n.vx*=.6/sp;n.vy*=.6/sp}}
+    else{const g=.22/sp;n.vx*=g;n.vy*=g;
+     // every ball carries its own gentle curl - a slight permanent curve
+     // unique in sign and strength - so no two paths repeat and no ball
+     // can lock into a loop or park anywhere
+     if(n.curl===undefined)n.curl=(Math.random()<.5?-1:1)*(.003+Math.random()*.004);
+     const ca=Math.cos(n.curl),sa=Math.sin(n.curl);
+     const tx=n.vx*ca-n.vy*sa,ty=n.vx*sa+n.vy*ca;n.vx=tx;n.vy=ty}}
+   else if(sp>.3){n.vx*=.3/sp;n.vy*=.3/sp}}
+  n.x+=n.vx;n.y+=n.vy;
+  // the ring itself: the rim throws a crossing record back elastically -
+  // the outward component flips, the bounce always carries it back into
+  // the sphere, and a small skew keeps every carom a little different
+  if(NET.mode==='bubbles'&&n.c&&n.c!==S){const c=n.c,rim=c.R-5;
+   const dx=n.x-c.cx,dy=n.y-c.cy,d=Math.hypot(dx,dy);
+   if(d>rim){const s=rim/d;n.x=c.cx+dx*s;n.y=c.cy+dy*s;
+    const vr=(n.vx*dx+n.vy*dy)/d;
+    if(vr>0){n.vx-=1.9*vr*dx/d;n.vy-=1.9*vr*dy/d;
+     const vi=(n.vx*dx+n.vy*dy)/d;
+     if(vi>-.12){n.vx+=(-.12-vi)*dx/d;n.vy+=(-.12-vi)*dy/d}
+     const sk=(Math.random()-.5)*.18,ca=Math.cos(sk),sa=Math.sin(sk);
+     const tx=n.vx*ca-n.vy*sa,ty=n.vx*sa+n.vy*ca;n.vx=tx;n.vy=ty}}}}
+ NET.alpha=Math.max(a*.992,.07);return true}
+function worldToScreen(n,cv){return[n.x*NET.zoom+cv.width/2+NET.pan.x,n.y*NET.zoom+cv.height/2+NET.pan.y]}
+function screenToWorld(px,py,cv){return[(px-cv.width/2-NET.pan.x)/NET.zoom,(py-cv.height/2-NET.pan.y)/NET.zoom]}
+function zclamp(z){return Math.min(6,Math.max(NET.sub==='strand'?.5:.35,z))}
+// zooming all the way into a bubble opens it into a full strand view (no
+// border, its records drift freely in frame, chained by their links);
+// zooming all the way out closes it back into the bubble field
+function zoomCross(){
+ if(NET.mode!=='bubbles'||!NET.clusters.length)return;
+ if(NET.sub!=='strand'&&NET.zoom>=5.6){
+  const cv=document.getElementById('graph');let best=null,bd=1e18;
+  for(const c of NET.clusters){const[sx,sy]=worldToScreen({x:c.cx,y:c.cy},cv);
+   const d=(sx-cv.width/2)**2+(sy-cv.height/2)**2;if(d<bd){bd=d;best=c}}
+  if(best){NET.sub='strand';NET.strand=best;NET.pinch=null;NET.camT=null;
+   NET.sel=null;document.getElementById('callout').style.display='none';
+   const z=Math.min(6,Math.max(1.4,Math.min(cv.width,cv.height)/(2*(best.R+56))));
+   NET.camT={fx:NET.pan.x,fy:NET.pan.y,fz:NET.zoom,tx:-best.cx*z,ty:-best.cy*z,tz:z,t:0};
+   NET.alpha=.32;wake()}}
+ else if(NET.sub==='strand'&&NET.zoom<=.55){NET.sub='bubbles';NET.strand=null;NET.camT=null;wake()}}
+function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;const ctx=cv.getContext('2d');
+ const strandMode=NET.mode==='bubbles'&&NET.sub==='strand'&&NET.strand;
+ const now=performance.now();
+ const W=cv.width,H=cv.height;ctx.clearRect(0,0,W,H);
+ const g=ctx.createRadialGradient(W/2,H/2,60,W/2,H/2,Math.max(W,H)*.7);
+ g.addColorStop(0,'#141c2b');g.addColorStop(1,'#0d1117');ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+ ctx.save();ctx.translate(W/2+NET.pan.x,H/2+NET.pan.y);ctx.scale(NET.zoom,NET.zoom);
+ if(NET.mode==='bubbles'&&NET.clusters&&!strandMode){
+  // the DAG drawn radially: faint generation rings around the genesis
+  // core, one per causal depth, so the field reads as a directed tree
+  // of lineages even before you look at a single arrow
+  let maxDep=0;for(const c of NET.clusters)if(!c.rooted&&c.dep>maxDep)maxDep=c.dep;
+  ctx.setLineDash([4/NET.zoom,8/NET.zoom]);ctx.lineWidth=1/NET.zoom;
+  ctx.font=(10/NET.zoom)+'px ui-monospace,Menlo,monospace';ctx.textAlign='center';
+  for(let g=1;g<=maxDep;g++){const ring=95+g*100;
+   ctx.strokeStyle='rgba(139,148,158,.06)';
+   ctx.beginPath();ctx.arc(0,0,ring,0,7);ctx.stroke();
+   ctx.fillStyle='rgba(139,148,158,.3)';
+   ctx.fillText('gen '+g,0,-ring-8/NET.zoom)}
+  ctx.setLineDash([]);ctx.textAlign='left'}
+ if(NET.mode==='bubbles'&&NET.clusters&&!strandMode){
+  for(const c of NET.clusters){
+   const dim=NET.focusNs&&!c.nodes.some(n=>n.ns===NET.focusNs);
+   ctx.globalAlpha=dim?.12:1;const gold=c.h<0;
+   // heartbeat: each bubble breathes on its own clock (phase from the
+   // author hash) so the field never pulses in lockstep
+   const beat=Math.sin(now/700+c.ph);
+   ctx.fillStyle=gold?`rgba(227,179,65,${.07+.03*beat})`:`hsla(${c.h},60%,50%,${.05+.02*beat})`;
+   ctx.strokeStyle=gold?'rgba(227,179,65,.4)':`hsla(${c.h},60%,60%,.4)`;
+   ctx.lineWidth=(1.5+.5*beat)/NET.zoom;
+   ctx.beginPath();ctx.arc(c.cx,c.cy,c.R,0,7);ctx.fill();ctx.stroke();
+   // the breath ring: a faint halo swelling out and sinking back
+   ctx.strokeStyle=gold?`rgba(227,179,65,${.10+.10*(beat*.5+.5)})`:`hsla(${c.h},60%,65%,${.08+.10*(beat*.5+.5)})`;
+   ctx.lineWidth=1/NET.zoom;
+   ctx.beginPath();ctx.arc(c.cx,c.cy,c.R+3.5+2*beat,0,7);ctx.stroke()}
+  ctx.globalAlpha=1}
+ for(const l of NET.links){if(strandMode&&l.a.c!==NET.strand&&l.b.c!==NET.strand)continue;
+  const hot=NET.sel&&(l.a===NET.sel||l.b===NET.sel);
+  ctx.globalAlpha=(NET.focusNs&&l.a.ns!==NET.focusNs&&l.b.ns!==NET.focusNs&&!hot)?.1:1;
+  ctx.strokeStyle=hot?'#58a6ff':((NET.mode==='bubbles'&&l.a.c&&l.b.c&&l.a.c!==l.b.c)?'#58a6ff3d':(NET.mode==='bubbles'?'#58a6ff4a':'#58a6ff26'));ctx.lineWidth=(hot?1.6:.8)/NET.zoom;
+  ctx.beginPath();ctx.moveTo(l.a.x,l.a.y);ctx.lineTo(l.b.x,l.b.y);ctx.stroke();
+  // subtle arrowhead at the cited end: a child (a) points at its parent (b)
+  const adx=l.b.x-l.a.x,ady=l.b.y-l.a.y,alen=Math.hypot(adx,ady)||1;
+  if(alen*NET.zoom>16){const rb=(l.b.root?10:3+Math.min(l.b.deg,6)*.6)+4;
+   const tx=l.b.x-adx/alen*rb,ty=l.b.y-ady/alen*rb,px=-ady/alen,py=adx/alen;
+   ctx.fillStyle=hot?'#58a6ff':'#58a6ff55';
+   ctx.beginPath();ctx.moveTo(tx,ty);
+   ctx.lineTo(tx-adx/alen*5+px*3,ty-ady/alen*5+py*3);
+   ctx.lineTo(tx-adx/alen*5-px*3,ty-ady/alen*5-py*3);
+   ctx.closePath();ctx.fill()}
+  // cross-author citations carry a traveling spark: a pulse of light
+  // flowing from the citing record to the cited one - proof in motion
+  if(NET.mode==='bubbles'&&!strandMode&&l.a.c&&l.b.c&&l.a.c!==l.b.c&&alen*NET.zoom>26){
+   const prog=(now/2600+((l.a.seq*7+l.b.seq*13)%97)/97)%1;
+   const sxp=l.a.x+adx*prog,syp=l.a.y+ady*prog,r2=2/NET.zoom;
+   ctx.fillStyle='rgba(140,192,255,.28)';
+   ctx.beginPath();ctx.arc(sxp,syp,r2*3,0,7);ctx.fill();
+   ctx.fillStyle='rgba(140,192,255,.9)';
+   ctx.beginPath();ctx.arc(sxp,syp,r2,0,7);ctx.fill()}}
+ ctx.globalAlpha=1;
+ for(const n of NET.nodes){if(strandMode&&n.c!==NET.strand)continue;
+  if(n.root){const pu=Math.sin(now/700)*1.4;
+   ctx.fillStyle='#e3b341';ctx.beginPath();ctx.arc(n.x,n.y,6,0,7);ctx.fill();
+   ctx.strokeStyle='#e3b34155';ctx.lineWidth=2;ctx.beginPath();ctx.arc(n.x,n.y,10+pu,0,7);ctx.stroke()}
+  else{ctx.globalAlpha=(NET.focusNs&&n.ns!==NET.focusNs)?.15:1;
+   // newest records glow brightest, so time's direction reads inside
+   // every bouncing strand: dim old core, bright fresh rim
+   const fresh=NET.mode==='bubbles'&&n.c?(n.seq||0)/Math.max(1,n.c.maxSeq||1):0;
+   ctx.fillStyle=`hsl(${n.h} 70% ${58+fresh*16}%)`;
+   ctx.beginPath();ctx.arc(n.x,n.y,3+Math.min(n.deg,6)*.6+fresh*1.3,0,7);ctx.fill();ctx.globalAlpha=1}}
+ ctx.restore();
+ if(NET.mode==='bubbles'&&NET.zoom<2.2&&NET.clusters&&!strandMode){
+  ctx.font='10px ui-monospace,Menlo,monospace';ctx.textAlign='center';
+  for(const c of NET.clusters){
+   if(NET.focusNs&&!c.nodes.some(n=>n.ns===NET.focusNs))continue;
+   const[sx,sy]=worldToScreen({x:c.cx,y:c.cy},cv);
+   ctx.fillStyle=c.h<0?'#e3b341':`hsl(${c.h} 70% 72%)`;
+   ctx.fillText(short(c.author)+' · '+c.nodes.length,sx,sy-c.R*NET.zoom-6)}
+  ctx.textAlign='left'}
+ for(const n of [NET.hover,NET.sel]){if(!n)continue;const[sx,sy]=worldToScreen(n,cv);
+  ctx.strokeStyle='#c9d1d9';ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(sx,sy,8,0,7);ctx.stroke();
+  ctx.fillStyle=n.root?'#e3b341':'#c9d1d9';ctx.font='11px ui-monospace,Menlo,monospace';
+  ctx.fillText(n.root?'genesis':n.ns+' #'+n.seq,sx+11,sy-9)}
+ if(NET.sel){const[sx,sy]=worldToScreen(NET.sel,cv);
+  const co=document.getElementById('callout'),wr=document.getElementById('graphwrap');
+  co.style.left=Math.min(Math.max(sx+16,4),Math.max(wr.clientWidth-280,4))+'px';
+  co.style.top=Math.min(Math.max(sy-16,4),Math.max(wr.clientHeight-150,4))+'px'}}
+function meshLoop(){if(NET.camT){const t=NET.camT;const e=Math.min(1,t.t+.045);t.t=e;
+  const s=1-Math.pow(1-e,3);
+  NET.pan.x=t.fx+(t.tx-t.fx)*s;NET.pan.y=t.fy+(t.ty-t.fy)*s;NET.zoom=t.fz+(t.tz-t.fz)*s;
+  if(e>=1)NET.camT=null}
+ simStep();drawMesh();NET.raf=requestAnimationFrame(meshLoop)}
+function wake(){if(!NET.raf)NET.raf=requestAnimationFrame(meshLoop)}
+function nodeAt(ev){const cv=document.getElementById('graph');const r=cv.getBoundingClientRect();
+ const px=(ev.clientX-r.left)*(cv.width/r.width),py=(ev.clientY-r.top)*(cv.height/r.height);
+ let best=null,bd=Math.max(7,12/Math.sqrt(NET.zoom));
+ for(const n of NET.nodes){if(NET.sub==='strand'&&NET.strand&&n.c!==NET.strand)continue;
+  const[sx,sy]=worldToScreen(n,cv);
+  const d=Math.hypot(sx-px,sy-py);if(d<bd){bd=d;best=n}}return best}
+// The bubble itself is grabbable: dragging one pulls it out of the field,
+// and its generation-ring spring carries it slowly home on release.
+function bubbleAt(ev){const cv=document.getElementById('graph');
+ if(NET.mode!=='bubbles'||NET.sub==='strand'||!NET.clusters)return null;
+ const r=cv.getBoundingClientRect();
+ const px=(ev.clientX-r.left)*(cv.width/r.width),py=(ev.clientY-r.top)*(cv.height/r.height);
+ const w=screenToWorld(px,py,cv);let best=null,bd=1e9;
+ for(const c of NET.clusters){if(c.rooted)continue;
+  const d=Math.hypot(w[0]-c.cx,w[1]-c.cy);
+  if(d<=c.R+6&&d<bd){bd=d;best=c}}
+ return best}
+function calloutFor(p){const co=document.getElementById('callout');
+ co.style.display='block';
+ co.innerHTML=`<div><b style="color:hsl(${p.h} 70% 70%)">${esc(p.ns)}</b> <span class="muted">#${p.seq}</span>${p.root?' <span class="tag" style="background:#d2992233;color:#e3b341">lineage mark</span>':''}</div>`+
+  `<div class="muted">${short(p.id)} · by ${short(p.author)}</div>`+
+  `<div class="muted">${new Date(p.ts).toLocaleString()} · ${p.deg} link(s)</div>`+
+  `<div style="margin-top:.3rem;word-break:break-all">${esc(p.prev.slice(0,90))}</div>`+
+  `<div style="margin-top:.4rem"><a href="#" onclick="show('${p.id}');return false">open full record →</a></div>`;
+ co.onclick=e=>{if(e.target===co){co.style.display='none';NET.sel=null}}}
+function wireGraph(){if(NET.wired){wake();return}NET.wired=true;const cv=document.getElementById('graph');
+ cv.onmousedown=ev=>{NET.moved=0;const n=nodeAt(ev);
+  if(n){NET.drag={n,x:n.x,y:n.y};NET.alpha=Math.max(NET.alpha,.35)}
+  else{const b=bubbleAt(ev);
+   if(b)NET.drag={c:b};
+   else NET.drag={pan:{x:NET.pan.x,y:NET.pan.y,mx:ev.clientX,my:ev.clientY}}}
+  cv.style.cursor=NET.drag.n||NET.drag.c?'grabbing':'move';wake()};
+ window.addEventListener('mouseup',()=>{if(NET.drag){const d=NET.drag;NET.drag=null;
+  if(d.c){d.c.vx=0;d.c.vy=0} // elastic: the ring spring takes it home
+  cv.style.cursor='grab'}});
+ cv.onmousemove=ev=>{if(NET.drag){NET.moved++;const d=NET.drag;
+   const r=cv.getBoundingClientRect();
+   const px=(ev.clientX-r.left)*(cv.width/r.width),py=(ev.clientY-r.top)*(cv.height/r.height);
+   if(d.n){const w=screenToWorld(px,py,cv);d.x=w[0];d.y=w[1]}
+   else if(d.c){const w=screenToWorld(px,py,cv);d.c.cx=w[0];d.c.cy=w[1];d.c.vx=0;d.c.vy=0}
+   else{NET.pan.x=d.pan.x+(ev.clientX-d.pan.mx);NET.pan.y=d.pan.y+(ev.clientY-d.pan.my)}
+   wake();return}
+  NET.hover=nodeAt(ev);cv.style.cursor=NET.hover?'pointer':'grab'};
+ cv.onmouseleave=()=>{NET.hover=null};
+ cv.onclick=ev=>{if(NET.moved>4)return;const n=nodeAt(ev);
+  if(n){NET.sel=n;calloutFor(n);wake()}else{NET.sel=null;document.getElementById('callout').style.display='none'}};
+ cv.onwheel=ev=>{if(!ev.ctrlKey)return;ev.preventDefault();const r=cv.getBoundingClientRect();
+  const px=(ev.clientX-r.left)*(cv.width/r.width),py=(ev.clientY-r.top)*(cv.height/r.height);
+  const z2=zclamp(NET.zoom*Math.exp(-ev.deltaY*.0012));
+  NET.pan.x=px-cv.width/2-(px-cv.width/2-NET.pan.x)*z2/NET.zoom;
+  NET.pan.y=py-cv.height/2-(py-cv.height/2-NET.pan.y)*z2/NET.zoom;
+  NET.zoom=z2;zoomCross();drawMesh()};
+ // touch: one finger drags a node or pans, two fingers pinch-zoom, a short
+ // tap selects (the touch equivalent of hover+click in one gesture)
+ const tpos=t=>{const r=cv.getBoundingClientRect();
+  return[(t.clientX-r.left)*(cv.width/r.width),(t.clientY-r.top)*(cv.height/r.height)]};
+ const tdist=ev=>Math.hypot(ev.touches[0].clientX-ev.touches[1].clientX,ev.touches[0].clientY-ev.touches[1].clientY);
+ cv.addEventListener('touchstart',ev=>{ev.preventDefault();
+  if(ev.touches.length===2){NET.drag=null;NET.pinch={d:tdist(ev),z:NET.zoom};return}
+  const t=ev.touches[0];NET.moved=0;NET.tapN=nodeAt(t);
+  if(NET.tapN){NET.drag={n:NET.tapN,x:NET.tapN.x,y:NET.tapN.y};NET.alpha=Math.max(NET.alpha,.35)}
+  else{const b=bubbleAt(t);
+   if(b)NET.drag={c:b};
+   else NET.drag={pan:{x:NET.pan.x,y:NET.pan.y,mx:t.clientX,my:t.clientY}}}
+  wake()},{passive:false});
+ cv.addEventListener('touchmove',ev=>{ev.preventDefault();
+  if(NET.pinch&&ev.touches.length===2){NET.zoom=zclamp(NET.pinch.z*tdist(ev)/NET.pinch.d);zoomCross();drawMesh();return}
+  if(NET.drag&&ev.touches.length===1){NET.moved++;const t=ev.touches[0];const d=NET.drag;
+   if(d.n||d.c){const p=tpos(t);const w=screenToWorld(p[0],p[1],cv);
+    if(d.n){d.x=w[0];d.y=w[1]}
+    else{d.c.cx=w[0];d.c.cy=w[1];d.c.vx=0;d.c.vy=0}}
+   else{NET.pan.x=d.pan.x+(t.clientX-d.pan.mx);NET.pan.y=d.pan.y+(t.clientY-d.pan.my)}
+   wake()}},{passive:false});
+ cv.addEventListener('touchend',ev=>{if(!ev.touches.length){NET.pinch=null;
+  if(NET.drag){const d=NET.drag;NET.drag=null;
+   if(d.c){d.c.vx=0;d.c.vy=0}
+   if(NET.moved<=4){const n=NET.tapN;
+    if(n){NET.sel=n;calloutFor(n);wake()}
+    else{NET.sel=null;document.getElementById('callout').style.display='none'}}}}});
+ window.addEventListener('resize',()=>{fitCanvas();drawMesh()});
+ wake()}
+// causal depth from the roots (Kahn's order over the citation edges):
+// the shared DAG spine both views read from - the layered view stacks
+// it into strata, the bubble field wraps it into generation rings
+function computeDepths(){
+ const kids=new Map(),indeg=new Map();
+ for(const n of NET.nodes){kids.set(n.id,[]);indeg.set(n.id,0)}
+ for(const l of NET.links){kids.get(l.b.id).push(l.a);indeg.set(l.a.id,indeg.get(l.a.id)+1)}
+ const q=[];for(const n of NET.nodes)if(indeg.get(n.id)===0){n.depth=0;q.push(n)}
+ for(let qi=0;qi<q.length;qi++){const n=q[qi];
+  for(const c of kids.get(n.id)){c.depth=Math.max(c.depth||0,n.depth+1);
+   indeg.set(c.id,indeg.get(c.id)-1);if(indeg.get(c.id)===0)q.push(c)}}
+ for(const n of NET.nodes)if(n.depth===undefined)n.depth=0}
+function layoutLayers(){
+ computeDepths();
+ let maxD=0;for(const n of NET.nodes)if(n.depth>maxD)maxD=n.depth;
+ // strata run top (roots) to bottom (newest); siblings grouped by author
+ // so each lineage reads as a stable column
+ const cols=new Map();
+ for(const n of NET.nodes){if(!cols.has(n.depth))cols.set(n.depth,[]);cols.get(n.depth).push(n)}
+ for(const col of cols.values()){
+  col.sort((x,y)=>x.author<y.author?-1:x.author>y.author?1:x.seq-y.seq);
+  const gap=Math.min(34,880/Math.max(1,col.length));
+  col.forEach((n,i)=>{n.lx=(i-(col.length-1)/2)*gap;n.ly=(n.depth-maxD/2)*74})}
+ const root=NET.byId.get(GENESIS_ID);if(root)root.ly-=10}
+function buildClusters(){
+ // every author strand coils into its own bubble; each bubble also
+ // learns its causal generation (depth from the roots), so the field
+ // can sit the strand on its DAG ring around the genesis core
+ computeDepths();
+ NET.clusters=[];const byAuth=new Map();
+ for(const n of NET.nodes){let c=byAuth.get(n.author);
+  if(!c){c={author:n.author,nodes:[],cx:0,cy:0,R:0,h:0,rooted:false,dep:1,maxSeq:0};
+   byAuth.set(n.author,c);NET.clusters.push(c)}
+  c.nodes.push(n);n.c=c}
+ for(const c of NET.clusters){
+  const nsCount=new Map();let dom='',dc=0;
+  for(const n of c.nodes){const k=n.ns;nsCount.set(k,(nsCount.get(k)||0)+1);
+   if(nsCount.get(k)>dc){dc=nsCount.get(k);dom=k}
+   if(n.seq>c.maxSeq)c.maxSeq=n.seq}
+  c.h=hue(dom);c.R=26+Math.sqrt(c.nodes.length)*7;c.vx=0;c.vy=0;
+  let dep=1e9;for(const n of c.nodes)if((n.depth||0)<dep)dep=n.depth||0;
+  c.dep=dep===1e9?1:dep;
+  let j=0;for(let i=0;i<8;i++)j=(j*33+(parseInt(c.author.substr(i*2,2),16)||0))%9973;
+  c.ph=j%628/100;
+  const ang=(j%360)*Math.PI/180,r=130+(j%170);
+  c.cx=Math.cos(ang)*r;c.cy=Math.sin(ang)*r}
+ const root=NET.byId.get(GENESIS_ID);
+ if(root&&root.c){root.c.rooted=true;root.c.cx=0;root.c.cy=0;root.c.h=-1}
+ for(const c of NET.clusters){
+  c.nodes.sort((x,y)=>x.seq-y.seq).forEach((n,i)=>{
+   const ang=i*2.399963,rad=c.R*.72*Math.sqrt((i+.5)/c.nodes.length);
+   n.ox=Math.cos(ang)*rad;n.oy=Math.sin(ang)*rad})}}
+function toggleLayout(){const btn=document.getElementById('laytoggle');
+ const next={mesh:'layers',layers:'bubbles',bubbles:'mesh'}[NET.mode];
+ if(next==='mesh'){NET.mode='mesh';btn.textContent='layered view';NET.alpha=1}
+ else if(next==='layers'){NET.mode='layers';layoutLayers();btn.textContent='bubbles view';NET.alpha=.6}
+ else{NET.mode='bubbles';buildClusters();btn.textContent='mesh view';NET.alpha=.6}
+ NET.sub='bubbles';NET.strand=null;NET.camT=null;
+ NET.sel=null;document.getElementById('callout').style.display='none';wake()}
+async function loadEcosystem(){
+ document.getElementById('ecosphere').style.display='block';
+ fitCanvas();
+ // EVERY transaction: page through the whole store until the last page.
+ const entries=[];const page=500;let offset=0,capped=false;
+ for(;;){const d=await j('/v1/entries?limit='+page+'&offset='+offset);
+  const batch=d.entries||[];entries.push(...batch);
+  if(batch.length<page||entries.length>=20000){if(entries.length>=20000)capped=true;break}
+  offset+=page}
+ const [ps,st]=await Promise.all([j('/v1/peers'),j('/v1/status')]);
+ const meshCapped=buildMesh(entries,2500);
+ if(NET.mode==='layers')layoutLayers();else if(NET.mode==='bubbles')buildClusters();
+ NET.sel=null;NET.hover=null;NET.pan={x:0,y:0};NET.zoom=1;NET.sub='bubbles';NET.strand=null;NET.camT=null;document.getElementById('callout').style.display='none';wireGraph();
+ const known=(ps.known||[]);
+ const mode=(st.policy&&st.policy.mode)||'open-observer';
+ const mesh=(ps.network&&ps.network.network_id)||'';
+ document.getElementById('ecostats').textContent=
+  `${entries.length} entr${entries.length===1?'y':'ies'} as nodes · ${NET.links.length} link(s) between them${(capped||meshCapped)?' (drawing capped - the rest live in recent)':''} · `+
+  `${(st.checkpoints!=null?st.checkpoints:0)} witness checkpoint(s) · `+
+  `this node: ${mode}${mesh?' @ mesh '+mesh:' · open network'} · `+
+  `${known.length} node address(es) known, ${known.filter(k=>k.last_success_ms>0).length} synced`;
+ // hero data: count-up tiles, one-line insights, namespace spotlight chips
+ const nsCount=new Map();entries.forEach(e=>{const k=e.namespace||'x';nsCount.set(k,(nsCount.get(k)||0)+1)});
+ const authors=new Set(entries.map(e=>e.author)).size;
+ const synced=known.filter(k=>k.last_success_ms>0).length;
+ const conflicts=(st.conflicts!=null?st.conflicts:0);
+ const tiles=document.getElementById('heroStats');tiles.innerHTML='';
+ const specs=[[entries.length,'entries','blue'],[NET.links.length,'links',''],[authors,'lineages','gold'],[nsCount.size,'namespaces',''],
+  [(st.checkpoints!=null?st.checkpoints:0),'witness checkpoints',''],[known.length?synced+' / '+known.length:'0 / 0','peers synced',''],[conflicts,'disputes',conflicts>0?'red':'']];
+ for(const[v,l,cls]of specs){const d=document.createElement('div');d.className='tile '+(cls||'');
+  d.innerHTML='<div class="num">0</div><div class="lbl">'+l+'</div>';tiles.appendChild(d);
+  const num=d.querySelector('.num');
+  if(typeof v==='number')countUp(num,v);else num.textContent=v}
+ const byAuth=new Map();entries.forEach(e=>byAuth.set(e.author,(byAuth.get(e.author)||0)+1));
+ let topA='',topAc=0;byAuth.forEach((c,a)=>{if(c>topAc){topA=a;topAc=c}});
+ let hub=null;for(const n of NET.nodes)if(!hub||n.deg>hub.deg)hub=n;
+ document.getElementById('insights').innerHTML=
+  (topA?'largest lineage: <b>'+short(topA)+'</b> · '+topAc+' entries · ':'')+
+  (hub&&hub.deg?'most connected record: <a href="#" onclick="show(\''+hub.id+'\');return false">'+short(hub.id)+'</a> · '+hub.deg+' links · ':'')+
+  'the gold core is the founder\'s genesis - every ledger descends from it';
+ const lg=document.getElementById('nsLegend');lg.innerHTML='';
+ [...nsCount.entries()].sort((a,b)=>b[1]-a[1]).forEach(([ns,c])=>{
+  const chip=document.createElement('span');chip.className='chip';chip.title='hover to spotlight, click to pin';
+  chip.innerHTML='<span class="dot" style="background:hsl('+hue(ns)+' 70% 64%)"></span>'+esc(ns)+' <span class="muted">'+c+'</span>';
+  chip.onmouseenter=()=>{if(!NET.pinNs){NET.focusNs=ns;drawMesh()}};
+  chip.onmouseleave=()=>{if(!NET.pinNs){NET.focusNs=null;drawMesh()}};
+  chip.onclick=()=>{NET.pinNs=NET.pinNs===ns?null:ns;NET.focusNs=NET.pinNs;drawMesh()};
+  lg.appendChild(chip)});
+ const rows=document.getElementById('rows');
+ rows.innerHTML='<tr><th>peer address</th><th>node</th><th>mesh</th><th>source</th><th>last sync</th><th>state</th></tr>';
+ known.forEach(k=>{const tr=document.createElement('tr');
+  const ago=k.last_success_ms?timeAgo(k.last_success_ms):'never';
+  const ok=k.last_success_ms>0&&(!k.last_error);
+  tr.innerHTML=`<td>${esc(k.addr)}</td><td>${short(k.node_key)}</td><td>${esc(k.network_id||'open')}</td><td><span class="tag">${esc(k.source)}</span></td><td>${ago}</td>`+
+   `<td>${ok?'<span class="tag" style="background:#23863633;color:#7ee787">synced</span>':k.last_error?'<span class="tag" style="background:#f8514933;color:#ffa198" title="'+esc(k.last_error)+'">'+esc(k.last_error.slice(0,28))+'</span>':'<span class="tag">unverified</span>'}</td>`;
+  rows.appendChild(tr)});
+ if(!known.length){const tr=document.createElement('tr');tr.innerHTML='<td colspan="6" class="muted">no peers yet - add one with `datu node --seed host:port` and it will grow by peer exchange</td>';rows.appendChild(tr)}}
+function timeAgo(ms){const s=Math.max(1,Math.round((Date.now()-ms)/1000));
+ if(s<60)return s+'s ago';if(s<3600)return Math.round(s/60)+'m ago';if(s<86400)return Math.round(s/3600)+'h ago';return Math.round(s/86400)+'d ago'}
+function countUp(el,val){const t0=performance.now(),dur=700;
+ const f=t=>{const k=Math.min(1,(t-t0)/dur);
+  el.textContent=Math.round(val*(1-Math.pow(1-k,3))).toLocaleString();
+  if(k<1)requestAnimationFrame(f)};
+ requestAnimationFrame(f)}
+loadEcosystem();
+async function loadEntries(){hideEco();
  const rows=document.getElementById('rows');
  rows.innerHTML='<tr><th>id</th><th>author</th><th>namespace</th><th>seq</th><th>payload</th></tr>';
  const d=await j('/v1/entries?limit=50');
@@ -1059,7 +1708,8 @@ async function loadEntries(){
   tr.innerHTML=`<td><a href="#" onclick="show('${e.id}');return false">${short(e.id)}</a></td><td>${short(e.author)}</td><td>${esc(e.namespace)}</td><td>${e.seq}</td><td>${esc(e.payload_preview.slice(0,80))}</td>`;
   rows.appendChild(tr)})}
 async function show(id){let e=await j('/v1/entry/'+id);if(e.error)e=await j('/v1/conflict/'+id);
- const d=document.getElementById('detail');d.style.display='block';
+ document.getElementById('modaltitle').textContent='record '+short(id)+(e.namespace?' · '+e.namespace:'');
+ const d=document.getElementById('modalbody');
  const p=atob(e.payload_base64||'');d.textContent=JSON.stringify(e,null,2)+'\n\npayload:\n'+p;
  // Ledger facts worth surfacing next to any record: who witnessed it (and
  // as of when), and whether it declares a contract (the pending view).
@@ -1089,18 +1739,21 @@ async function show(id){let e=await j('/v1/entry/'+id);if(e.error)e=await j('/v1
    (o.reasons||[]).forEach(r=>facts.push('  reason: '+r));
   }
  }catch(_){}
- if(facts.length) d.textContent+='\n\n'+facts.join('\n')}
+ if(facts.length) d.textContent+='\n\n'+facts.join('\n');
+ document.getElementById('modal').classList.add('open')}
+function closeModal(){document.getElementById('modal').classList.remove('open')}
+window.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
 async function search(){const q=document.getElementById('q').value.trim();
  if(/^[0-9a-fA-F]{64}$/.test(q)){show(q)}
  else if(/^[0-9a-fA-F]{63,}$/.test(q)){const d=await j('/v1/feed/'+q);showFeed(d)}
  else alert('enter 64-hex entry id or author id')}
-async function showFeed(d){
+async function showFeed(d){hideEco();
  const rows=document.getElementById('rows');
  rows.innerHTML='<tr><th>seq</th><th>id</th><th>namespace</th><th>payload</th></tr>';
  (d.entries||[]).forEach(e=>{const tr=document.createElement('tr');
   tr.innerHTML=`<td>${e.seq}</td><td><a href="#" onclick="show('${e.id}');return false">${short(e.id)}</a></td><td>${esc(e.namespace)}</td><td>${esc(e.payload_preview.slice(0,80))}</td>`;
   rows.appendChild(tr)})}
-async function loadAttestations(){
+async function loadAttestations(){hideEco();
  const rows=document.getElementById('rows');
  rows.innerHTML='<tr><th>attestation</th><th>attestor</th><th>subject</th><th>label</th><th>status</th></tr>';
  // Revocations first: a trusted statement names the attestation it kills.
@@ -1123,7 +1776,7 @@ async function loadAttestations(){
   rows.appendChild(tr);
  }
 }
-async function loadWitnesses(){const d=await j('/v1/checkpoints');
+async function loadWitnesses(){hideEco();const d=await j('/v1/checkpoints');
  const rows=document.getElementById('rows');
  rows.innerHTML='<tr><th>witness</th><th>height</th><th>entries</th><th>merkle root</th></tr>';
  (d.witnesses||[]).forEach(w=>{const tr=document.createElement('tr');
@@ -1134,7 +1787,7 @@ async function checkDisputes(){const d=await j('/v1/conflicts');
  if(!d.count){el.style.display='none';return}
  el.style.display='block';
  el.textContent='⚠ '+d.count+' disputed feed record(s) - conflicting signed history preserved as evidence (disputes view lists them)'}
-async function loadConflicts(){const d=await j('/v1/conflicts');
+async function loadConflicts(){hideEco();const d=await j('/v1/conflicts');
  const el=document.getElementById('disputes');
  if(!d.count){el.style.display='none';el.textContent='';return}
  el.style.display='block';
@@ -1260,7 +1913,7 @@ mod tests {
             hex::encode(r.id().unwrap())
         };
         std::thread::spawn(move || {
-            let _ = serve(&data, &format!("127.0.0.1:{port}"), None, 5, 5);
+            let _ = serve(&data, &format!("127.0.0.1:{port}"), None, 5, 5, None);
         });
         let mut ready = false;
         for _ in 0..200 {
@@ -1401,7 +2054,7 @@ mod tests {
             hex::encode(entry.id().unwrap())
         };
         std::thread::spawn(move || {
-            let _ = serve(&data, &format!("127.0.0.1:{port}"), None, 5, 5);
+            let _ = serve(&data, &format!("127.0.0.1:{port}"), None, 5, 5, None);
         });
         let mut ready = false;
         for _ in 0..200 {
@@ -1467,5 +2120,81 @@ mod tests {
         );
         assert!(status.contains("409"), "{status} {body}");
         assert!(body.contains("stale"), "{body}");
+    }
+
+    /// The peer table over HTTP: the exchange subset for nodes, the full
+    /// listing for the explorer, and the asker's announce recorded.
+    #[test]
+    fn peers_endpoint_shares_and_records_announce() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let data = dir.path().to_path_buf();
+        let table = Arc::new(datu_p2p::PeerTable::new());
+        table.upsert("10.0.0.41:7476", "abcd41", "", "mdns");
+        table.record_success("10.0.0.41:7476", "abcd41", "");
+        table.merge_pex(
+            &[datu_p2p::PeerWire {
+                addr: "10.0.0.42:7476".into(),
+                node_key: String::new(),
+                network_id: String::new(),
+                last_success_ms: 5, // hearsay: must not be shared
+            }],
+            "",
+        );
+        let shared_table = table.clone();
+        std::thread::spawn(move || {
+            let _ = serve(
+                &data,
+                &format!("127.0.0.1:{port}"),
+                None,
+                5,
+                5,
+                Some(shared_table),
+            );
+        });
+        let mut ready = false;
+        for _ in 0..200 {
+            if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
+                drop(s);
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(ready, "serve did not come up");
+
+        // A node asking for exchange: verified peers shared, hearsay not.
+        let (status, body) = http(port, "GET", "/v1/peers?network=", "");
+        assert!(status.contains("200"), "{status} {body}");
+        let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let shared = listing["peers"].as_array().unwrap();
+        assert_eq!(shared.len(), 1, "only the verified address: {body}");
+        assert_eq!(shared[0]["addr"], "10.0.0.41:7476");
+        // The explorer sees the whole table, hearsay included.
+        let known = listing["known"].as_array().unwrap();
+        assert_eq!(known.len(), 2, "explorer listing includes unverified");
+
+        // Announce ourselves; the table grows and the answer reflects it.
+        let (status, body) = http(
+            port,
+            "GET",
+            "/v1/peers?announce=10.0.0.43:7476&key=ef44&network=",
+            "",
+        );
+        assert!(status.contains("200"), "{status} {body}");
+        let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(listing["known"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["addr"] == "10.0.0.43:7476" && k["node_key"] == "ef44"));
+
+        // A cross-mesh ask is answered politely, but empty.
+        let (status, body) = http(port, "GET", "/v1/peers?network=other-mesh", "");
+        assert!(status.contains("200"), "{status} {body}");
+        let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(listing["peers"].as_array().unwrap().is_empty());
     }
 }
