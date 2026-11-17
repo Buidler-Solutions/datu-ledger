@@ -156,6 +156,10 @@ enum Commands {
         /// Peers to pull from every cycle (repeatable: host:port or http://…)
         #[arg(long = "peer")]
         peers: Vec<String>,
+        /// Bootstrap peers to pull AND exchange peers with (repeatable): one
+        /// seed grows into the whole reachable network via peer exchange
+        #[arg(long = "seed")]
+        seeds: Vec<String>,
         /// Seconds between sync cycles (0 = serve only, no auto-sync)
         #[arg(long, default_value_t = 300)]
         every: u64,
@@ -2784,8 +2788,9 @@ fn check_peer_mesh_http(peer: &str, our_network_id: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// Minimal std-only HTTP GET returning parsed JSON (peer status checks).
-fn http_get_json(peer: &str, path: &str) -> Result<serde_json::Value, String> {
+/// Minimal std-only HTTP GET returning parsed JSON (peer status checks,
+/// HTTP peer exchange).
+pub(crate) fn http_get_json(peer: &str, path: &str) -> Result<serde_json::Value, String> {
     let host = peer
         .strip_prefix("http://")
         .unwrap_or(peer)
@@ -3984,6 +3989,9 @@ fn run(cli: Cli) -> Result<(), String> {
             effective_policy(&cli.data_dir, *read_only, false)?,
             *submit_per_min as usize,
             *haves_per_min as usize,
+            Some(std::sync::Arc::new(datu_p2p::PeerTable::load(
+                &cli.data_dir,
+            ))),
         ),
         Commands::Signet { cmd } => match cmd {
             WalletCmd::Create { name, passphrase } => {
@@ -4282,6 +4290,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Commands::Node {
             addr,
             peers,
+            seeds,
             every,
             discover,
             witness,
@@ -4291,6 +4300,7 @@ fn run(cli: Cli) -> Result<(), String> {
             &cli.data_dir,
             addr,
             peers.clone(),
+            seeds.clone(),
             *every,
             *discover,
             *witness,

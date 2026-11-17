@@ -11,6 +11,8 @@
 //! client → server: PullRequest   (bloom filter of ids the client has)
 //! server → client: ServerMessage::Pull(PullResponse)  pages of what it lacks
 //!                  | ServerMessage::Error(String)     then closes
+//! client → server: PeersRequest  (DATUPEX1 - "who else do you know?",
+//!                  answered with one PeersResponse, see [`peers`])
 //! ```
 //!
 //! Serving is untrusted work: the client verifies every signature before
@@ -34,6 +36,11 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+pub mod peers;
+pub use peers::{
+    answer_peers, exchange_peers, PeerTable, PeerWire, PeersRequest, PeersResponse, PEERS_MAGIC,
+};
 
 pub const MAGIC: [u8; 8] = *b"DATUP2P1";
 /// Hard cap on a single frame; pages are far below this.
@@ -445,22 +452,48 @@ fn serve_pull_loop_with_budget(
 /// [`PullRequest`] is served directly on the open network - and refused
 /// with [`HELLO_REQUIRED`] on a walled one.
 pub fn handle_connection(stream: TcpStream, store: &Store, network: Option<&NetworkPolicy>) {
-    handle_connection_with_budget(stream, store, network, PULL_PAGES_PER_CONN)
+    handle_connection_with_peers(stream, store, network, None, PULL_PAGES_PER_CONN)
 }
 
 /// [`handle_connection`] with an explicit per-connection page budget: embed a
 /// server with a different shaping policy, or exercise the resume path in a
 /// test without streaming hundreds of pages.
 pub fn handle_connection_with_budget(
+    stream: TcpStream,
+    store: &Store,
+    network: Option<&NetworkPolicy>,
+    page_budget: usize,
+) {
+    handle_connection_with_peers(stream, store, network, None, page_budget)
+}
+
+/// [`handle_connection`] with the peer-exchange table wired in: exchange
+/// requests ([`PEERS_MAGIC`]) are answered from it and announces recorded.
+/// `None` serves an empty table - pull sync keeps working without one.
+pub fn handle_connection_with_peers(
     mut stream: TcpStream,
     store: &Store,
     network: Option<&NetworkPolicy>,
+    peers: Option<&PeerTable>,
     page_budget: usize,
 ) {
     let bytes = match read_frame_bytes(&mut stream) {
         Ok(b) => b,
         Err(_) => return, // client gone before saying anything
     };
+    if bytes.starts_with(&PEERS_MAGIC) {
+        // "Who else do you know?" - a first-frame exchange on the open
+        // network; walled meshes demand an admitted hello first.
+        if requires_hello(network) {
+            refuse(&mut stream, HELLO_REQUIRED.into());
+            return;
+        }
+        match PeersRequest::try_from_slice(&bytes) {
+            Ok(request) => answer_exchange(&mut stream, &request, peers, network),
+            Err(e) => refuse(&mut stream, format!("bad exchange frame: {e}")),
+        }
+        return;
+    }
     if bytes.starts_with(&HELLO_MAGIC) {
         let hello = match NodeHello::try_from_slice(&bytes) {
             Ok(h) => h,
@@ -473,11 +506,18 @@ pub fn handle_connection_with_budget(
             refuse(&mut stream, message);
             return;
         }
-        // Admitted: the next frame (if any) starts the pull loop.
+        // Admitted: the next frame (if any) starts the pull loop or an exchange.
         let bytes = match read_frame_bytes(&mut stream) {
             Ok(b) => b,
             Err(_) => return, // hello-only probe
         };
+        if bytes.starts_with(&PEERS_MAGIC) {
+            match PeersRequest::try_from_slice(&bytes) {
+                Ok(request) => answer_exchange(&mut stream, &request, peers, network),
+                Err(e) => refuse(&mut stream, format!("bad exchange frame: {e}")),
+            }
+            return;
+        }
         match PullRequest::try_from_slice(&bytes) {
             Ok(request) => serve_pull_loop_with_budget(&mut stream, store, request, page_budget),
             Err(e) => {
@@ -504,8 +544,23 @@ pub fn handle_connection_with_budget(
     } else {
         refuse(
             &mut stream,
-            "unknown frame (expected DATUP2P1 or DATUHEL1)".into(),
+            "unknown frame (expected DATUP2P1, DATUHEL1 or DATUPEX1)".into(),
         );
+    }
+}
+
+/// One exchange: answer from the table, record the asker's announce, close.
+fn answer_exchange(
+    stream: &mut TcpStream,
+    request: &PeersRequest,
+    peers: Option<&PeerTable>,
+    network: Option<&NetworkPolicy>,
+) {
+    match answer_peers(request, peers, network) {
+        Ok(response) => {
+            let _ = write_frame(stream, &response);
+        }
+        Err(message) => refuse(stream, message),
     }
 }
 

@@ -18,6 +18,21 @@ use crate::{
     short, sign_checkpoint_into,
 };
 
+/// Learned peers dialed per cycle: keeps a big table from meaning a big
+/// burst of connections every `--every` seconds.
+const LEARNED_PER_CYCLE: usize = 24;
+/// Peer exchanges per cycle (seeds always, then the most useful pulls).
+const EXCHANGES_PER_CYCLE: usize = 8;
+
+use datu_p2p::peers::{exchange_peers, SHARE_LIMIT, SOURCE_CONFIGURED, SOURCE_MDNS, SOURCE_SEED};
+use datu_p2p::{handle_connection_with_peers, mesh_name, PeerTable};
+use datu_store::Store;
+use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use std::net::TcpListener;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 /// The policy to apply *right now*: recomputed per connection and per sync
 /// cycle, so a node that bootstrapped on a pinned-but-chainless mesh promotes
 /// itself to the real manifest the moment the chain verifies - no restart.
@@ -30,12 +45,6 @@ fn current_policy(data_dir: &std::path::Path, read_only: bool) -> Option<datu_st
         }
     }
 }
-use datu_p2p::{handle_connection, mesh_name};
-use datu_store::Store;
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
-use std::net::TcpListener;
-use std::path::Path;
-use std::time::{Duration, Instant};
 
 /// The mDNS service type datu nodes announce and browse for.
 pub const SERVICE_TYPE: &str = "_datu-sync._tcp.local.";
@@ -134,12 +143,67 @@ pub fn discover(seconds: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// The address other nodes should dial us on: a wildcard bind becomes the
+/// machine's best-guess LAN IP, anything explicit is announced as given.
+fn announce_addr(addr: &str) -> String {
+    if let Ok(socket) = addr.parse::<std::net::SocketAddr>() {
+        if socket.ip().is_unspecified() {
+            return format!("{}:{}", local_ip(), socket.port());
+        }
+    }
+    addr.to_string()
+}
+
+/// Peer exchange against an HTTP peer (`http://…` seeds): the same question
+/// over the explorer's `/v1/peers` endpoint instead of the native wire.
+fn exchange_http(
+    peer: &str,
+    table: &PeerTable,
+    node_key: &str,
+    our_mesh: &str,
+    announce: &str,
+    own: &[String],
+) {
+    let base = peer.trim().trim_end_matches('/');
+    let path = format!("/v1/peers?announce={announce}&key={node_key}&network={our_mesh}");
+    match crate::http_get_json(base, &path) {
+        Ok(response) => {
+            let wires: Vec<datu_p2p::PeerWire> = response["peers"]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|p| {
+                            Some(datu_p2p::PeerWire {
+                                addr: p["addr"].as_str()?.to_string(),
+                                node_key: p["node_key"].as_str().unwrap_or("").to_string(),
+                                network_id: p["network_id"].as_str().unwrap_or("").to_string(),
+                                last_success_ms: p["last_success_ms"].as_u64().unwrap_or(0),
+                            })
+                        })
+                        .filter(|p| !own.contains(&p.addr))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let learned = table.merge_pex(&wires, our_mesh);
+            if learned > 0 {
+                println!("[peers] {peer}: learned {learned} address(es)");
+            }
+        }
+        Err(e) => {
+            if !e.contains("cannot connect") {
+                println!("[peers] {peer}: {e}");
+            }
+        }
+    }
+}
+
 /// The `datu node` daemon.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     data_dir: &Path,
     addr: &str,
     peers: Vec<String>,
+    seeds: Vec<String>,
     every: u64,
     discover: bool,
     witness: bool,
@@ -170,11 +234,24 @@ pub fn run(
     let listener = TcpListener::bind(addr).map_err(|e| format!("cannot bind {addr}: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
+    // The peer table: every node this one knows about, persisted between
+    // runs. Seeds grow it (peer exchange), the loop dials it, the explorer
+    // shows it. One table shared by daemon, p2p listener and HTTP API.
+    let table = Arc::new(PeerTable::load(data_dir));
+    for peer in &peers {
+        table.upsert(peer, "", &our_id, SOURCE_CONFIGURED);
+    }
+    for seed in &seeds {
+        table.upsert(seed, "", &our_id, SOURCE_SEED);
+    }
+    let our_announce = announce_addr(addr);
+
     // Optional HTTP explorer/API - a frontend, never a sync dependency.
     if let Some(http_addr) = &http {
         let dir = data_dir.to_path_buf();
         let bind = http_addr.clone();
         let policy = policy.clone();
+        let peers_api = table.clone();
         std::thread::spawn(move || {
             let _ = crate::serve::serve(
                 &dir,
@@ -182,6 +259,7 @@ pub fn run(
                 policy,
                 crate::serve::DEFAULT_SUBMIT_PER_MIN,
                 crate::serve::DEFAULT_HAVES_PER_MIN,
+                Some(peers_api),
             );
         });
     }
@@ -204,15 +282,23 @@ pub fn run(
         let db = db.clone();
         let dir = data_dir.to_path_buf();
         let network = network.clone();
+        let table = table.clone();
         std::thread::spawn(move || {
             for conn in listener.incoming().flatten() {
                 let db = db.clone();
                 let dir = dir.clone();
                 let network = network.clone();
+                let table = table.clone();
                 std::thread::spawn(move || {
                     let policy = current_policy(&dir, read_only);
                     if let Ok(store) = Store::open_with_policy(&db, policy) {
-                        handle_connection(conn, &store, network.as_ref());
+                        handle_connection_with_peers(
+                            conn,
+                            &store,
+                            network.as_ref(),
+                            Some(&table),
+                            datu_p2p::PULL_PAGES_PER_CONN,
+                        );
                     }
                 });
             }
@@ -222,6 +308,17 @@ pub fn run(
     println!("datu node {} is running", node.identity);
     println!("  native p2p sync:  {addr} (any node, any network, no HTTP)");
     println!("  configured peers: {}", peers.len());
+    if !seeds.is_empty() {
+        println!(
+            "  seed peers:       {} + peer exchange (learns the rest of the mesh)",
+            seeds.len()
+        );
+    }
+    println!(
+        "  peer table:       {} known ({} synced, persisted)",
+        table.len(),
+        table.count_with_success()
+    );
     println!(
         "  lan discovery:    {}   witness checkpoints: {}",
         if discover { "on" } else { "off" },
@@ -257,6 +354,7 @@ pub fn run(
     }
     if let Some(http_addr) = &http {
         println!("  http explorer:    http://{http_addr}/");
+        println!("    ecosystem view: http://{http_addr}/ (ecosphere tab - every entry a node in the mesh)");
     }
     println!("  offline paths:    datu delta / datu bundle (USB, email, any channel)");
     println!("ctrl-c to stop");
@@ -271,6 +369,7 @@ pub fn run(
     let mut last_seen_count: Option<u64> = None;
     loop {
         let mut targets = peers.clone();
+        targets.extend(seeds.iter().cloned());
         if discover {
             if let Ok(found) = discover_peers(2) {
                 for (address, identity, peer_network) in found {
@@ -281,12 +380,20 @@ pub fn run(
                             mesh_name(&peer_network),
                             mesh_name(&our_id)
                         );
-                    } else if identity != node.identity && !targets.contains(&address) {
-                        targets.push(address);
+                    } else {
+                        table.upsert(&address, &identity, &peer_network, SOURCE_MDNS);
+                        if identity != node.identity && !targets.contains(&address) {
+                            targets.push(address);
+                        }
                     }
                 }
             }
         }
+        // The learned crowd: everything peer exchange and mDNS ever told us
+        // about, oldest attempt first, bounded per cycle.
+        let learned = table.candidates(&our_id, &targets, LEARNED_PER_CYCLE);
+        targets.extend(learned);
+        let mut synced: Vec<String> = Vec::new();
         for peer in &targets {
             if frozen {
                 break;
@@ -294,8 +401,11 @@ pub fn run(
             let store = Store::open_with_policy(&db, current_policy(data_dir, read_only))
                 .map_err(|e| e.to_string())?;
             let hello = network_hello(data_dir, &node.key)?;
+            table.record_attempt(peer);
             match pull_peer(&store, peer, 500, hello.as_ref(), &our_id) {
                 Ok(stats) => {
+                    table.record_success(peer, "", &our_id);
+                    synced.push(peer.clone());
                     if stats.new_entries > 0 || stats.new_checkpoints > 0 {
                         println!(
                             "[sync] {peer}: +{} entries, +{} checkpoints",
@@ -309,9 +419,72 @@ pub fn run(
                         );
                     }
                 }
-                Err(e) => println!("[sync] {peer}: {e}"),
+                Err(e) => {
+                    table.record_failure(peer, &e);
+                    if !e.contains("cannot connect") || !seeds.is_empty() {
+                        println!("[sync] {peer}: {e}");
+                    }
+                }
             }
         }
+        // Peer exchange: seeds first, then this cycle's successful pulls -
+        // each answer grows the table for the next round.
+        if frozen {
+            table.save();
+            std::thread::sleep(Duration::from_secs(every));
+            continue;
+        }
+        let ask: Vec<String> = seeds
+            .iter()
+            .cloned()
+            .chain(synced.iter().filter(|p| !seeds.contains(p)).cloned())
+            .take(seeds.len() + EXCHANGES_PER_CYCLE)
+            .collect();
+        let hello = network_hello(data_dir, &node.key)?;
+        // Whatever this node is dialable as: never learn ourselves back.
+        let own = vec![our_announce.clone(), addr.to_string()];
+        for peer in &ask {
+            if peer.starts_with("http://") {
+                exchange_http(peer, &table, &node.identity, &our_id, &our_announce, &own);
+                continue;
+            }
+            let peer_addr = peer
+                .strip_prefix("datu://")
+                .or_else(|| peer.strip_prefix("dag://"))
+                .unwrap_or(peer);
+            match exchange_peers(
+                peer_addr,
+                hello.as_ref(),
+                &node.identity,
+                &our_id,
+                Some(&our_announce),
+                SHARE_LIMIT as u16,
+            ) {
+                Ok(response) => {
+                    let theirs: Vec<datu_p2p::PeerWire> = response
+                        .peers
+                        .iter()
+                        .filter(|p| !own.contains(&p.addr))
+                        .cloned()
+                        .collect();
+                    let learned = table.merge_pex(&theirs, &our_id);
+                    if learned > 0 {
+                        println!("[peers] {peer}: learned {learned} address(es)");
+                    }
+                }
+                Err(e) => {
+                    // Older peers do not speak the exchange; not news.
+                    if !e.contains("does not speak peer exchange")
+                        && !e.contains("unknown frame")
+                        && !e.contains("cannot connect")
+                    {
+                        println!("[peers] {peer}: {e}");
+                    }
+                }
+            }
+        }
+        table.prune();
+        table.save();
         if witness {
             let store = Store::open_with_policy(&db, current_policy(data_dir, read_only))
                 .map_err(|e| e.to_string())?;

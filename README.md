@@ -315,6 +315,11 @@ contract's pending/ready verdict with its reasons:
   correct sign requests without racing the chain
 - `GET /v1/checkpoints` - signed tamper-evidence: every witness's latest
   checkpoint (signer, height, entries covered, Merkle root, claimed time)
+- `GET /v1/peers?announce=&key=&network=` - the peer table: `peers[]` is the
+  exchange subset (verified, same-mesh addresses for nodes doing HTTP peer
+  exchange - the asker's `announce` is recorded so their node becomes
+  discoverable), `known[]` the full listing the explorer's ecosphere view
+  renders; a cross-mesh ask gets `200` with an empty `peers[]`
 - `GET /v1/coverage/{entry-id}` (optionally `/{checkpoint-id}`) - witness
   time-attestation over HTTP: for each fresh witness, the checkpoint plus
   the Merkle path that pins this entry into its signed root, in the same
@@ -405,14 +410,49 @@ datu node                                  # native p2p on 0.0.0.0:7476
 datu node --discover --witness             # + find LAN peers (mDNS), witness what it sees
 datu node --peer ministry.example:7476 --peer 10.0.0.4:7476 --every 300 \
          --witness --http 127.0.0.1:7474  # + configured peers + optional explorer
+datu node --seed ministry.example:7476 --witness --http 0.0.0.0:7474 \
+         --every 60                        # ecosystem mode: one seed, learn the rest
 ```
 
-The daemon announces itself on the LAN (`_dag-sync._tcp`), pulls from
+The daemon announces itself on the LAN (`_datu-sync._tcp`), pulls from
 configured and discovered peers each cycle, and signs a witness checkpoint
 whenever its view changes - a home computer quietly becomes an independent
 witness of everything it has seen. `datu discover` lists the nodes around
 you. The HTTP explorer (`--http`) is a convenience frontend for humans and
 dApps - node-to-node sync never touches it.
+
+#### Seeds and peer exchange: growing into the ecosystem
+
+`--peer` dials one address forever; `--seed` does more: every cycle the
+daemon pulls from the seed **and asks it "who else do you know?"** (peer
+exchange, `DATUP2P1` frame `DATUPEX1` - or `GET /v1/peers` for HTTP peers).
+Answers land in a persisted peer table (`peers.json`, capped, pruned) and
+are dialed on later cycles; every successful pull is itself followed by an
+exchange, so the table - and the union of transactions this node mirrors -
+grows until it has reached every node the mesh can offer. The asker's own
+address travels with the request (`announce=`), so a fresh node becomes
+discoverable the moment it first syncs.
+
+Anti-poisoning is structural: an address a peer merely *told* us about is
+never re-shared until this node has synced with it itself (`last_success_ms
+> 0`) - a liar can waste our dials, but cannot inject anything into what we
+tell others. The mesh wall applies as everywhere: cross-mesh asks are
+answered politely and empty, foreign-mesh addresses are not even learned.
+
+#### The ecosphere: one explorer, every transaction
+
+An observer node (`--http`, no `policy.json`) that seeds from the network
+holds the union of everything reachable - and its explorer's **ecosphere**
+tab draws it: every entry a node in a live mesh, every `prev` and `ref` a
+link between them. Nodes are colored by namespace and sized by how many
+entries attach to them, so authors and their lineages form constellations.
+Drag a node and the mesh follows; drag empty space to pan, scroll to zoom;
+click a node for a callout bubble with the record's facts and a link to
+the full locally-verified view (its links light up while selected). Below
+the mesh: every node address this node knows, its source
+(`seed`/`configured`/`mdns`/`pex`/`announce`), last
+successful sync and state. A holder or a validator running the same command
+sees the same ecosystem converge in their own mirror.
 
 ### Offline reconciliation by files
 
