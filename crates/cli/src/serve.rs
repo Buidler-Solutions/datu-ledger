@@ -2493,19 +2493,18 @@ mod request_limit_tests {
                 3 => {
                     // long request line, way past any sane method or path
                     let mut long = b"GET /".to_vec();
-                    long.extend(std::iter::repeat(b'x').take(8 * 1024));
+                    long.extend(std::iter::repeat_n(b'x', 8 * 1024));
                     long
                 }
                 _ => {
-                    let mut cut = format!(
-                        "POST /v1/entries HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n"
-                    )
-                    .into_bytes();
+                    let mut cut =
+                        b"POST /v1/entries HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n"
+                            .to_vec();
                     cut.extend(rng.bytes(16));
                     cut
                 }
             };
-            if rng.next() % 2 == 0 {
+            if rng.next().is_multiple_of(2) {
                 // write only a prefix, then drop: mid-request disconnect
                 let cut = (rng.next() as usize) % (payload.len() + 1);
                 payload.truncate(cut);
