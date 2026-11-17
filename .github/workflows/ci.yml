@@ -23,6 +23,59 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test (release, whole workspace)
         run: cargo test --workspace --release
+      - name: release binaries for drills
+        run: cargo build --release -p datu-cli -p datu-indexer
+      - name: drills (backup/restore, crash recovery, bounded soak)
+        run: |
+          ./deploy/drills/backup-restore.sh
+          ./deploy/drills/crash-recovery.sh
+          ./deploy/drills/soak.sh 100
+      - name: dependency inventory (SBOM-lite, denied licenses)
+        run: python3 deploy/checks/inventory.py
+
+  indexer-dialects:
+    name: projection drivers (SQLite + PostgreSQL + MySQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: secret
+          POSTGRES_DB: datu_test
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: secret
+          MARIADB_DATABASE: datu_test
+        ports: ["53306:3306"]
+        options: >-
+          --health-cmd "mariadb-admin ping -uroot -psecret"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - name: dialect roundtrips
+        env:
+          DATU_TEST_PG_URL: postgres://postgres:secret@127.0.0.1:55432/datu_test
+          DATU_TEST_MYSQL_URL: mysql://root:secret@127.0.0.1:53306/datu_test
+        run: cargo test -p datu-indexer --features "postgres mysql"
+
+  audit:
+    name: dependency advisories
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   web:
     name: web builds and extension scripts
