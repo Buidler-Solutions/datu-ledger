@@ -25,6 +25,9 @@ def check(name, canonical_hex, sig_hex):
 check("entry", fixture["entry"]["canonical_hex"], fixture["entry"]["signature_hex"])
 check("auth", fixture["auth"]["canonical_hex"], fixture["auth"]["signature_hex"])
 check("checkpoint", fixture["checkpoint"]["canonical_hex"], fixture["checkpoint"]["signature_hex"])
+# A party signs the BLAKE3 digest of the canonical JSON, so the pinned
+# digest bytes are what the signature must verify over here.
+check("party", fixture["party"]["digest_hex"], fixture["party"]["signature_hex"])
 
 auth = fixture["auth"]
 rebuilt = "datu-auth-v1\n{rp_id}\n{origin}\n{nonce_hex}\n{expires_at_ms}\n".format(
@@ -34,4 +37,14 @@ rebuilt = "datu-auth-v1\n{rp_id}\n{origin}\n{nonce_hex}\n{expires_at_ms}\n".form
 if rebuilt.encode().hex() != auth["canonical_hex"]:
     raise SystemExit("auth canonical bytes differ from the Python rebuild")
 print("ok: auth canonical bytes match the Python rebuild")
+
+party = fixture["party"]
+party_rebuilt = json.dumps(
+    {"v": party["v"], "kind": party["kind"], "doc": party["doc"],
+     "role": party["role"], "key": party["key"]},
+    sort_keys=True, separators=(",", ":"),
+)
+if party_rebuilt.encode().hex() != party["canonical_hex"]:
+    raise SystemExit("party canonical JSON differs from the Python rebuild")
+print("ok: party canonical JSON matches the Python rebuild")
 print("PASS: Python verified canonical signatures")

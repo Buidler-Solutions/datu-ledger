@@ -27,6 +27,9 @@ function check(name, canonicalHex, sigHex, pubHex) {
 check('entry', fixture.entry.canonical_hex, fixture.entry.signature_hex, fixture.public_key_hex);
 check('auth', fixture.auth.canonical_hex, fixture.auth.signature_hex, fixture.public_key_hex);
 check('checkpoint', fixture.checkpoint.canonical_hex, fixture.checkpoint.signature_hex, fixture.public_key_hex);
+// A party signs the BLAKE3 digest of the canonical JSON, so the pinned
+// digest bytes are what the signature must verify over here.
+check('party', fixture.party.digest_hex, fixture.party.signature_hex, fixture.public_key_hex);
 
 // Independent rebuild of the auth byte string from its parts.
 const rebuilt = [
@@ -43,6 +46,32 @@ if (expected !== fixture.auth.canonical_hex) {
 }
 console.log('ok: auth canonical bytes match the JS rebuild');
 
-// Entry id is blake3(canonical); JS has no native blake3, so id stays pinned
-// and Rust-verified. The signature proof above is what cross-language pins.
+// Rebuild the party canonical JSON with sorted keys (serde_json's BTree map
+// order) and compact separators, then compare against the Rust bytes.
+const canon = (v) => {
+  if (Array.isArray(v)) return `[${v.map(canon).join(',')}]`;
+  if (v && typeof v === 'object') {
+    return `{${Object.keys(v)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canon(v[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v);
+};
+const party = fixture.party;
+const partyRebuilt = canon({
+  v: party.v,
+  kind: party.kind,
+  doc: party.doc,
+  role: party.role,
+  key: party.key,
+});
+if (Buffer.from(partyRebuilt, 'utf8').toString('hex') !== party.canonical_hex) {
+  throw new Error('party canonical JSON differs from the JS rebuild');
+}
+console.log('ok: party canonical JSON matches the JS rebuild');
+
+// Entry id and the party digest are blake3 over canonical bytes; JS has no
+// native blake3, so both stay pinned and Rust-verified (the Rust test
+// recomputes them). The signature proofs above are what cross-language pin.
 console.log('PASS: JS verified canonical signatures');

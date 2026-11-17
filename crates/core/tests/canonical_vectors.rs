@@ -60,6 +60,36 @@ fn vectors() -> Value {
     let cp_id = *blake3::hash(&cp_canonical).as_bytes();
     let cp_sig = key.sign(&cp_canonical);
 
+    // Party signature: digest of canonical JSON. Built by hand, not via
+    // sign(), because PartySignature::sign stamps now_ms() and a fixture
+    // must not change between runs.
+    let party_doc = datu_core::parties::SignedDocument::new(
+        "land.title.application",
+        json!({"parcel": "AB-123", "grantee": "acme-ltd", "nested": {"z": 1, "a": 2}}),
+    );
+    let party_role = "holder";
+    let party_bytes = party_doc
+        .signing_bytes(party_role, &pubkey)
+        .expect("party signing bytes");
+    let party_digest = party_doc.digest(party_role, &pubkey).expect("party digest");
+    assert_eq!(party_digest, *blake3::hash(&party_bytes).as_bytes());
+    let party_sig = key.sign(&party_digest);
+
+    // End-to-end: the hand-built signature must pass SignedDocument::verify,
+    // so the pinned digest and the verifier can never drift apart silently.
+    let mut signed = party_doc.clone();
+    signed.parties.push(datu_core::parties::PartySignature {
+        role: party_role.into(),
+        key: pubkey.clone(),
+        ed_signature: hex::encode(party_sig.to_bytes()),
+        pq_key: None,
+        pq_signature: None,
+        pq_alg: None,
+        timestamp_ms: 1_700_000_200_000,
+    });
+    let roles = signed.verify().expect("party signature verifies");
+    assert_eq!(roles, vec![(party_role.to_string(), pubkey.clone())]);
+
     json!({
         "key_seed_hex": hex::encode(SEED),
         "public_key_hex": pubkey,
@@ -75,6 +105,17 @@ fn vectors() -> Value {
             "expires_at_ms": challenge.expires_at_ms,
             "canonical_hex": hex::encode(&auth_bytes),
             "signature_hex": hex::encode(auth_sig),
+        },
+        "party": {
+            "v": party_doc.v,
+            "kind": party_doc.kind,
+            "doc": party_doc.doc,
+            "role": party_role,
+            "key": pubkey,
+            "timestamp_ms": 1_700_000_200_000u64,
+            "canonical_hex": hex::encode(&party_bytes),
+            "digest_hex": hex::encode(party_digest),
+            "signature_hex": hex::encode(party_sig.to_bytes()),
         },
         "checkpoint": {
             "height": checkpoint.height,

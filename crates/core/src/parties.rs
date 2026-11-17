@@ -76,6 +76,13 @@ impl SignedDocument {
     /// canonical JSON of `(v, kind, doc, role, key)`. `serde_json` maps are
     /// BTree-ordered, so the encoding is deterministic.
     pub fn digest(&self, role: &str, key: &str) -> Result<[u8; 32]> {
+        Ok(*blake3::hash(&self.signing_bytes(role, key)?).as_bytes())
+    }
+
+    /// The exact canonical JSON bytes a party signature is computed over.
+    /// Exposed so auditors and cross-language verifiers can rebuild the
+    /// digest from parts instead of trusting a hash they cannot inspect.
+    pub fn signing_bytes(&self, role: &str, key: &str) -> Result<Vec<u8>> {
         let canonical = serde_json::json!({
             "v": self.v,
             "kind": self.kind,
@@ -83,8 +90,7 @@ impl SignedDocument {
             "role": role,
             "key": key,
         });
-        let bytes = serde_json::to_vec(&canonical).map_err(|e| Error::Encoding(e.to_string()))?;
-        Ok(*blake3::hash(&bytes).as_bytes())
+        serde_json::to_vec(&canonical).map_err(|e| Error::Encoding(e.to_string()))
     }
 
     /// Sign as the party identified by `key` in `role`. Ed25519 always;
