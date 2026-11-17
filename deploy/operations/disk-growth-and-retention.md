@@ -31,6 +31,10 @@ Rules of thumb:
   store): **96 MiB on disk, ~9.6 KiB/entry**, i.e. roughly 2.5x the live
   row size from per-commit page overhead; 147 entries/s publish rate,
   full verify clean. Budget with the on-disk number, not the row number.
+- Sync lag at that volume (fresh observer pulling 10,001 entries over
+  native p2p, paged bloom reconciliation): **2.8 s, ~3.5k entries/s**
+  (measured by the sync-lag phase of `deploy/drills/soak.sh`). Catch-up
+  after downtime scales with the missing entry count, not store age.
 
 Worked examples (on-disk): 1 million small records ~ 9 GiB; 1 million
 title-shaped records ~ 12-16 GiB; a land registry doing 1,000 records/day
