@@ -77,14 +77,20 @@ jobs:
   audit:
     name: dependency advisories
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: write
     steps:
       - uses: actions/checkout@v5
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # Direct cargo-audit instead of rustsec/audit-check: the action's
+      # check-run annotation path fails with "Not Found" on the warning
+      # branch even with checks: write, and we want vulnerabilities to be
+      # the only failing condition. Unmaintained/unsound warnings are
+      # reported but accepted: paste and proc-macro-error2 are build-time
+      # proc-macro deps, and lru arrives via mdns-sd with its unsound paths
+      # unreached. Revisit when those crates update their trees.
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: cargo audit
+        run: |
+          cargo install --locked cargo-audit --version 0.23.0
+          cargo audit
 
   rust-macos:
     name: rust workspace tests (macOS)
