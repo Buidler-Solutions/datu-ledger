@@ -93,3 +93,15 @@ export async function walletIdentities(bridgeUrl) {
   const result = await send('identities', { bridgeUrl }, 15000);
   return result.body || result;
 }
+
+// Create a Signet identity for a dApp role (Registrar, Registry signer...).
+// The extension relays the request to the bridge: the human chooses the
+// passphrase in the side panel, the vault mints the keys, and only the
+// public identity record comes back here. The dApp never sees a secret.
+export function walletCreateIdentity({ bridgeUrl, name, summary }) {
+  return send(
+    'create',
+    { bridgeUrl, path: '/v1/wallet/create', summary, body: { name } },
+    300000
+  );
+}

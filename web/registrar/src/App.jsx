@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { listIdentities, nodeGet, nodePost, getToken, setToken } from './api.js';
-import { onWalletState, walletIdentities, walletPing, walletSign } from './wallet.js';
+import { onWalletState, walletCreateIdentity, walletIdentities, walletPing, walletSign } from './wallet.js';
 import { newChallenge, verifyAssertion } from './signetauth.js';
 
 const NS = 'gov.titles.application';
@@ -111,14 +111,39 @@ const partyOf = (doc, role) => (doc.parties || []).find((p) => p.role === role);
 function Welcome({ wallet, identities, bridgeUrl, nodeUrl, nodeStatus, busy, onLogin, onRefresh, say }) {
   const [role, setRole] = useState('landowner');
   const [name, setName] = useState(ROLES.landowner.defaultName);
+  const [creating, setCreating] = useState(false);
   const registered = Object.entries(walletRoles());
 
   useEffect(() => {
     setName(ROLES[role].defaultName);
   }, [role]);
 
+  const wanted = ROLES[role].defaultName;
+  const have = identities.find((i) => i.name === wanted);
+
   async function login() {
     onLogin(role, name.trim());
+  }
+
+  // Set the Signet for this role: mint the role's identity inside the vault
+  // through the extension. The panel asks the human for a passphrase, the
+  // bridge creates the key, and this page only ever sees the public record.
+  async function addRoleIdentity() {
+    setCreating(true);
+    try {
+      await walletCreateIdentity({
+        bridgeUrl,
+        name: wanted,
+        summary: `Add the ${ROLES[role].label} Signet '${wanted}' - choose its passphrase in this prompt`,
+      });
+      say(`Signet '${wanted}' created and added to your extension`, 'ok');
+      await onRefresh();
+      onLogin(role, wanted);
+    } catch (e) {
+      say(`could not add '${wanted}': ${e.message}`, 'err');
+    } finally {
+      setCreating(false);
+    }
   }
 
   return (
@@ -166,13 +191,39 @@ function Welcome({ wallet, identities, bridgeUrl, nodeUrl, nodeStatus, busy, onL
           </div>
           <div className="row">
             <label>
-              Identity on the bridge
-              <input value={name} onChange={(e) => setName(e.target.value)} />
+              Identity in your Signet
+              <input value={name} onChange={(e) => setName(e.target.value)} list="signet-names" />
+              <datalist id="signet-names">
+                {identities.map((i) => (
+                  <option key={i.name} value={i.name} />
+                ))}
+              </datalist>
             </label>
             <button onClick={login} disabled={busy || !wallet.detected} style={{ marginTop: '1.4rem' }}>
               {busy ? 'signing challenge…' : `Login as ${ROLES[role].label}`}
             </button>
           </div>
+          <p className={have ? 'ok small' : 'muted small'}>
+            {have
+              ? `role identity '${wanted}' is in this Signet (${String(have.ed_public || '').slice(0, 16)}…)`
+              : `role identity '${wanted}' is not in this Signet yet`}
+          </p>
+          {!have && (
+            <button
+              className="ghost"
+              onClick={addRoleIdentity}
+              disabled={creating || busy || !wallet.detected}
+            >
+              {creating ? 'waiting for the extension…' : `Add '${wanted}' to the Signet`}
+            </button>
+          )}
+          {!have && (
+            <p className="muted small">
+              Adding creates this role's identity inside your Signet vault: the extension asks you
+              for a passphrase (8+ characters) and keeps the key there. This page never sees it.
+              You are signed in as {ROLES[role].label} right after.
+            </p>
+          )}
           {!wallet.detected && (
             <p className="err small">the Signet extension is not answering - see the Services card below</p>
           )}

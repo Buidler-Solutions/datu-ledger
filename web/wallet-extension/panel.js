@@ -1370,9 +1370,19 @@ function renderRequest(req) {
 
   const head = document.createElement('div');
   const isLogin = path === '/v1/wallet/auth-assert';
+  const isCreate = path === '/v1/wallet/create';
   head.innerHTML = `<b>${esc(payload.summary || (isLogin ? `sign in to ${body.rp_id || 'a site'}` : path || req.action))}</b>
     <div class="muted small">${esc(url)}${esc(path)} · identity ${esc(body.name || '?')} · ${new Date(req.at).toLocaleTimeString()}</div>`;
   box.appendChild(head);
+
+  if (isCreate) {
+    const detail = document.createElement('div');
+    detail.className = 'muted small';
+    detail.style.margin = '.3rem 0';
+    detail.innerHTML =
+      'creates this identity inside your Signet vault · the key never leaves it and cannot be recovered - remember the passphrase';
+    box.insertBefore(detail, head.nextSibling);
+  }
 
   if (isLogin) {
     const detail = document.createElement('div');
@@ -1387,8 +1397,12 @@ function renderRequest(req) {
 
   const pass = document.createElement('input');
   pass.type = 'password';
-  pass.placeholder = passCache[body.name] ? 'passphrase remembered for this session' : 'vault passphrase';
-  pass.value = passCache[body.name] || '';
+  pass.placeholder = isCreate
+    ? 'choose a vault passphrase (8+ characters)'
+    : passCache[body.name]
+      ? 'passphrase remembered for this session'
+      : 'vault passphrase';
+  pass.value = isCreate ? '' : passCache[body.name] || '';
   pass.style.marginTop = '.3rem';
   box.appendChild(pass);
 
@@ -1396,10 +1410,10 @@ function renderRequest(req) {
   row.className = 'row';
   const confirm = document.createElement('button');
   confirm.className = 'primary';
-  confirm.textContent = isLogin ? 'Approve sign-in' : 'Confirm & sign';
+  confirm.textContent = isCreate ? 'Create in Signet' : isLogin ? 'Approve sign-in' : 'Confirm & sign';
   const reject = document.createElement('button');
   reject.className = 'ghost';
-  reject.textContent = 'Reject';
+  reject.textContent = isCreate ? 'Cancel' : 'Reject';
   row.append(confirm, reject);
   box.appendChild(row);
 
@@ -1407,7 +1421,8 @@ function renderRequest(req) {
     confirm.disabled = true;
     try {
       await processRequest(req, pass.value || passCache[body.name]);
-      status('sign request completed', 'ok');
+      status(isCreate ? 'identity created in this Signet' : 'sign request completed', 'ok');
+      if (isCreate) refreshIdentities && refreshIdentities();
     } catch (e) {
       status(e.message, 'err');
       confirm.disabled = false;
