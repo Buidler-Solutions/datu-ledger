@@ -26,6 +26,7 @@ function check(name, canonicalHex, sigHex, pubHex) {
 
 check('entry', fixture.entry.canonical_hex, fixture.entry.signature_hex, fixture.public_key_hex);
 check('auth', fixture.auth.canonical_hex, fixture.auth.signature_hex, fixture.public_key_hex);
+check('checkpoint', fixture.checkpoint.canonical_hex, fixture.checkpoint.signature_hex, fixture.public_key_hex);
 
 // Independent rebuild of the auth byte string from its parts.
 const rebuilt = [

@@ -24,6 +24,7 @@ def check(name, canonical_hex, sig_hex):
 
 check("entry", fixture["entry"]["canonical_hex"], fixture["entry"]["signature_hex"])
 check("auth", fixture["auth"]["canonical_hex"], fixture["auth"]["signature_hex"])
+check("checkpoint", fixture["checkpoint"]["canonical_hex"], fixture["checkpoint"]["signature_hex"])
 
 auth = fixture["auth"]
 rebuilt = "datu-auth-v1\n{rp_id}\n{origin}\n{nonce_hex}\n{expires_at_ms}\n".format(

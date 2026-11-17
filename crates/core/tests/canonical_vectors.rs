@@ -7,7 +7,7 @@
 //! byte, so a serialization change cannot slip through unnoticed.
 
 use datu_core::auth::{sign_assertion, verify_assertion, AuthChallenge};
-use datu_core::EntryBody;
+use datu_core::{CheckpointBody, EntryBody};
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{json, Value};
 
@@ -44,6 +44,22 @@ fn vectors() -> Value {
     let auth_sig = sign_assertion(&key, &challenge);
     assert!(verify_assertion(&key.verifying_key(), &challenge, &auth_sig).is_ok());
 
+    let checkpoint = CheckpointBody {
+        version: 1,
+        signer: pubkey.clone(),
+        signer_pq: "pq-fixture".into(),
+        pq_alg: "mldsa65".into(),
+        height: 0,
+        prev: None,
+        timestamp_ms: 1_700_000_100_000,
+        entries_count: 4,
+        entry_ids_root: [3u8; 32],
+    };
+    let cp_canonical =
+        datu_core::Checkpoint::body_bytes(&checkpoint).expect("checkpoint body serializes");
+    let cp_id = *blake3::hash(&cp_canonical).as_bytes();
+    let cp_sig = key.sign(&cp_canonical);
+
     json!({
         "key_seed_hex": hex::encode(SEED),
         "public_key_hex": pubkey,
@@ -59,7 +75,15 @@ fn vectors() -> Value {
             "expires_at_ms": challenge.expires_at_ms,
             "canonical_hex": hex::encode(&auth_bytes),
             "signature_hex": hex::encode(auth_sig),
-        }
+        },
+        "checkpoint": {
+            "height": checkpoint.height,
+            "entries_count": checkpoint.entries_count,
+            "entry_ids_root_hex": hex::encode(checkpoint.entry_ids_root),
+            "canonical_hex": hex::encode(&cp_canonical),
+            "id_hex": hex::encode(cp_id),
+            "signature_hex": hex::encode(cp_sig.to_bytes()),
+        },
     })
 }
 
