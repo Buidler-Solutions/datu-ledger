@@ -493,6 +493,42 @@ fn policy_json_roundtrip_and_validation() {
     assert!(capped.rules[0].require.is_empty());
 }
 
+/// Upgrade-compatibility canary (readiness R4): `policy.json` files written
+/// by released nodes must keep loading forever. The fixture is the pinned,
+/// verbatim bytes of a real deployment's v1 policy (registry demo, `encl`
+/// data dir) - the same bytes `read_policy` in the CLI hands to
+/// `from_json`. If a serde change breaks loading files that look like this,
+/// this test fails before release instead of bricking fielded nodes.
+#[test]
+fn policy_v1_fielded_fixture_still_loads() {
+    assert_eq!(POLICY_VERSION, 1, "pinned fixture is a v1 policy; when POLICY_VERSION bumps, keep v1 loading (compat) and pin a vN fixture alongside");
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/encl-policy-v1.json"
+    ))
+    .unwrap();
+    let policy = WritePolicy::from_json(&text)
+        .unwrap_or_else(|e| panic!("fielded v1 policy no longer parses: {e}"));
+
+    assert!(!policy.readonly);
+    assert_eq!(policy.gated, vec!["gov.titles.*".to_string()]);
+    assert_eq!(policy.writers.len(), 1);
+    assert_eq!(policy.attestors.len(), 1);
+    assert_eq!(policy.min_cosigners, 0);
+    assert_eq!(policy.rules.len(), 1);
+    assert_eq!(policy.rules[0].ns, "gov.titles.*");
+    assert_eq!(
+        policy.rules[0].require_sealed,
+        vec!["holder_name", "birth_date"]
+    );
+
+    // The forward gate: the same shape with a newer version number is
+    // rejected loudly, never silently reinterpreted.
+    let future = text.replacen("\"version\": 1", "\"version\": 99", 1);
+    let err = WritePolicy::from_json(&future).unwrap_err();
+    assert!(err.contains("unsupported policy version 99"), "{err}");
+}
+
 fn rule(ns: &str, role: &str, key: Option<&str>, bind_field: Option<&str>) -> NamespaceRule {
     NamespaceRule {
         ns: ns.to_string(),

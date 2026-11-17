@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "readonly": false,
+  "gated": [
+    "gov.titles.*"
+  ],
+  "writers": [
+    "dfc4a58760856ba67c1434362d30abee515a7f1f762083fcde0781e79a973ec8"
+  ],
+  "attestors": [
+    "0ba659622e9b153164f9698d3462dff0b23d1b08880ff543de95dc78028d1a49"
+  ],
+  "min_cosigners": 0,
+  "required_roles": [],
+  "rules": [
+    {
+      "ns": "gov.titles.*",
+      "require": [
+        {
+          "role": "holder",
+          "bind_field": "holder_key"
+        }
+      ],
+      "require_sealed": [
+        "holder_name",
+        "birth_date"
+      ]
+    }
+  ]
+}
