@@ -1,0 +1,6 @@
+# Release builds are only byte-reproducible against the same compiler.
+# The release workflow pins this exact version; changing it changes artifact
+# bytes, so bump both together and note it in the release.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
