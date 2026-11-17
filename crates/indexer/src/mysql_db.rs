@@ -3,7 +3,7 @@
 //! `cargo build -p datu-indexer --features mysql`
 
 #[cfg(feature = "mysql")]
-use crate::{status_json, CheckpointRow, EntryRow, ProjectionDb, RejectRow, Seed};
+use crate::{status_json, CheckpointRow, EntryRow, ProjectionDb, RejectRow, Seed, StatusFigures};
 
 #[cfg(feature = "mysql")]
 pub struct MysqlDb {
@@ -205,7 +205,10 @@ impl ProjectionDb for MysqlDb {
     fn ordered_entry_ids(&mut self, limit: usize) -> Result<Vec<String>, String> {
         use mysql::prelude::Queryable;
         self.conn
-            .query::<String, _>("SELECT id FROM entries ORDER BY ord ASC LIMIT ?")
+            .exec::<String, _, _>(
+                "SELECT id FROM entries ORDER BY ord ASC LIMIT ?",
+                (limit as u64,),
+            )
             .map_err(|e| e.to_string())
     }
 
@@ -242,9 +245,21 @@ impl ProjectionDb for MysqlDb {
 
     fn status(&mut self) -> Result<serde_json::Value, String> {
         use mysql::prelude::Queryable;
-        let row: Option<(i64, i64, i64, i64, i64, i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
-            self.conn
-                .query_first(
+        type StatusRow = (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+        );
+        let row: Option<StatusRow> = self
+            .conn
+            .query_first(
                     "SELECT
                        (SELECT COUNT(*) FROM entries),
                        (SELECT COUNT(*) FROM entry_refs),
@@ -261,20 +276,20 @@ impl ProjectionDb for MysqlDb {
         let Some((entries, refs, feeds, cps, members, rejected, cursor, applied, height, updated)) =
             row
         else {
-            return Ok(status_json(0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+            return Ok(status_json(StatusFigures::default()));
         };
-        Ok(status_json(
+        Ok(status_json(StatusFigures {
             entries,
             refs,
             feeds,
-            cps,
-            members,
+            checkpoints: cps,
+            checkpoint_members: members,
             rejected,
-            cursor.unwrap_or(0),
-            applied.unwrap_or(0),
-            height.unwrap_or(0),
-            updated.unwrap_or(0),
-        ))
+            cursor: cursor.unwrap_or(0),
+            applied_total: applied.unwrap_or(0),
+            checkpoint_height: height.unwrap_or(0),
+            updated_at_ms: updated.unwrap_or(0),
+        }))
     }
 
     fn reset(&mut self) -> Result<(), String> {

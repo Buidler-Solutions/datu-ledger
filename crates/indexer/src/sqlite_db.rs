@@ -4,7 +4,7 @@ use std::path::Path;
 
 use rusqlite::{params, Connection};
 
-use crate::{status_json, CheckpointRow, EntryRow, ProjectionDb, RejectRow, Seed};
+use crate::{status_json, CheckpointRow, EntryRow, ProjectionDb, RejectRow, Seed, StatusFigures};
 
 pub struct SqliteDb {
     conn: Connection,
@@ -260,18 +260,18 @@ impl ProjectionDb for SqliteDb {
                 },
             )
             .map_err(|e| e.to_string())?;
-        Ok(status_json(
+        Ok(status_json(StatusFigures {
             entries,
             refs,
             feeds,
             checkpoints,
-            members,
+            checkpoint_members: members,
             rejected,
             cursor,
-            applied,
-            height,
-            updated,
-        ))
+            applied_total: applied,
+            checkpoint_height: height,
+            updated_at_ms: updated,
+        }))
     }
 
     fn reset(&mut self) -> Result<(), String> {

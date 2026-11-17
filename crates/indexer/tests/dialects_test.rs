@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Live dialect tests. They run only when the matching DSN is provided:
 //!
 //!   DATU_TEST_PG_URL=postgres://user:pass@localhost/datu_test cargo test -p datu-indexer --features postgres

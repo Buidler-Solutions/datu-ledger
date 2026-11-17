@@ -3,7 +3,7 @@
 //! `cargo build -p datu-indexer --features postgres`
 
 #[cfg(feature = "postgres")]
-use crate::{status_json, CheckpointRow, EntryRow, ProjectionDb, RejectRow, Seed};
+use crate::{status_json, CheckpointRow, EntryRow, ProjectionDb, RejectRow, Seed, StatusFigures};
 
 #[cfg(feature = "postgres")]
 pub struct PostgresDb {
@@ -239,18 +239,18 @@ impl ProjectionDb for PostgresDb {
                 &[],
             )
             .map_err(|e| e.to_string())?;
-        Ok(status_json(
-            row.get(0),
-            row.get(1),
-            row.get(2),
-            row.get(3),
-            row.get(4),
-            row.get(5),
-            row.get(6),
-            row.get(7),
-            row.get(8),
-            row.get(9),
-        ))
+        Ok(status_json(StatusFigures {
+            entries: row.get(0),
+            refs: row.get(1),
+            feeds: row.get(2),
+            checkpoints: row.get(3),
+            checkpoint_members: row.get(4),
+            rejected: row.get(5),
+            cursor: row.get(6),
+            applied_total: row.get(7),
+            checkpoint_height: row.get(8),
+            updated_at_ms: row.get(9),
+        }))
     }
 
     fn reset(&mut self) -> Result<(), String> {

@@ -418,34 +418,38 @@ fn base64_of(bytes: &[u8]) -> String {
     out
 }
 
+/// Figures for the health view, filled by each dialect.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StatusFigures {
+    pub entries: i64,
+    pub refs: i64,
+    pub feeds: i64,
+    pub checkpoints: i64,
+    pub checkpoint_members: i64,
+    pub rejected: i64,
+    pub cursor: i64,
+    pub applied_total: i64,
+    pub checkpoint_height: i64,
+    pub updated_at_ms: i64,
+}
+
 /// Health view shared by every dialect.
-pub fn status_json(
-    entries: i64,
-    refs: i64,
-    feeds: i64,
-    checkpoints: i64,
-    checkpoint_members: i64,
-    rejected: i64,
-    cursor: i64,
-    applied_total: i64,
-    height: i64,
-    updated_at_ms: i64,
-) -> serde_json::Value {
-    let lag_s = if updated_at_ms > 0 {
-        ((now_ms() - updated_at_ms).max(0) as f64) / 1000.0
+pub fn status_json(f: StatusFigures) -> serde_json::Value {
+    let lag_s = if f.updated_at_ms > 0 {
+        ((now_ms() - f.updated_at_ms).max(0) as f64) / 1000.0
     } else {
         0.0
     };
     serde_json::json!({
-        "entries": entries,
-        "refs": refs,
-        "feeds": feeds,
-        "checkpoints": checkpoints,
-        "checkpoint_members": checkpoint_members,
-        "rejected": rejected,
-        "cursor": format!("cur1:{cursor}"),
-        "applied_total": applied_total,
-        "checkpoint_height": height,
+        "entries": f.entries,
+        "refs": f.refs,
+        "feeds": f.feeds,
+        "checkpoints": f.checkpoints,
+        "checkpoint_members": f.checkpoint_members,
+        "rejected": f.rejected,
+        "cursor": format!("cur1:{}", f.cursor),
+        "applied_total": f.applied_total,
+        "checkpoint_height": f.checkpoint_height,
         "seconds_since_update": lag_s,
     })
 }
