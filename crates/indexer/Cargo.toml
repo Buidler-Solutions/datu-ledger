@@ -21,7 +21,7 @@ datu-store.workspace = true
 clap.workspace = true
 rusqlite = { workspace = true, optional = true }
 postgres = { version = "0.19", optional = true }
-mysql = { version = "25", optional = true }
+mysql = { version = "28", optional = true }
 serde_json.workspace = true
 hex.workspace = true
 
