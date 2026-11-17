@@ -133,8 +133,19 @@ jobs:
             --output-signature SHA256SUMS.sig \
             --output-certificate SHA256SUMS.pem \
             SHA256SUMS
+      - name: curated release body
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          f="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$f" ]; then
+            echo "body=$f" >> "$GITHUB_OUTPUT"
+          fi
       - uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: ${{ steps.notes.outputs.body }}
+          generate_release_notes: ${{ steps.notes.outputs.body == '' }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: artifacts/*
           fail_on_unmatched_files: true
