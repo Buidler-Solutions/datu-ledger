@@ -218,3 +218,60 @@ fn body_for_checkpoint(count: u64, root: [u8; 32]) -> CheckpointBody {
         entry_ids_root: root,
     }
 }
+
+/// Upgrade-compatibility gate (readiness R4): the projection carries a
+/// schema version stamp. A database stamped by a newer indexer must be
+/// refused by this binary - loudly, with one exact message - on both the
+/// indexing and the status paths, and `--reindex` (reset) must recover it.
+#[test]
+fn newer_projection_schema_stamp_is_refused_and_reindex_recovers() {
+    let node = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    write_fixture(node.path());
+
+    let cfg = IndexerConfig::new(node.path());
+    let db_path = proj.path().join("projection.db");
+    let db_url = format!("sqlite://{}", db_path.display());
+
+    // A fresh database is stamped with this code's version on first use.
+    let mut db = open(&db_url).unwrap();
+    run_once(db.as_mut(), &cfg).unwrap();
+    let status = db.status().unwrap();
+    assert_eq!(
+        status["projection_schema_version"], 1,
+        "status reports the stamp it wrote"
+    );
+    let stamp: String = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .query_row(
+            "SELECT v FROM indexer_meta WHERE k = 'projection_schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stamp, "1");
+
+    // Simulate a future indexer having rewritten this projection.
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "UPDATE indexer_meta SET v = '99' WHERE k = 'projection_schema_version'",
+            [],
+        )
+        .unwrap();
+
+    let mut old = open(&db_url).unwrap();
+    let err = run_once(old.as_mut(), &cfg).unwrap_err();
+    assert_eq!(err, datu_indexer::NEWER_PROJECTION_ERROR);
+    let mut old = open(&db_url).unwrap();
+    let err = old.status().unwrap_err();
+    assert_eq!(err, datu_indexer::NEWER_PROJECTION_ERROR);
+
+    // Recovery: `--reindex` drops the stamp with the tables and reprojects.
+    let mut fresh = open(&db_url).unwrap();
+    fresh.reset().unwrap();
+    let stats = run_once(fresh.as_mut(), &cfg).unwrap();
+    assert_eq!(stats.applied, 6, "reindex replays the whole ledger");
+    let status = fresh.status().unwrap();
+    assert_eq!(status["projection_schema_version"], 1);
+}

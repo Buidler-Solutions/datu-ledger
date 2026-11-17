@@ -31,6 +31,30 @@ pub use mysql_db::MysqlDb;
 pub use postgres_db::PostgresDb;
 pub use sqlite_db::SqliteDb;
 
+/// Version of the projection schema this code writes (readiness R4).
+/// Stamped into each dialect's `indexer_meta` table on first use. A target
+/// stamped by a *newer* indexer is refused loudly instead of being silently
+/// mis-projected; `--reindex` drops and rebuilds any older shape in place.
+pub const PROJECTION_SCHEMA_VERSION: i64 = 1;
+
+/// The refusal every dialect emits when the stored stamp is newer than
+/// this binary understands.
+pub const NEWER_PROJECTION_ERROR: &str =
+    "projection written by a newer indexer; upgrade or --reindex";
+
+/// Gate a stored version stamp: absent or not newer than this code's
+/// [`PROJECTION_SCHEMA_VERSION`] passes; anything newer refuses with
+/// [`NEWER_PROJECTION_ERROR`]. Dialects call this after reading
+/// `indexer_meta` (`k = 'projection_schema_version'`).
+pub fn check_schema_version(stored: Option<i64>) -> Result<(), String> {
+    if let Some(v) = stored {
+        if v > PROJECTION_SCHEMA_VERSION {
+            return Err(NEWER_PROJECTION_ERROR.to_string());
+        }
+    }
+    Ok(())
+}
+
 /// What to check before a row is projected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VerifyMode {
@@ -431,6 +455,9 @@ pub struct StatusFigures {
     pub applied_total: i64,
     pub checkpoint_height: i64,
     pub updated_at_ms: i64,
+    /// The projection schema version stamp this database carries (0 when
+    /// unknown/absent, e.g. a database a pre-versioning indexer wrote).
+    pub schema_version: i64,
 }
 
 /// Health view shared by every dialect.
@@ -450,6 +477,7 @@ pub fn status_json(f: StatusFigures) -> serde_json::Value {
         "cursor": format!("cur1:{}", f.cursor),
         "applied_total": f.applied_total,
         "checkpoint_height": f.checkpoint_height,
+        "projection_schema_version": f.schema_version,
         "seconds_since_update": lag_s,
     })
 }

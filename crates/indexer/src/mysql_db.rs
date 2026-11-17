@@ -18,12 +18,45 @@ impl MysqlDb {
         let conn = pool.get_conn().map_err(|e| e.to_string())?;
         Ok(Self { conn })
     }
+
+    /// Create `indexer_meta` if needed, read/first-write the schema
+    /// version stamp, and refuse stamps from a newer indexer. Returns the
+    /// effective version so `status` can show it.
+    fn ensure_meta(&mut self) -> Result<i64, String> {
+        use mysql::prelude::Queryable;
+        self.conn
+            .query_drop(
+                "CREATE TABLE IF NOT EXISTS indexer_meta(
+                     k VARCHAR(64) PRIMARY KEY,
+                     v VARCHAR(64) NOT NULL)",
+            )
+            .map_err(|e| e.to_string())?;
+        let stored: Option<String> = self
+            .conn
+            .query_first("SELECT v FROM indexer_meta WHERE k = 'projection_schema_version'")
+            .map_err(|e| e.to_string())?;
+        if let Some(v) = stored {
+            let v: i64 = v
+                .parse()
+                .map_err(|e| format!("bad projection_schema_version stamp '{v}': {e}"))?;
+            crate::check_schema_version(Some(v))?;
+            return Ok(v);
+        }
+        self.conn
+            .exec_drop(
+                "INSERT INTO indexer_meta(k, v) VALUES ('projection_schema_version', ?)",
+                (crate::PROJECTION_SCHEMA_VERSION.to_string(),),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(crate::PROJECTION_SCHEMA_VERSION)
+    }
 }
 
 #[cfg(feature = "mysql")]
 impl ProjectionDb for MysqlDb {
     fn ensure_schema(&mut self) -> Result<(), String> {
         use mysql::prelude::Queryable;
+        self.ensure_meta()?;
         let ddl = [
             "CREATE TABLE IF NOT EXISTS entries(
                  id VARCHAR(128) PRIMARY KEY,
@@ -245,6 +278,7 @@ impl ProjectionDb for MysqlDb {
 
     fn status(&mut self) -> Result<serde_json::Value, String> {
         use mysql::prelude::Queryable;
+        let schema_version = self.ensure_meta()?;
         type StatusRow = (
             i64,
             i64,
@@ -289,6 +323,7 @@ impl ProjectionDb for MysqlDb {
             applied_total: applied.unwrap_or(0),
             checkpoint_height: height.unwrap_or(0),
             updated_at_ms: updated.unwrap_or(0),
+            schema_version,
         }))
     }
 
@@ -302,6 +337,7 @@ impl ProjectionDb for MysqlDb {
             "checkpoints",
             "rejected",
             "indexer_state",
+            "indexer_meta",
         ] {
             self.conn
                 .query_drop(format!("DROP TABLE IF EXISTS {table}"))

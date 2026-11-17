@@ -16,11 +16,47 @@ impl PostgresDb {
         let client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
         Ok(Self { client })
     }
+
+    /// Create `indexer_meta` if needed, read/first-write the schema
+    /// version stamp, and refuse stamps from a newer indexer. Returns the
+    /// effective version so `status` can show it.
+    fn ensure_meta(&mut self) -> Result<i64, String> {
+        self.client
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS indexer_meta(
+                     k TEXT PRIMARY KEY,
+                     v TEXT NOT NULL);",
+            )
+            .map_err(|e| e.to_string())?;
+        let row = self
+            .client
+            .query_opt(
+                "SELECT v FROM indexer_meta WHERE k = 'projection_schema_version'",
+                &[],
+            )
+            .map_err(|e| e.to_string())?;
+        if let Some(row) = row {
+            let v: String = row.get(0);
+            let v: i64 = v
+                .parse()
+                .map_err(|e| format!("bad projection_schema_version stamp '{v}': {e}"))?;
+            crate::check_schema_version(Some(v))?;
+            return Ok(v);
+        }
+        self.client
+            .execute(
+                "INSERT INTO indexer_meta(k, v) VALUES ('projection_schema_version', $1)",
+                &[&crate::PROJECTION_SCHEMA_VERSION.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(crate::PROJECTION_SCHEMA_VERSION)
+    }
 }
 
 #[cfg(feature = "postgres")]
 impl ProjectionDb for PostgresDb {
     fn ensure_schema(&mut self) -> Result<(), String> {
+        self.ensure_meta()?;
         self.client
             .batch_execute(
                 "CREATE TABLE IF NOT EXISTS entries(
@@ -222,6 +258,7 @@ impl ProjectionDb for PostgresDb {
     }
 
     fn status(&mut self) -> Result<serde_json::Value, String> {
+        let schema_version = self.ensure_meta()?;
         let row = self
             .client
             .query_one(
@@ -250,6 +287,7 @@ impl ProjectionDb for PostgresDb {
             applied_total: row.get(7),
             checkpoint_height: row.get(8),
             updated_at_ms: row.get(9),
+            schema_version,
         }))
     }
 
@@ -262,7 +300,8 @@ impl ProjectionDb for PostgresDb {
                  DROP TABLE IF EXISTS checkpoint_members;
                  DROP TABLE IF EXISTS checkpoints;
                  DROP TABLE IF EXISTS rejected;
-                 DROP TABLE IF EXISTS indexer_state;",
+                 DROP TABLE IF EXISTS indexer_state;
+                 DROP TABLE IF EXISTS indexer_meta;",
             )
             .map_err(|e| e.to_string())?;
         self.ensure_schema()

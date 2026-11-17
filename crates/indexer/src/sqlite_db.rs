@@ -20,10 +20,46 @@ impl SqliteDb {
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
         Ok(Self { conn })
     }
+
+    /// Create `indexer_meta` if needed, read/first-write the schema
+    /// version stamp, and refuse stamps from a newer indexer. Returns the
+    /// effective version so `status` can show it.
+    fn ensure_meta(&mut self) -> Result<i64, String> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS indexer_meta(
+                     k TEXT PRIMARY KEY,
+                     v TEXT NOT NULL);",
+            )
+            .map_err(|e| e.to_string())?;
+        let stored: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT v FROM indexer_meta WHERE k = 'projection_schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(v) = stored {
+            let v: i64 = v
+                .parse()
+                .map_err(|e| format!("bad projection_schema_version stamp '{v}': {e}"))?;
+            crate::check_schema_version(Some(v))?;
+            return Ok(v);
+        }
+        self.conn
+            .execute(
+                "INSERT INTO indexer_meta(k, v) VALUES ('projection_schema_version', ?1)",
+                params![crate::PROJECTION_SCHEMA_VERSION.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(crate::PROJECTION_SCHEMA_VERSION)
+    }
 }
 
 impl ProjectionDb for SqliteDb {
     fn ensure_schema(&mut self) -> Result<(), String> {
+        self.ensure_meta()?;
         self.conn
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS entries(
@@ -229,6 +265,7 @@ impl ProjectionDb for SqliteDb {
     }
 
     fn status(&mut self) -> Result<serde_json::Value, String> {
+        let schema_version = self.ensure_meta()?;
         let (entries, refs, feeds, checkpoints, members, rejected, cursor, applied, height, updated) = self
             .conn
             .query_row(
@@ -271,6 +308,7 @@ impl ProjectionDb for SqliteDb {
             applied_total: applied,
             checkpoint_height: height,
             updated_at_ms: updated,
+            schema_version,
         }))
     }
 
@@ -283,7 +321,8 @@ impl ProjectionDb for SqliteDb {
                  DROP TABLE IF EXISTS checkpoint_members;
                  DROP TABLE IF EXISTS checkpoints;
                  DROP TABLE IF EXISTS rejected;
-                 DROP TABLE IF EXISTS indexer_state;",
+                 DROP TABLE IF EXISTS indexer_state;
+                 DROP TABLE IF EXISTS indexer_meta;",
             )
             .map_err(|e| e.to_string())?;
         self.ensure_schema()
