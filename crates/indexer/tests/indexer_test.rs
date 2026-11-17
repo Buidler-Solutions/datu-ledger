@@ -1,5 +1,6 @@
+use datu_core::merkle::merkle_root;
 use datu_core::pq::PqPrivateKey;
-use datu_core::{Entry, EntryBody};
+use datu_core::{Checkpoint, CheckpointBody, Entry, EntryBody};
 use datu_indexer::{open, run_once, IndexerConfig, VerifyMode};
 use datu_store::Store;
 use ed25519_dalek::SigningKey;
@@ -92,6 +93,10 @@ fn projects_verifies_and_is_idempotent() {
     let second = run_once(db.as_mut(), &cfg).unwrap();
     assert_eq!(second.applied, 0, "idempotent replay applies nothing");
     assert_eq!(second.cursor, first.cursor, "cursor is stable at rest");
+    assert_eq!(
+        second.members, first.members,
+        "membership replay is idempotent"
+    );
 }
 
 #[test]
@@ -140,4 +145,76 @@ fn verify_none_and_rejection_paths_exist() {
         .query_row("SELECT COUNT(*) FROM rejected", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rejected, 0, "nothing rejected in a healthy store");
+}
+
+#[test]
+fn checkpoint_membership_is_projected_and_root_checked() {
+    let node = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    write_fixture(node.path());
+
+    // Sign a checkpoint over the current id set (prefix of insertion order).
+    let store = Store::open(&node.path().join("node.db")).unwrap();
+    let ids = store.entry_ids().unwrap();
+    let ed = SigningKey::generate(&mut OsRng);
+    let pq: PqPrivateKey = datu_core::pq::keypair().unwrap().1;
+    let body = CheckpointBody {
+        version: 1,
+        signer: String::new(),
+        signer_pq: String::new(),
+        pq_alg: String::new(),
+        height: 0,
+        prev: None,
+        timestamp_ms: 1_700_000_100_000,
+        entries_count: ids.len() as u64,
+        entry_ids_root: merkle_root(&ids),
+    };
+    let cp = Checkpoint::sign(body, &ed, &pq).unwrap();
+    store.append_checkpoint(&cp).unwrap();
+
+    let cfg = IndexerConfig::new(node.path());
+    let db_url = format!("sqlite://{}", proj.path().join("projection.db").display());
+    let mut db = open(&db_url).unwrap();
+    let stats = run_once(db.as_mut(), &cfg).unwrap();
+    assert_eq!(stats.gaps, 0, "the prefix reconstructs this checkpoint");
+    assert_eq!(
+        stats.members as usize,
+        ids.len(),
+        "membership covers every id"
+    );
+
+    let conn = rusqlite::Connection::open(proj.path().join("projection.db")).unwrap();
+    let members: i64 = conn
+        .query_row("SELECT COUNT(*) FROM checkpoint_members", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(members as usize, ids.len());
+
+    // A checkpoint over a set this node cannot reconstruct is a gap, not a lie.
+    let store2 = Store::open(&node.path().join("node.db")).unwrap();
+    let mut bad = body_for_checkpoint(ids.len() as u64 + 10, [0u8; 32]);
+    bad.height = 1;
+    bad.prev = Some(cp.id().unwrap());
+    let bad_cp = Checkpoint::sign(bad, &ed, &pq).unwrap();
+    let _ = store2.append_checkpoint(&bad_cp);
+    let second = run_once(db.as_mut(), &cfg).unwrap();
+    assert!(
+        second.gaps >= 1,
+        "unreconstructable sets are counted as gaps"
+    );
+}
+
+fn body_for_checkpoint(count: u64, root: [u8; 32]) -> CheckpointBody {
+    CheckpointBody {
+        version: 1,
+        signer: String::new(),
+        signer_pq: String::new(),
+        pq_alg: String::new(),
+        height: 1,
+        prev: None,
+        timestamp_ms: 1_700_000_200_000,
+        entries_count: count,
+        entry_ids_root: root,
+    }
 }

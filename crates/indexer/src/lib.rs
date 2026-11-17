@@ -126,6 +126,10 @@ pub struct PassStats {
     pub rejected: u64,
     pub cursor: String,
     pub checkpoint_height: u64,
+    /// checkpoint -> entry membership rows written this pass
+    pub members: u64,
+    /// checkpoints whose covered set this node cannot reconstruct
+    pub gaps: u64,
 }
 
 /// The dialect seam. Coarse-grained on purpose: one batch per transaction,
@@ -146,6 +150,15 @@ pub trait ProjectionDb {
         applied_total: i64,
     ) -> Result<(), String>;
     fn upsert_checkpoints(&mut self, checkpoints: &[CheckpointRow]) -> Result<(), String>;
+    /// The first `limit` projected entry ids in insertion order (the set a
+    /// checkpoint with `entries_count = limit` covers, when roots match).
+    fn ordered_entry_ids(&mut self, limit: usize) -> Result<Vec<String>, String>;
+    /// Record which entries a checkpoint covers.
+    fn insert_checkpoint_members(
+        &mut self,
+        checkpoint_id: &str,
+        entry_ids: &[String],
+    ) -> Result<(), String>;
     fn save_height(&mut self, height: i64, updated_at_ms: i64) -> Result<(), String>;
     fn status(&mut self) -> Result<serde_json::Value, String>;
     fn reset(&mut self) -> Result<(), String>;
@@ -336,6 +349,42 @@ pub fn run_once(db: &mut dyn ProjectionDb, cfg: &IndexerConfig) -> Result<PassSt
         });
     }
     db.upsert_checkpoints(&cp_rows)?;
+
+    // Membership: a checkpoint's set is the first `entries_count` ids in
+    // insertion order. Recompute the Merkle root; a match proves this node
+    // holds exactly the covered set, so (checkpoint, entry) rows are safe.
+    for cp in &cp_rows {
+        let count = cp.entries_count as usize;
+        let ids = db.ordered_entry_ids(count)?;
+        if ids.len() < count {
+            stats.gaps += 1;
+            continue;
+        }
+        let mut decoded: Vec<[u8; 32]> = Vec::with_capacity(count);
+        let mut ok = true;
+        for id in &ids {
+            match hex::decode(id)
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            {
+                Some(bytes) => decoded.push(bytes),
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok || hex::encode(datu_core::merkle::merkle_root(&decoded)) != cp.root {
+            stats.gaps += 1;
+            continue;
+        }
+        if db.insert_checkpoint_members(&cp.id, &ids).is_ok() {
+            stats.members += ids.len() as u64;
+        } else {
+            stats.gaps += 1;
+        }
+    }
+
     db.save_height(height as i64, now_ms())?;
 
     stats.checkpoint_height = height;
@@ -375,6 +424,7 @@ pub fn status_json(
     refs: i64,
     feeds: i64,
     checkpoints: i64,
+    checkpoint_members: i64,
     rejected: i64,
     cursor: i64,
     applied_total: i64,
@@ -391,6 +441,7 @@ pub fn status_json(
         "refs": refs,
         "feeds": feeds,
         "checkpoints": checkpoints,
+        "checkpoint_members": checkpoint_members,
         "rejected": rejected,
         "cursor": format!("cur1:{cursor}"),
         "applied_total": applied_total,

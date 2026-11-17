@@ -55,6 +55,10 @@ impl ProjectionDb for SqliteDb {
                      entries_count INTEGER NOT NULL,
                      root TEXT NOT NULL,
                      ts INTEGER NOT NULL);
+                 CREATE TABLE IF NOT EXISTS checkpoint_members(
+                     checkpoint_id TEXT NOT NULL,
+                     entry_id TEXT NOT NULL,
+                     PRIMARY KEY(checkpoint_id, entry_id));
                  CREATE TABLE IF NOT EXISTS rejected(
                      id TEXT PRIMARY KEY,
                      author TEXT NOT NULL,
@@ -186,6 +190,34 @@ impl ProjectionDb for SqliteDb {
         tx.commit().map_err(|e| e.to_string())
     }
 
+    fn ordered_entry_ids(&mut self, limit: usize) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM entries ORDER BY ord ASC LIMIT ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())
+    }
+
+    fn insert_checkpoint_members(
+        &mut self,
+        checkpoint_id: &str,
+        entry_ids: &[String],
+    ) -> Result<(), String> {
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        for entry_id in entry_ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO checkpoint_members(checkpoint_id, entry_id) VALUES (?1, ?2)",
+                params![checkpoint_id, entry_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
     fn save_height(&mut self, height: i64, updated_at_ms: i64) -> Result<(), String> {
         self.conn
             .execute(
@@ -197,7 +229,7 @@ impl ProjectionDb for SqliteDb {
     }
 
     fn status(&mut self) -> Result<serde_json::Value, String> {
-        let (entries, refs, feeds, checkpoints, rejected, cursor, applied, height, updated) = self
+        let (entries, refs, feeds, checkpoints, members, rejected, cursor, applied, height, updated) = self
             .conn
             .query_row(
                 "SELECT
@@ -205,6 +237,7 @@ impl ProjectionDb for SqliteDb {
                    (SELECT COUNT(*) FROM entry_refs),
                    (SELECT COUNT(*) FROM feeds),
                    (SELECT COUNT(*) FROM checkpoints),
+                   (SELECT COUNT(*) FROM checkpoint_members),
                    (SELECT COUNT(*) FROM rejected),
                    (SELECT COALESCE(cursor_ord, 0) FROM indexer_state WHERE stream = 'layer1'),
                    (SELECT COALESCE(applied_total, 0) FROM indexer_state WHERE stream = 'layer1'),
@@ -222,6 +255,7 @@ impl ProjectionDb for SqliteDb {
                         row.get::<_, i64>(6)?,
                         row.get::<_, i64>(7)?,
                         row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
                     ))
                 },
             )
@@ -231,6 +265,7 @@ impl ProjectionDb for SqliteDb {
             refs,
             feeds,
             checkpoints,
+            members,
             rejected,
             cursor,
             applied,
@@ -245,6 +280,7 @@ impl ProjectionDb for SqliteDb {
                 "DROP TABLE IF EXISTS entries;
                  DROP TABLE IF EXISTS entry_refs;
                  DROP TABLE IF EXISTS feeds;
+                 DROP TABLE IF EXISTS checkpoint_members;
                  DROP TABLE IF EXISTS checkpoints;
                  DROP TABLE IF EXISTS rejected;
                  DROP TABLE IF EXISTS indexer_state;",

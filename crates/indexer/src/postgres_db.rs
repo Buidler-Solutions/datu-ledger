@@ -52,6 +52,10 @@ impl ProjectionDb for PostgresDb {
                      entries_count BIGINT NOT NULL,
                      root TEXT NOT NULL,
                      ts BIGINT NOT NULL);
+                 CREATE TABLE IF NOT EXISTS checkpoint_members(
+                     checkpoint_id TEXT NOT NULL,
+                     entry_id TEXT NOT NULL,
+                     PRIMARY KEY(checkpoint_id, entry_id));
                  CREATE TABLE IF NOT EXISTS rejected(
                      id TEXT PRIMARY KEY,
                      author TEXT NOT NULL,
@@ -179,6 +183,34 @@ impl ProjectionDb for PostgresDb {
         tx.commit().map_err(|e| e.to_string())
     }
 
+    fn ordered_entry_ids(&mut self, limit: usize) -> Result<Vec<String>, String> {
+        let rows = self
+            .client
+            .query(
+                "SELECT id FROM entries ORDER BY ord ASC LIMIT $1",
+                &[&(limit as i64)],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
+    fn insert_checkpoint_members(
+        &mut self,
+        checkpoint_id: &str,
+        entry_ids: &[String],
+    ) -> Result<(), String> {
+        let mut tx = self.client.transaction().map_err(|e| e.to_string())?;
+        for entry_id in entry_ids {
+            tx.execute(
+                "INSERT INTO checkpoint_members(checkpoint_id, entry_id) VALUES ($1, $2)
+                 ON CONFLICT DO NOTHING",
+                &[&checkpoint_id, entry_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
     fn save_height(&mut self, height: i64, updated_at_ms: i64) -> Result<(), String> {
         self.client
             .execute(
@@ -198,6 +230,7 @@ impl ProjectionDb for PostgresDb {
                    (SELECT COUNT(*) FROM entry_refs),
                    (SELECT COUNT(*) FROM feeds),
                    (SELECT COUNT(*) FROM checkpoints),
+                   (SELECT COUNT(*) FROM checkpoint_members),
                    (SELECT COUNT(*) FROM rejected),
                    (SELECT COALESCE(cursor_ord, 0) FROM indexer_state WHERE stream = 'layer1'),
                    (SELECT COALESCE(applied_total, 0) FROM indexer_state WHERE stream = 'layer1'),
@@ -216,6 +249,7 @@ impl ProjectionDb for PostgresDb {
             row.get(6),
             row.get(7),
             row.get(8),
+            row.get(9),
         ))
     }
 
@@ -225,6 +259,7 @@ impl ProjectionDb for PostgresDb {
                 "DROP TABLE IF EXISTS entries;
                  DROP TABLE IF EXISTS entry_refs;
                  DROP TABLE IF EXISTS feeds;
+                 DROP TABLE IF EXISTS checkpoint_members;
                  DROP TABLE IF EXISTS checkpoints;
                  DROP TABLE IF EXISTS rejected;
                  DROP TABLE IF EXISTS indexer_state;",

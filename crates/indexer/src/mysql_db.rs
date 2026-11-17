@@ -54,6 +54,10 @@ impl ProjectionDb for MysqlDb {
                  entries_count BIGINT NOT NULL,
                  root VARCHAR(128) NOT NULL,
                  ts BIGINT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS checkpoint_members(
+                 checkpoint_id VARCHAR(128) NOT NULL,
+                 entry_id VARCHAR(128) NOT NULL,
+                 PRIMARY KEY(checkpoint_id, entry_id))",
             "CREATE TABLE IF NOT EXISTS rejected(
                  id VARCHAR(128) PRIMARY KEY,
                  author VARCHAR(255) NOT NULL,
@@ -198,6 +202,34 @@ impl ProjectionDb for MysqlDb {
         self.conn.query_drop("COMMIT").map_err(|e| e.to_string())
     }
 
+    fn ordered_entry_ids(&mut self, limit: usize) -> Result<Vec<String>, String> {
+        use mysql::prelude::Queryable;
+        self.conn
+            .query::<String, _>("SELECT id FROM entries ORDER BY ord ASC LIMIT ?")
+            .map_err(|e| e.to_string())
+    }
+
+    fn insert_checkpoint_members(
+        &mut self,
+        checkpoint_id: &str,
+        entry_ids: &[String],
+    ) -> Result<(), String> {
+        use mysql::prelude::Queryable;
+        self.conn
+            .query_drop("START TRANSACTION")
+            .map_err(|e| e.to_string())?;
+        for entry_id in entry_ids {
+            if let Err(e) = self.conn.exec_drop(
+                "INSERT IGNORE INTO checkpoint_members(checkpoint_id, entry_id) VALUES (?, ?)",
+                (checkpoint_id, entry_id),
+            ) {
+                let _ = self.conn.query_drop("ROLLBACK");
+                return Err(e.to_string());
+            }
+        }
+        self.conn.query_drop("COMMIT").map_err(|e| e.to_string())
+    }
+
     fn save_height(&mut self, height: i64, updated_at_ms: i64) -> Result<(), String> {
         use mysql::prelude::Queryable;
         self.conn
@@ -210,7 +242,7 @@ impl ProjectionDb for MysqlDb {
 
     fn status(&mut self) -> Result<serde_json::Value, String> {
         use mysql::prelude::Queryable;
-        let row: Option<(i64, i64, i64, i64, i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+        let row: Option<(i64, i64, i64, i64, i64, i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
             self.conn
                 .query_first(
                     "SELECT
@@ -218,6 +250,7 @@ impl ProjectionDb for MysqlDb {
                        (SELECT COUNT(*) FROM entry_refs),
                        (SELECT COUNT(*) FROM feeds),
                        (SELECT COUNT(*) FROM checkpoints),
+                       (SELECT COUNT(*) FROM checkpoint_members),
                        (SELECT COUNT(*) FROM rejected),
                        (SELECT COALESCE(cursor_ord, 0) FROM indexer_state WHERE stream = 'layer1'),
                        (SELECT COALESCE(applied_total, 0) FROM indexer_state WHERE stream = 'layer1'),
@@ -225,15 +258,17 @@ impl ProjectionDb for MysqlDb {
                        (SELECT COALESCE(updated_at_ms, 0) FROM indexer_state WHERE stream = 'layer1')",
                 )
                 .map_err(|e| e.to_string())?;
-        let Some((entries, refs, feeds, cps, rejected, cursor, applied, height, updated)) = row
+        let Some((entries, refs, feeds, cps, members, rejected, cursor, applied, height, updated)) =
+            row
         else {
-            return Ok(status_json(0, 0, 0, 0, 0, 0, 0, 0, 0));
+            return Ok(status_json(0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
         };
         Ok(status_json(
             entries,
             refs,
             feeds,
             cps,
+            members,
             rejected,
             cursor.unwrap_or(0),
             applied.unwrap_or(0),
@@ -248,6 +283,7 @@ impl ProjectionDb for MysqlDb {
             "entries",
             "entry_refs",
             "feeds",
+            "checkpoint_members",
             "checkpoints",
             "rejected",
             "indexer_state",
