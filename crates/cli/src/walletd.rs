@@ -193,6 +193,7 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
     let dir = data_dir.to_path_buf();
     let origins = Arc::new(origins);
     let grants = Arc::new(Grants::default());
+    let limiter = Arc::new(ProviderLimiter::default());
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(s) => s,
@@ -202,8 +203,9 @@ pub fn serve(data_dir: &Path, addr: &str, allow_origins: Vec<String>) -> Result<
         let book = Arc::clone(&book);
         let origins = Arc::clone(&origins);
         let grants = Arc::clone(&grants);
+        let limiter = Arc::clone(&limiter);
         std::thread::spawn(move || {
-            let _ = handle(stream, &dir, &book, &origins, &grants);
+            let _ = handle(stream, &dir, &book, &origins, &grants, &limiter);
         });
     }
     Ok(())
@@ -215,9 +217,10 @@ fn handle(
     book: &PairBook,
     origins: &[String],
     grants: &Grants,
+    limiter: &ProviderLimiter,
 ) -> Result<(), String> {
     let mut stream = stream;
-    if let Err(e) = handle_inner(&mut stream, data_dir, book, origins, grants) {
+    if let Err(e) = handle_inner(&mut stream, data_dir, book, origins, grants, limiter) {
         if let Some(rest) = e.strip_prefix("TOO_MANY_ATTEMPTS:") {
             let _ = respond_json(
                 &mut stream,
@@ -241,6 +244,7 @@ fn handle_inner(
     book: &PairBook,
     origins: &[String],
     grants: &Grants,
+    limiter: &ProviderLimiter,
 ) -> Result<(), String> {
     let (method, path, body, headers) = match read_request(stream) {
         Some(r) => r,
@@ -359,7 +363,7 @@ fn handle_inner(
         // passphrase, no unlock - but rate-limited, and it proves nothing
         // about custody (only auth-assert does).
         ("POST", "/v1/provider-proof") => {
-            if !provider_rate_ok() {
+            if !limiter.allow() {
                 return Err(
                     "TOO_MANY_ATTEMPTS: too many provider-proof requests, slow down".into(),
                 );
@@ -1258,21 +1262,28 @@ impl PairBook {
     }
 }
 
-/// Simple fixed-window limiter so a hostile paired page cannot hammer the
-/// proof route (it needs no passphrase, so it must stay cheap to call).
-fn provider_rate_ok() -> bool {
-    static WINDOW: OnceLock<Mutex<(u64, u32)>> = OnceLock::new();
-    let cell = WINDOW.get_or_init(|| Mutex::new((0, 0)));
-    let Ok(mut w) = cell.lock() else {
-        return false;
-    };
-    let now = now_ms();
-    if now.saturating_sub(w.0) >= PROVIDER_RATE_WINDOW_MS {
-        w.0 = now;
-        w.1 = 0;
+/// Fixed-window limiter so a hostile paired page cannot hammer the proof
+/// route (it needs no passphrase, so it must stay cheap to call). One per
+/// bridge instance, shared across its connections - not process-global, so
+/// a second bridge for a second user keeps its own budget.
+#[derive(Default)]
+struct ProviderLimiter {
+    window: Mutex<(u64, u32)>,
+}
+
+impl ProviderLimiter {
+    fn allow(&self) -> bool {
+        let Ok(mut w) = self.window.lock() else {
+            return false;
+        };
+        let now = now_ms();
+        if now.saturating_sub(w.0) >= PROVIDER_RATE_WINDOW_MS {
+            w.0 = now;
+            w.1 = 0;
+        }
+        w.1 += 1;
+        w.1 <= PROVIDER_RATE_MAX
     }
-    w.1 += 1;
-    w.1 <= PROVIDER_RATE_MAX
 }
 
 enum TokenDecision {
@@ -1375,6 +1386,17 @@ fn now_ms() -> u64 {
 fn failures() -> &'static Mutex<HashMap<String, (u32, u64)>> {
     static FAILURES: OnceLock<Mutex<HashMap<String, (u32, u64)>>> = OnceLock::new();
     FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Test hook: expire every lockout window immediately, so the recovery
+/// half of the throttle contract is testable without sleeping 15 s.
+#[cfg(test)]
+fn expire_lockouts_for_test() {
+    if let Ok(mut map) = failures().lock() {
+        for (_, until) in map.values_mut() {
+            *until = 0;
+        }
+    }
 }
 
 fn load_guarded(wallet: &Wallet, name: &str, passphrase: &str) -> Result<LoadedIdentity, String> {
@@ -2443,6 +2465,307 @@ mod tests {
         assert!(
             status.contains("400"),
             "cross-rp credential refused: {status}"
+        );
+    }
+
+    // ---- S5 adversarial suite: bridge hardening -------------------------
+
+    /// Brute force on the passphrase locks the identity: five misses then a
+    /// 429 that blocks even the correct passphrase until the window passes;
+    /// recovery clears the counter instead of leaving a hair trigger.
+    #[test]
+    fn passphrase_brute_force_locks_the_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let port = spawn_bridge(&data);
+        let token = wait_for_token(&data);
+
+        let (status, _) = http(
+            port,
+            "POST",
+            "/v1/wallet/create",
+            Some(&token),
+            &json!({"name": "brute1", "passphrase": "correct horse"}).to_string(),
+        );
+        assert!(status.contains("200"));
+
+        let attempt = |pass: &str| {
+            http(
+                port,
+                "POST",
+                "/v1/wallet/auth-assert",
+                Some(&token),
+                &json!({"name": "brute1", "passphrase": pass, "rp_id": "brute.example",
+                        "origin": "https://brute.example", "nonce": "cd".repeat(16),
+                        "expires_at_ms": 4_102_444_800_000u64, "approve": true})
+                .to_string(),
+            )
+            .0
+        };
+
+        for i in 1..=MAX_PASSPHRASE_FAILURES {
+            let status = attempt("wrong passphrase");
+            assert!(
+                status.contains("400"),
+                "wrong passphrase #{i} must fail closed: {status}"
+            );
+        }
+        // The lockout blocks the CORRECT passphrase too: no oracle to tell
+        // "locked" from "wrong" apart by retrying.
+        let status = attempt("correct horse");
+        assert!(
+            status.contains("429"),
+            "locked identity must refuse the correct passphrase: {status}"
+        );
+
+        // After the window passes, the correct passphrase works again and
+        // the counter resets (the next miss is a plain 400, not a lockout).
+        expire_lockouts_for_test();
+        let status = attempt("correct horse");
+        assert!(status.contains("200"), "recovery after lockout: {status}");
+        let status = attempt("wrong passphrase");
+        assert!(
+            status.contains("400"),
+            "counter cleared on success: {status}"
+        );
+    }
+
+    /// A stolen auth-assert grant is worthless on every custody route: it
+    /// unlocks silent logins only, never export, sealing or signing.
+    #[test]
+    fn grants_never_unlock_custody_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let port = spawn_bridge(&data);
+        let token = wait_for_token(&data);
+
+        let (status, _) = http(
+            port,
+            "POST",
+            "/v1/wallet/create",
+            Some(&token),
+            &json!({"name": "grace", "passphrase": "grace pass"}).to_string(),
+        );
+        assert!(status.contains("200"));
+
+        let login = |body: serde_json::Value| {
+            http(
+                port,
+                "POST",
+                "/v1/wallet/auth-assert",
+                Some(&token),
+                &body.to_string(),
+            )
+        };
+        let nonce = "ef".repeat(datu_core::auth::NONCE_BYTES);
+        let challenge = |extra: serde_json::Value| {
+            json!({"name": "grace", "passphrase": "grace pass", "rp_id": "grant.example",
+                   "origin": "https://grant.example", "nonce": nonce,
+                   "expires_at_ms": 4_102_444_800_000u64})
+            .as_object()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .chain(extra.as_object().unwrap().clone())
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+        };
+
+        let (status, body) = login(challenge(json!({"approve": true})));
+        assert!(status.contains("200"), "{status} {body}");
+        let grant = serde_json::from_str::<serde_json::Value>(&body).unwrap()["grant"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!grant.is_empty());
+
+        // The grant works for silent re-login on its own route...
+        let silent = json!({"name": "grace", "grant": grant, "rp_id": "grant.example",
+                            "origin": "https://grant.example", "nonce": nonce,
+                            "expires_at_ms": 4_102_444_800_000u64});
+        let (status, body) = login(silent.clone());
+        assert!(status.contains("200"), "grant re-login: {status} {body}");
+
+        // ...but not under another identity name...
+        let stolen = json!({"name": "brute-someone-else", "grant": grant, "rp_id": "grant.example",
+                            "origin": "https://grant.example", "nonce": nonce,
+                            "expires_at_ms": 4_102_444_800_000u64});
+        let (status, _) = login(stolen);
+        assert!(
+            status.contains("400"),
+            "grant for another identity must be refused: {status}"
+        );
+
+        // ...not as a passphrase substitute anywhere custody is at stake.
+        for path in [
+            "/v1/wallet/export",
+            "/v1/wallet/seal",
+            "/v1/wallet/party-sign",
+        ] {
+            let (status, body) = http(
+                port,
+                "POST",
+                path,
+                Some(&token),
+                &json!({"name": "grace", "grant": grant}).to_string(),
+            );
+            assert!(
+                status.contains("400"),
+                "grant must not unlock {path}: {status} {body}"
+            );
+            assert!(
+                !body.contains("backup"),
+                "no backup material may leak via {path}: {body}"
+            );
+        }
+
+        // And a made-up grant is just an error.
+        let (status, _) = login(json!({"name": "grace", "grant": "0".repeat(64),
+                                       "rp_id": "grant.example", "origin": "https://grant.example",
+                                       "nonce": nonce, "expires_at_ms": 4_102_444_800_000u64}));
+        assert!(status.contains("400"), "garbage grant refused: {status}");
+    }
+
+    /// The genuineness-proof route is the one token-only endpoint, so its
+    /// rate limit must hold: 60 proofs in a window, then 429.
+    #[test]
+    fn provider_proof_route_is_rate_limited() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let port = spawn_bridge(&data);
+        let token = wait_for_token(&data);
+
+        let nonce = "ab".repeat(24);
+        // Bad nonces never mint proofs, checked inside the budget (the
+        // limiter sits in front of nonce validation by design).
+        let (status, _) = http(
+            port,
+            "POST",
+            "/v1/provider-proof",
+            Some(&token),
+            &json!({"nonce": "xyz"}).to_string(),
+        );
+        assert!(status.contains("400"), "malformed nonce refused: {status}");
+
+        // Request 1 was the malformed-nonce probe above; it consumed one
+        // budget slot because the limiter sits in front of validation.
+        let mut saw_limit = false;
+        for i in 0..=(PROVIDER_RATE_MAX + 2) {
+            let requests = i + 1;
+            let (status, body) = http(
+                port,
+                "POST",
+                "/v1/provider-proof",
+                Some(&token),
+                &json!({"nonce": nonce}).to_string(),
+            );
+            if status.contains("429") {
+                assert!(
+                    requests >= PROVIDER_RATE_MAX,
+                    "limited too early (request {requests}): {status} {body}"
+                );
+                saw_limit = true;
+                break;
+            }
+            assert!(
+                status.contains("200"),
+                "request {requests} should pass inside the budget: {status} {body}"
+            );
+        }
+        assert!(saw_limit, "the proof route must eventually rate-limit");
+    }
+
+    /// Token and origin edge cases from a hostile browser context: unknown
+    /// well-formed tokens, the sandboxed-iframe `Origin: null`, unlisted
+    /// https origins, and the constant-time compare itself.
+    #[test]
+    fn hostile_tokens_and_origins_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let port = spawn_bridge(&data);
+        let token = wait_for_token(&data);
+
+        // A well-formed but unknown bearer token: 401, indistinguishable
+        // from a missing one.
+        let stranger = hex::encode([9u8; 32]);
+        for presented in [&stranger, "", "   "] {
+            let (status, _) = http(port, "GET", "/v1/wallet/identities", Some(presented), "");
+            assert!(
+                status.contains("401"),
+                "unknown token '{presented}' must be refused: {status}"
+            );
+        }
+
+        // Sandboxed ifframes send `Origin: null`; not an allowed origin.
+        let (status, _) = http_origin(
+            port,
+            "POST",
+            "/v1/wallet/identities",
+            Some(&token),
+            Some("null"),
+            "",
+        );
+        assert!(
+            status.contains("403"),
+            "Origin: null must be refused: {status}"
+        );
+
+        // An unlisted https origin is refused even with a valid token: it
+        // must be paired explicitly via --allow-origin.
+        let (status, body) = http_origin(
+            port,
+            "POST",
+            "/v1/wallet/identities",
+            Some(&token),
+            Some("https://random.example"),
+            "",
+        );
+        assert!(
+            status.contains("403"),
+            "unlisted origin must be refused: {status} {body}"
+        );
+        assert!(body.contains("--allow-origin"), "{body}");
+
+        // Constant-time compare basics.
+        let a = b"0123456789abcdef0123456789abcdef";
+        assert!(const_eq(a, a));
+        assert!(!const_eq(a, b"0123456789abcdef0123456789abcdeg"));
+        assert!(!const_eq(a, b"short"));
+    }
+
+    /// Oversized bodies are dropped before any parsing: the 2 MiB cap on
+    /// the bridge is the same budget class as the node HTTP surface.
+    #[test]
+    fn oversized_bodies_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let port = spawn_bridge(&data);
+        let token = wait_for_token(&data);
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let head = format!(
+            "POST /v1/wallet/create HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_BODY_BYTES + 1024
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        let chunk = [b'x'; 65536];
+        let mut sent = 0usize;
+        while sent < MAX_BODY_BYTES + 1024 {
+            let n = (MAX_BODY_BYTES + 1024 - sent).min(chunk.len());
+            let _ = stream.write_all(&chunk[..n]);
+            sent += n;
+        }
+        let mut raw = String::new();
+        let _ = stream.read_to_string(&mut raw);
+        assert!(
+            !raw.contains("200 OK"),
+            "no response for an oversized body: {}",
+            &raw[..40.min(raw.len())]
+        );
+        assert!(
+            !raw.contains("passphrase"),
+            "no partial-body echo either: {}",
+            &raw[..40.min(raw.len())]
         );
     }
 }
