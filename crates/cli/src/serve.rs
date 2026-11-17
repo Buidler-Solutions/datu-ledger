@@ -2409,4 +2409,128 @@ mod request_limit_tests {
         assert!(parsed.is_none(), "stalled request is not accepted");
         client.join().unwrap();
     }
+
+    /// Seeded xorshift for the parser fuzz below; fixed seed so any failure
+    /// reproduces exactly.
+    struct FuzzRng(u64);
+    impl FuzzRng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn bytes(&mut self, max: usize) -> Vec<u8> {
+            let len = (self.next() as usize) % max;
+            (0..len).map(|_| self.next() as u8).collect()
+        }
+        fn ascii(&mut self, max: usize) -> String {
+            String::from_utf8_lossy(&self.bytes(max))
+                .chars()
+                .filter(|c| !c.is_control() || *c == '\r' || *c == '\n' || *c == '\t')
+                .collect()
+        }
+    }
+
+    #[test]
+    fn http_parser_survives_seeded_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let data = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            let _ = serve(&data, &format!("127.0.0.1:{port}"), None, 5, 5, None);
+        });
+        let mut ready = false;
+        for _ in 0..200 {
+            if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
+                drop(s);
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(ready, "serve did not come up");
+
+        // Pure parsers first: cursors and list queries are attacker-
+        // controlled strings; they must clamp or reject, never panic.
+        let mut rng = FuzzRng(0x5eed_c11a);
+        for _ in 0..3000 {
+            let raw = rng.ascii(64);
+            let _ = decode_cursor(&raw);
+            let (ns, author, limit, offset) = parse_list_query(&raw);
+            assert!(limit <= 500 && offset <= 1_000_000);
+            if let Some(ns) = &ns {
+                assert!(!ns.is_empty());
+            }
+            if let Some(author) = &author {
+                assert!(!author.is_empty());
+            }
+        }
+
+        // Live sockets: random shapes at the request reader. Whatever the
+        // server answers (status line, empty reply, or hard close) is fine;
+        // a panic or a wedged listener is not. Streams are always dropped
+        // so stalled reads end via EOF, not the 10 s deadline.
+        use std::io::Read;
+        for round in 0..120 {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut payload: Vec<u8> = match round % 5 {
+                0 => rng.bytes(512),
+                1 => format!("{} {} HTTP/1.1\r\n", rng.ascii(16), rng.ascii(64)).into_bytes(),
+                2 => format!(
+                    "GET /v1/entries?{} HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                    rng.ascii(48),
+                    rng.next() % 4096
+                )
+                .into_bytes(),
+                3 => {
+                    // long request line, way past any sane method or path
+                    let mut long = b"GET /".to_vec();
+                    long.extend(std::iter::repeat(b'x').take(8 * 1024));
+                    long
+                }
+                _ => {
+                    let mut cut = format!(
+                        "POST /v1/entries HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n"
+                    )
+                    .into_bytes();
+                    cut.extend(rng.bytes(16));
+                    cut
+                }
+            };
+            if rng.next() % 2 == 0 {
+                // write only a prefix, then drop: mid-request disconnect
+                let cut = (rng.next() as usize) % (payload.len() + 1);
+                payload.truncate(cut);
+            }
+            let _ = stream.write_all(&payload);
+            // Half-close: the shapes above often promise more bytes than
+            // they send, and without EOF the server rightly waits for its
+            // deadline. Signaling write-EOF lets it answer or drop now,
+            // which keeps this test seconds, not minutes.
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let mut sink = Vec::new();
+            let _ = stream.read_to_end(&mut sink);
+        }
+
+        // The server must still answer an honest request after the abuse.
+        let mut probe = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        probe
+            .write_all(b"GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut raw = String::new();
+        probe.read_to_string(&mut raw).unwrap();
+        assert!(
+            raw.starts_with("HTTP/1.1 200"),
+            "server wedged after fuzz rounds: {}",
+            raw.split("\r\n").next().unwrap_or("")
+        );
+    }
 }
