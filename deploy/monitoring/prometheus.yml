@@ -1,0 +1,9 @@
+# Scrape config for a DATU projection indexer (and the node's explorer/API
+# health, if you put it behind a blackbox exporter).
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: datu-indexer
+    static_configs:
+      - targets: ["127.0.0.1:7491"]   # datu-indexer --http 127.0.0.1:7491

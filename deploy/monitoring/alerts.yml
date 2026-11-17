@@ -1,0 +1,28 @@
+# Prometheus alert rules for the projection indexer.
+# Wire into prometheus.yml:
+#   rule_files:
+#     - alerts.yml
+groups:
+  - name: datu-indexer
+    rules:
+      - alert: DatuIndexerLagging
+        expr: datu_indexer_seconds_since_update > 120
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "DATU indexer has not completed a pass in 2 minutes"
+          description: "Projection is stale: check the data dir, disk space, and the -every interval."
+
+      - alert: DatuIndexerRejecting
+        expr: increase(datu_indexer_rejected[10m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "DATU indexer rejected one or more entries"
+          description: "Verification failures are fail-closed. Inspect the rejected table for reasons before trusting the projection."
+
+      - alert: DatuIndexerNotScrapable
+        expr: up{job="datu-indexer"} == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "DATU indexer metrics endpoint is down"
