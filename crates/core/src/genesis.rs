@@ -9,9 +9,10 @@
 //! example is the tool) walk their own. The private halves live with the
 //! founder (`~/.datu-genesis/`), never in this repo.
 //!
-//! [`Store::open`](datu_store::Store) seeds this entry into every new and
-//! existing ledger below the writer policy: policy gates what *peers* may
-//! land; the genesis is the ledger's own definition, carried by the code.
+//! `Store::open` (in datu-store, which depends on this crate) seeds this
+//! entry into every new and existing ledger below the writer policy: policy
+//! gates what *peers* may land; the genesis is the ledger's own definition,
+//! carried by the code.
 
 use crate::entry::Entry;
 use crate::error::{Error, Result};

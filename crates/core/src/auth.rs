@@ -25,7 +25,7 @@ pub const DEFAULT_CHALLENGE_TTL_MS: u64 = 60_000;
 pub struct AuthChallenge {
     /// Relying party identifier, e.g. "app.example.com" (the WebAuthn rp_id analogue).
     pub rp_id: String,
-    /// Exact origin the requesting page ran on, e.g. "https://app.example.com".
+    /// Exact origin the requesting page ran on, e.g. <https://app.example.com>.
     pub origin: String,
     /// Single-use random nonce issued by the relying party.
     pub nonce: [u8; NONCE_BYTES],
