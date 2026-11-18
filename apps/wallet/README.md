@@ -168,7 +168,8 @@ Protocol (`datu-auth-v1`, same assertion format as extension sign-in):
    (The web form `https://<rp>/datu-auth?…` with the same parameters works for
    QR codes that must open a browser first.)
 
-2. The phone receives the link (deep link, paste, or QR scan), reviews **who**
+2. The phone receives the link (deep link, paste, or the in-app **Scan a QR
+   code** camera view), reviews **who**
    is asking (rp_id and origin are shown next to the exact canonical bytes the
    signature will cover), unlocks the identity with the passphrase, and signs
    in the embedded core. The intent filter for `datu-auth://sign` lives in

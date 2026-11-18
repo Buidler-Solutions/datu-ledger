@@ -1,4 +1,5 @@
 import 'package:app_links/app_links.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -147,6 +148,29 @@ class _MobileSignInTabState extends ConsumerState<MobileSignInTab> {
     }
   }
 
+  /// Barcode login: the dApp's QR is just the same datu-auth link, so the
+  /// scanner returns text that goes through the identical parser and review.
+  Future<void> _scanQr() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => Scaffold(
+          appBar: AppBar(title: const Text('Scan the dApp QR')),
+          body: MobileScanner(
+            onDetect: (capture) {
+              for (final barcode in capture.barcodes) {
+                final value = barcode.rawValue;
+                if (value == null || value.isEmpty) continue;
+                Navigator.of(context).pop();
+                _accept(value);
+                return;
+              }
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _copy(String value, String note) async {
     await Clipboard.setData(ClipboardData(text: value));
     if (!mounted) return;
@@ -192,8 +216,15 @@ class _MobileSignInTabState extends ConsumerState<MobileSignInTab> {
           },
         ),
         const SizedBox(height: 8),
-        Row(
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
           children: [
+            TextButton.icon(
+              onPressed: _scanQr,
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('Scan a QR code'),
+            ),
             TextButton.icon(
               onPressed: () => _accept(sampleSignInLink()),
               icon: const Icon(Icons.science_outlined),

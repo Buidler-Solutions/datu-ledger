@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Barcode login: the login QR is a datu-auth link. -->
+    <uses-permission android:name="android.permission.CAMERA"/>
     <application
         android:label="DATU Signet"
         android:name="${applicationName}"
