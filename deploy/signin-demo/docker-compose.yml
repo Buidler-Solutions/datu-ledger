@@ -1,0 +1,49 @@
+# Cloud deployment for the QR sign-in demo: a validator node, the relying
+# party, and Caddy for TLS. Point a DNS A record at the box, set the domain,
+# and `docker compose up -d`.
+services:
+  validator:
+    image: rust:1.96.0
+    working_dir: /src
+    volumes:
+      - ../..:/src:ro
+      - validator-data:/data
+    command: >
+      sh -c "cargo build --release -p datu-cli &&
+             ./target/release/datu --data-dir /data serve --addr 0.0.0.0:7474
+             --read-only"
+    restart: unless-stopped
+
+  dapp:
+    image: node:22
+    working_dir: /app
+    volumes:
+      - ../../web/signin-demo:/app:ro
+      - ../../target/release/datu:/usr/local/bin/datu:ro
+    environment:
+      PORT: "5176"
+      HOST: "0.0.0.0"
+      DATU_BIN: /usr/local/bin/datu
+      NODE_URL: http://validator:7474
+    command: sh -c "npm ci && node server.mjs"
+    depends_on:
+      - validator
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - dapp
+    restart: unless-stopped
+
+volumes:
+  validator-data:
+  caddy-data:
+  caddy-config:

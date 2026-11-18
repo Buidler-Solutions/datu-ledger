@@ -1,0 +1,4 @@
+# Replace demo.example.com with your DNS name. Caddy provisions TLS on its own.
+demo.example.com {
+    reverse_proxy dapp:5176
+}

@@ -185,3 +185,8 @@ jobs:
       - name: backend smoke (real binary, two sandboxes)
         working-directory: web/lab
         run: npm run smoke
+      - name: sign-in demo smoke (relying party verifies a signed assertion)
+        working-directory: web/signin-demo
+        run: |
+          npm ci
+          npm run smoke

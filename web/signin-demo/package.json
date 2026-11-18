@@ -1,0 +1,14 @@
+{
+  "name": "datu-signin-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Reference relying party: QR sign-in with a DATU phone wallet",
+  "scripts": {
+    "start": "node server.mjs",
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}
