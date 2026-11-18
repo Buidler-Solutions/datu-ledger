@@ -163,3 +163,25 @@ jobs:
           npm ci
           npm run build
           npm test
+
+  lab:
+    name: laboratory builds and smoke-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - name: release binary for the sandboxes
+        run: cargo build --release -p datu-cli
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: install, build, unit tests
+        working-directory: web/lab
+        run: |
+          npm ci
+          npm run build
+          npm test
+      - name: backend smoke (real binary, two sandboxes)
+        working-directory: web/lab
+        run: npm run smoke
