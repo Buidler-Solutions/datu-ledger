@@ -53,6 +53,18 @@ abstract class WalletBridge {
     required Map<String, dynamic> entry,
   });
 
+  /// SignetAuth: sign a relying party's login challenge with [name].
+  /// The response is the assertion a dApp verifies locally:
+  /// {domain, rp_id, origin, nonce, expires_at_ms, pubkey, signature}.
+  Future<Map<String, dynamic>> authAssert({
+    required String name,
+    required String passphrase,
+    required String rpId,
+    required String origin,
+    required String nonce,
+    required int expiresAtMs,
+  });
+
   /// Decrypt the fields of [document] that are sealed to this identity
   /// (`open_fields` in the core; named `openFields` here because `open` is
   /// taken by the native bridge's static constructor).
@@ -193,6 +205,26 @@ class HttpWalletBridge implements WalletBridge {
   }) async {
     final res = await _dio.post('$baseUrl/v1/wallet/verify-entry', data: {
       'entry': entry,
+    });
+    return (res.data as Map).cast<String, dynamic>();
+  }
+
+  @override
+  Future<Map<String, dynamic>> authAssert({
+    required String name,
+    required String passphrase,
+    required String rpId,
+    required String origin,
+    required String nonce,
+    required int expiresAtMs,
+  }) async {
+    final res = await _dio.post('$baseUrl/v1/wallet/auth-assert', data: {
+      'name': name,
+      'passphrase': passphrase,
+      'rp_id': rpId,
+      'origin': origin,
+      'nonce': nonce,
+      'expires_at_ms': expiresAtMs,
     });
     return (res.data as Map).cast<String, dynamic>();
   }

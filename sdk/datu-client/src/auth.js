@@ -100,3 +100,50 @@ export async function verifyAssertion(assertion, challenge) {
   if (verdict === 'invalid') return { ok: false, reason: 'signature invalid' };
   return { ok: null, reason: 'no local Ed25519 verifier available' };
 }
+
+/**
+ * Build the link a phone signer opens (QR, button, deep link). The phone
+ * signs the challenge with its own key and returns the assertion in
+ * `redirect`'s fragment: no extension, no bridge token, no desktop.
+ * Parameters match datu-auth-v1 exactly; `nonce` is the one you generated
+ * with newChallenge().
+ */
+export function buildSignInLink({ rpId, origin, nonce, expiresAtMs, redirect }) {
+  if (!rpId || !origin || !nonce || !expiresAtMs || !redirect) {
+    throw new Error('buildSignInLink needs rpId, origin, nonce, expiresAtMs and redirect');
+  }
+  const query = new URLSearchParams({
+    rp_id: rpId,
+    origin,
+    nonce,
+    expires_at_ms: String(expiresAtMs),
+    redirect,
+  });
+  return `datu-auth://sign?${query.toString()}`;
+}
+
+/**
+ * Read the assertion a phone handed back in the redirect fragment:
+ * `https://rp/callback#datu-assertion=<base64url(json)>`. Returns null when
+ * the fragment is absent or unreadable (never throws on hostile input -
+ * pass the result to verifyAssertion, which fails closed).
+ */
+export function readAssertionFragment(url) {
+  let fragment = '';
+  try {
+    fragment = new URL(String(url)).hash.replace(/^#/, '');
+  } catch {
+    return null;
+  }
+  const prefix = 'datu-assertion=';
+  if (!fragment.startsWith(prefix)) return null;
+  let payload = fragment.slice(prefix.length);
+  try {
+    payload += '='.repeat((4 - (payload.length % 4)) % 4);
+    const json = atob(payload.replaceAll('-', '+').replaceAll('_', '/'));
+    const parsed = JSON.parse(json);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}

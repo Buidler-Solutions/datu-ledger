@@ -14,8 +14,10 @@ import { createNodeClient } from './node.js';
 import {
   AUTH_DOMAIN,
   authSignedBytes,
+  buildSignInLink,
   challengeIsLive,
   newChallenge,
+  readAssertionFragment,
   randomNonceHex,
   verifyAssertion,
   verifyEd25519,
@@ -31,8 +33,10 @@ import { DatuError, ErrorCode, mapError } from './errors.js';
 export {
   AUTH_DOMAIN,
   authSignedBytes,
+  buildSignInLink,
   challengeIsLive,
   newChallenge,
+  readAssertionFragment,
   randomNonceHex,
   verifyAssertion,
   verifyEd25519,

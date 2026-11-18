@@ -320,3 +320,58 @@ class KeyRow extends StatelessWidget {
     );
   }
 }
+
+/// Tab heading with a one-line explanation, used by the newer flow tabs.
+class SectionTitle extends StatelessWidget {
+  const SectionTitle({super.key, required this.title, this.subtitle});
+
+  final String title;
+  final String? subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: Theme.of(context).textTheme.titleLarge),
+        if (subtitle != null) ...[
+          const SizedBox(height: 4),
+          Text(subtitle!, style: Theme.of(context).textTheme.bodySmall),
+        ],
+      ],
+    );
+  }
+}
+
+/// Red banner for a failed action; never used for informational notes.
+class ErrorBanner extends StatelessWidget {
+  const ErrorBanner({super.key, required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: colors.errorContainer,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.error_outline, color: colors.onErrorContainer, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: TextStyle(color: colors.onErrorContainer, fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

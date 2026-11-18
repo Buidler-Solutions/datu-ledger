@@ -150,3 +150,43 @@ extension's action grammar and `datu-provider-v1` proof.
   the passphrase, then copy or save the signed envelope
 - **Ledger records** - read-only view of any node (`/v1/status`, `/v1/entries`);
   the wallet never needs to run a node itself
+
+## Standalone login (SignetAuth without a desktop)
+
+The phone app is a complete signer on its own: the Rust wallet core is linked
+into the app (`crates/wallet-ffi`), so signing needs no desktop, no bridge
+process and no pairing token. That matters most for login, where a dApp lives
+in a browser that must never hold keys.
+
+Protocol (`datu-auth-v1`, same assertion format as extension sign-in):
+
+1. The dApp creates a challenge (`newChallenge()` in `@greenarmor/datu-client`:
+   `rp_id`, `origin`, 32-hex `nonce`, `expires_at_ms`) and shows it as a link:
+
+       datu-auth://sign?rp_id=<rp>&origin=<origin>&nonce=<hex32>&expires_at_ms=<ms>&redirect=<https url>
+
+   (The web form `https://<rp>/datu-auth?…` with the same parameters works for
+   QR codes that must open a browser first.)
+
+2. The phone receives the link (deep link, paste, or QR scan), reviews **who**
+   is asking (rp_id and origin are shown next to the exact canonical bytes the
+   signature will cover), unlocks the identity with the passphrase, and signs
+   in the embedded core. The intent filter for `datu-auth://sign` lives in
+   `android/app/src/main/AndroidManifest.xml`; the parser rejects foreign
+   schemes, malformed nonces, non-http(s) origins, and expiries further than
+   five minutes out.
+
+3. The app returns
+   `redirect#datu-assertion=<base64url(assertion JSON)>`. The assertion is
+   `{domain, rp_id, origin, nonce, expires_at_ms, pubkey, signature}` and the
+   dApp verifies it with `verifyAssertion()` (WebCrypto, no server call),
+   matching the challenge it issued and refusing expired ones.
+
+Try it without a phone: `flutter test test/datu_auth_test.dart` covers the
+parser, canonical bytes and return URL. On a device: Settings documents the
+data dir; the Login tab has a sample link button for a dry run.
+
+Safety properties: the fragment never reaches a server (no referrer, no logs),
+the nonce is single use and short lived, and a copied link is worthless
+without a signature made while the challenge was live. The app refuses links
+whose expiry is more than five minutes out so a link cannot be stockpiled.

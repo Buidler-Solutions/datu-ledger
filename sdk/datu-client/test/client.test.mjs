@@ -257,3 +257,87 @@ test('proveGenuine reports no answer as unreachable, never as malicious', async 
   assert.equal(verdict.reachable, false, 'nothing answered: bridge down, not an impostor');
   assert.match(verdict.reason, /no Signet paired/);
 });
+
+// Standalone phone sign-in: the dApp builds a link, the phone returns a
+// signed assertion in the redirect fragment, and the dApp verifies it with
+// the same verifyAssertion used for extension sign-ins.
+
+test('buildSignInLink carries every challenge field', async () => {
+  const { buildSignInLink } = await import('../src/index.js');
+  const link = buildSignInLink({
+    rpId: 'demo.datu.local',
+    origin: 'https://demo.datu.local',
+    nonce: 'ab'.repeat(16),
+    expiresAtMs: 1795006046025,
+    redirect: 'https://demo.datu.local/auth/callback',
+  });
+  assert.ok(link.startsWith('datu-auth://sign?'));
+  const q = new URL(link).searchParams;
+  assert.equal(q.get('rp_id'), 'demo.datu.local');
+  assert.equal(q.get('origin'), 'https://demo.datu.local');
+  assert.equal(q.get('nonce'), 'ab'.repeat(16));
+  assert.equal(q.get('expires_at_ms'), '1795006046025');
+  assert.equal(q.get('redirect'), 'https://demo.datu.local/auth/callback');
+});
+
+test('a phone assertion round-trips through the redirect fragment and verifies', async () => {
+  const { buildSignInLink, readAssertionFragment, authSignedBytes } = await import('../src/index.js');
+  const kp = keypair();
+  const challenge = {
+    rp_id: 'demo.datu.local',
+    origin: 'https://demo.datu.local',
+    nonce: 'cd'.repeat(16),
+    expires_at_ms: Date.now() + 60000,
+  };
+  // What the phone app returns: the assertion JSON from its core.
+  const assertion = {
+    domain: 'datu-auth-v1',
+    rp_id: challenge.rp_id,
+    origin: challenge.origin,
+    nonce: challenge.nonce,
+    expires_at_ms: challenge.expires_at_ms,
+    pubkey: kp.pubkeyHex,
+    signature: kp.sign(authSignedBytes(challenge)),
+  };
+  const payload = Buffer.from(JSON.stringify(assertion), 'utf8')
+    .toString('base64url');
+  const redirect = `https://demo.datu.local/auth/callback#datu-assertion=${payload}`;
+
+  const back = readAssertionFragment(redirect);
+  assert.deepEqual(back, assertion);
+  const verdict = await verifyAssertion(back, challenge);
+  assert.equal(verdict.ok, true);
+});
+
+test('readAssertionFragment fails closed on hostile input', async () => {
+  const { readAssertionFragment } = await import('../src/index.js');
+  assert.equal(readAssertionFragment('https://rp/cb'), null);
+  assert.equal(readAssertionFragment('not a url #datu-assertion=x'), null);
+  assert.equal(readAssertionFragment('https://rp/cb#datu-assertion=%%%'), null);
+  assert.equal(readAssertionFragment('https://rp/cb#other=x'), null);
+});
+
+test('a tampered fragment is rejected by verifyAssertion', async () => {
+  const { readAssertionFragment } = await import('../src/index.js');
+  const { verifyAssertion } = await import('../src/index.js');
+  const kp = keypair();
+  const challenge = {
+    rp_id: 'demo.datu.local',
+    origin: 'https://demo.datu.local',
+    nonce: 'ef'.repeat(16),
+    expires_at_ms: Date.now() + 60000,
+  };
+  const forged = {
+    domain: 'datu-auth-v1',
+    rp_id: challenge.rp_id,
+    origin: challenge.origin,
+    nonce: challenge.nonce,
+    expires_at_ms: challenge.expires_at_ms,
+    pubkey: kp.pubkeyHex,
+    signature: 'ab'.repeat(64),
+  };
+  const payload = Buffer.from(JSON.stringify(forged), 'utf8').toString('base64url');
+  const back = readAssertionFragment(`https://rp/cb#datu-assertion=${payload}`);
+  const verdict = await verifyAssertion(back, challenge);
+  assert.equal(verdict.ok, false);
+});

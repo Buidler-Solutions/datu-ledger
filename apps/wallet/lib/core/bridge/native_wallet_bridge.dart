@@ -177,6 +177,25 @@ class NativeWalletBridge implements WalletBridge {
       });
 
   @override
+  Future<Map<String, dynamic>> authAssert({
+    required String name,
+    required String passphrase,
+    required String rpId,
+    required String origin,
+    required String nonce,
+    required int expiresAtMs,
+  }) =>
+      _call({
+        'action': 'auth-assert',
+        'name': name,
+        'passphrase': passphrase,
+        'rp_id': rpId,
+        'origin': origin,
+        'nonce': nonce,
+        'expires_at_ms': expiresAtMs,
+      });
+
+  @override
   Future<Map<String, dynamic>> verifyEntry({
     required Map<String, dynamic> entry,
   }) =>
