@@ -1274,7 +1274,7 @@ const EXPLORER_HTML: &str = r##"<!doctype html>
  <div id="ecostats" class="muted" style="margin:.6rem 0 0;font-size:.78rem"></div>
 </div>
 <div class="bar"><input id="q" placeholder="entry id (64 hex) or author (64 hex)"><button onclick="search()">load</button>
-<button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button> <button onclick="loadAttestations()">attestations</button> <button onclick="loadConflicts()">disputes</button> <button onclick="loadEcosystem();window.scrollTo({top:0,behavior:'smooth'})">ecosphere</button></div>
+<button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button> <button onclick="loadAttestations()">attestations</button> <button onclick="loadConflicts()">disputes</button> <button onclick="loadEcosystem();window.scrollTo({top:0,behavior:'smooth'})">ecosphere</button> <button id="neuralbtn" onclick="toggleNeural()">signals: on</button></div>
 <div id="disputes"></div>
 <div id="governance"></div>
 <div class="tablewrap"><table id="rows"><tr><th>id</th><th>author</th><th>namespace</th><th>seq</th><th>payload</th></tr></table></div>
@@ -1293,7 +1293,8 @@ function esc(s){const d=document.createElement('div');d.textContent=s;return d.i
 function hideEco(){document.getElementById('ecosphere').style.display='none';document.getElementById('callout').style.display='none'}
 // ── ecosphere: every entry a node, every prev/ref a link in the mesh ─────
 const GENESIS_ID='37616bce5bfb8b773f7c99a9e52bcd7aa43294301ab074a908fbc9a334315d63';
-let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'mesh',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null};
+const REDUCED_MOTION=(typeof matchMedia==='function')&&matchMedia('(prefers-reduced-motion: reduce)').matches;
+let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'mesh',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null,neural:true,sprites:new Map(),pulses:[],ripples:[],lastT:0,lastAmbient:0};
 function fitCanvas(){const cv=document.getElementById('graph');if(!cv)return;
  // portrait phones get a taller canvas so the mesh has room; landscape and
  // desktop keep the wide hero
@@ -1414,6 +1415,15 @@ function simStep(){
    const dx=B.cx-A.cx,dy=B.cy-A.cy,d=Math.sqrt(dx*dx+dy*dy)||1;
    const rest=A.R+B.R+52,f=Math.max(-2,Math.min(2,(d-rest)*.02*a));
    if(free(A)){A.vx+=dx/d*f;A.vy+=dy/d*f}if(free(B)){B.vx-=dx/d*f;B.vy-=dy/d*f}}
+  // gentle recentering: the field as a whole has no gravity, so left
+  // alone it drifts; past a dead zone the centroid is pulled back toward
+  // the frame. Weak enough that bubbles still wander, strong enough that
+  // the organism never sails out of view.
+  let ccx=0,ccy=0,cn=0;
+  for(const c of cs){if(c.rooted)continue;ccx+=c.cx;ccy+=c.cy;cn++}
+  if(cn>0){ccx/=cn;ccy/=cn;const cd=Math.hypot(ccx,ccy);
+   if(cd>160){const f=Math.min(.08,(cd-160)*.0008);
+    for(const c of cs){if(c.rooted)continue;c.vx-=ccx/cd*f;c.vy-=ccy/cd*f}}}
   // every bubble is an organism: it keeps its generation ring (which
   // breathes), wanders on its own slow random compass, damps, and is
   // speed-capped so the whole field swells instead of shaking
@@ -1502,9 +1512,76 @@ function zoomCross(){
    NET.camT={fx:NET.pan.x,fy:NET.pan.y,fz:NET.zoom,tx:-best.cx*z,ty:-best.cy*z,tz:z,t:0};
    NET.alpha=.32;wake()}}
  else if(NET.sub==='strand'&&NET.zoom<=.55){NET.sub='bubbles';NET.strand=null;NET.camT=null;wake()}}
+// ── neural layer: glowing neurons, curved synapses, traveling signals ────
+// A sprite cache keeps per-frame cost flat: one 64px radial gradient per
+// hue bucket, scaled per node, instead of a gradient object per node.
+function glowSprite(h){
+ const key=Math.round(h/12)*12%360;
+ if(NET.sprites.has(key))return NET.sprites.get(key);
+ let c=null;
+ try{
+  c=document.createElement('canvas');c.width=64;c.height=64;
+  const g=c.getContext('2d');
+  const rg=g.createRadialGradient(32,32,1,32,32,32);
+  rg.addColorStop(0,'hsla('+key+',85%,72%,.95)');
+  rg.addColorStop(.35,'hsla('+key+',80%,60%,.35)');
+  rg.addColorStop(1,'hsla('+key+',80%,55%,0)');
+  g.fillStyle=rg;g.fillRect(0,0,64,64);
+ }catch(_){c=null} // headless harnesses and odd embedders: fall back to plain dots
+ NET.sprites.set(key,c);
+ return c}
+// A link becomes a gentle synapse instead of a straight wire: the control
+// point sits a deterministic distance off the midpoint, so the same ledger
+// always draws the same arcs.
+function synapsePath(link,now){
+ const ax=link.a.x,ay=link.a.y,bx=link.b.x,by=link.b.y;
+ const dx=bx-ax,dy=by-ay,len=Math.hypot(dx,dy)||1;
+ let seed=((link.a.seq||0)*37+(link.b.seq||0)*61+((link.a.id||'').charCodeAt(2)||0))%19;
+ const bow=(seed-9)/9*.16*len;
+ const mx=(ax+bx)/2-dy/len*bow,my=(ay+by)/2+dx/len*bow;
+ return {ax,ay,mx,my,bx,by,len}
+}
+function synapsePoint(p,t){
+ const it=1-t;
+ return [it*it*p.ax+2*it*t*p.mx+t*t*p.bx, it*it*p.ay+2*it*t*p.my+t*t*p.by]
+}
+function spawnPulse(link,hot){
+ if(!NET.neural||NET.mode!=='bubbles'||NET.sub==='strand')return;
+ if(REDUCED_MOTION)return;
+ if(NET.pulses.length>140)return;
+ NET.pulses.push({l:link,t:0,speed:.006+Math.random()*.008,hot:!!hot,h:(link.a.h||200)})
+}
+function spawnBurst(node){
+ if(!node)return;let n=0;
+ for(const l of NET.links){if(l.a!==node&&l.b!==node)continue;
+  spawnPulse(l,true);if(++n>=12)break}
+}
+function stepSignals(now){
+ if(!NET.neural){NET.pulses.length=0;NET.ripples.length=0;NET.lastT=now;return}
+ const dt=Math.min(64,now-(NET.lastT||now));NET.lastT=now;
+ // ambient activity: a slow drip of signals along random links keeps the
+ // field feeling alive without turning into a firework
+ if(now-(NET.lastAmbient||0)>420&&NET.links.length){
+  NET.lastAmbient=now;
+  for(let i=0;i<2;i++)spawnPulse(NET.links[(Math.random()*NET.links.length)|0]);
+ }
+ const keep=[];
+ for(const pl of NET.pulses){
+  pl.t+=pl.speed*(dt/16.7);
+  if(pl.t>=1){const b=pl.l.b;
+   NET.ripples.push({x:b.x,y:b.y,h:pl.h,t:0});
+   if(NET.ripples.length>60)NET.ripples.shift();
+   continue}
+  keep.push(pl)}
+ NET.pulses=keep;
+ const rk=[];
+ for(const r of NET.ripples){r.t+=dt/420;if(r.t<1)rk.push(r)}
+ NET.ripples=rk;
+}
 function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;const ctx=cv.getContext('2d');
  const strandMode=NET.mode==='bubbles'&&NET.sub==='strand'&&NET.strand;
  const now=performance.now();
+ stepSignals(now);
  const W=cv.width,H=cv.height;ctx.clearRect(0,0,W,H);
  const g=ctx.createRadialGradient(W/2,H/2,60,W/2,H/2,Math.max(W,H)*.7);
  g.addColorStop(0,'#141c2b');g.addColorStop(1,'#0d1117');ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
@@ -1538,11 +1615,19 @@ function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;cons
    ctx.lineWidth=1/NET.zoom;
    ctx.beginPath();ctx.arc(c.cx,c.cy,c.R+3.5+2*beat,0,7);ctx.stroke()}
   ctx.globalAlpha=1}
+ const neural=NET.neural&&NET.mode==='bubbles'&&!strandMode;
  for(const l of NET.links){if(strandMode&&l.a.c!==NET.strand&&l.b.c!==NET.strand)continue;
   const hot=NET.sel&&(l.a===NET.sel||l.b===NET.sel);
   ctx.globalAlpha=(NET.focusNs&&l.a.ns!==NET.focusNs&&l.b.ns!==NET.focusNs&&!hot)?.1:1;
+  if(neural){
+   // synapses: faint curved axons; brightness rides the record's freshness
+   const path=synapsePath(l,now);
+   ctx.strokeStyle=hot?'#7cc0ff':('hsla('+l.a.h+',70%,62%,'+(l.a.c&&l.b.c&&l.a.c!==l.b.c?.34:.2)+')');
+   ctx.lineWidth=(hot?1.5:.7)/NET.zoom;
+   ctx.beginPath();ctx.moveTo(path.ax,path.ay);ctx.quadraticCurveTo(path.mx,path.my,path.bx,path.by);ctx.stroke();
+  }else{
   ctx.strokeStyle=hot?'#58a6ff':((NET.mode==='bubbles'&&l.a.c&&l.b.c&&l.a.c!==l.b.c)?'#58a6ff3d':(NET.mode==='bubbles'?'#58a6ff4a':'#58a6ff26'));ctx.lineWidth=(hot?1.6:.8)/NET.zoom;
-  ctx.beginPath();ctx.moveTo(l.a.x,l.a.y);ctx.lineTo(l.b.x,l.b.y);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(l.a.x,l.a.y);ctx.lineTo(l.b.x,l.b.y);ctx.stroke()}
   // subtle arrowhead at the cited end: a child (a) points at its parent (b)
   const adx=l.b.x-l.a.x,ady=l.b.y-l.a.y,alen=Math.hypot(adx,ady)||1;
   if(alen*NET.zoom>16){const rb=(l.b.root?10:3+Math.min(l.b.deg,6)*.6)+4;
@@ -1554,7 +1639,7 @@ function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;cons
    ctx.closePath();ctx.fill()}
   // cross-author citations carry a traveling spark: a pulse of light
   // flowing from the citing record to the cited one - proof in motion
-  if(NET.mode==='bubbles'&&!strandMode&&l.a.c&&l.b.c&&l.a.c!==l.b.c&&alen*NET.zoom>26){
+  if(!neural&&NET.mode==='bubbles'&&!strandMode&&l.a.c&&l.b.c&&l.a.c!==l.b.c&&alen*NET.zoom>26){
    const prog=(now/2600+((l.a.seq*7+l.b.seq*13)%97)/97)%1;
    const sxp=l.a.x+adx*prog,syp=l.a.y+ady*prog,r2=2/NET.zoom;
    ctx.fillStyle='rgba(140,192,255,.28)';
@@ -1562,16 +1647,47 @@ function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;cons
    ctx.fillStyle='rgba(140,192,255,.9)';
    ctx.beginPath();ctx.arc(sxp,syp,r2,0,7);ctx.fill()}}
  ctx.globalAlpha=1;
+ const neuralNodes=NET.neural&&NET.mode==='bubbles'&&!strandMode;
  for(const n of NET.nodes){if(strandMode&&n.c!==NET.strand)continue;
+  const fresh=NET.mode==='bubbles'&&n.c?(n.seq||0)/Math.max(1,n.c.maxSeq||1):0;
   if(n.root){const pu=Math.sin(now/700)*1.4;
+   if(neuralNodes){const spr=glowSprite(46);
+    if(spr){ctx.globalAlpha=.9;ctx.drawImage(spr,n.x-20,n.y-20,40,40);ctx.globalAlpha=1}}
    ctx.fillStyle='#e3b341';ctx.beginPath();ctx.arc(n.x,n.y,6,0,7);ctx.fill();
    ctx.strokeStyle='#e3b34155';ctx.lineWidth=2;ctx.beginPath();ctx.arc(n.x,n.y,10+pu,0,7);ctx.stroke()}
   else{ctx.globalAlpha=(NET.focusNs&&n.ns!==NET.focusNs)?.15:1;
    // newest records glow brightest, so time's direction reads inside
    // every bouncing strand: dim old core, bright fresh rim
-   const fresh=NET.mode==='bubbles'&&n.c?(n.seq||0)/Math.max(1,n.c.maxSeq||1):0;
+   const r=3+Math.min(n.deg,6)*.6+fresh*1.3;
+   if(neuralNodes){
+    // neuron: soft halo (sprite), saturated synapse core, bright nucleus
+    const halo=glowSprite(n.h);
+    const hs=(NET.nodes.length>1400?r*2.2:r*3.2);
+    if(halo){ctx.globalAlpha=(NET.focusNs&&n.ns!==NET.focusNs)?.06:.55;
+     ctx.drawImage(halo,n.x-hs,n.y-hs,hs*2,hs*2)}
+    ctx.globalAlpha=(NET.focusNs&&n.ns!==NET.focusNs)?.15:1;
+    ctx.fillStyle='hsl('+n.h+',72%,'+(56+fresh*10)+'%)';
+    ctx.beginPath();ctx.arc(n.x,n.y,r*.85,0,7);ctx.fill();
+    ctx.fillStyle='rgba(240,248,255,'+(.5+fresh*.35)+')';
+    ctx.beginPath();ctx.arc(n.x,n.y,Math.max(1,r*.3),0,7);ctx.fill();
+   }else{
    ctx.fillStyle=`hsl(${n.h} 70% ${58+fresh*16}%)`;
-   ctx.beginPath();ctx.arc(n.x,n.y,3+Math.min(n.deg,6)*.6+fresh*1.3,0,7);ctx.fill();ctx.globalAlpha=1}}
+   ctx.beginPath();ctx.arc(n.x,n.y,r,0,7);ctx.fill()}
+   ctx.globalAlpha=1}}
+ // firing ripples: a neuron that just received a signal lights a ring
+ if(neuralNodes){for(const rp of NET.ripples){const a=1-rp.t;
+   ctx.globalAlpha=a*.55;ctx.strokeStyle='hsla('+rp.h+',85%,72%,1)';
+   ctx.lineWidth=1.2/NET.zoom;ctx.beginPath();ctx.arc(rp.x,rp.y,4+rp.t*14,0,7);ctx.stroke()}
+  ctx.globalAlpha=1}
+ // traveling signals: a bright bead on the axon, with a trailing glow
+ if(neuralNodes){for(const pl of NET.pulses){
+   const path=synapsePath(pl.l,now);
+   const pt=synapsePoint(path,pl.t);
+   ctx.globalAlpha=.22;ctx.fillStyle='hsla('+pl.h+',90%,75%,1)';
+   ctx.beginPath();ctx.arc(pt[0],pt[1],4.5/NET.zoom,0,7);ctx.fill();
+   ctx.globalAlpha=.95;ctx.fillStyle='#f2f8ff';
+   ctx.beginPath();ctx.arc(pt[0],pt[1],1.5/NET.zoom,0,7);ctx.fill()}
+  ctx.globalAlpha=1}
  ctx.restore();
  if(NET.mode==='bubbles'&&NET.zoom<2.2&&NET.clusters&&!strandMode){
   ctx.font='10px ui-monospace,Menlo,monospace';ctx.textAlign='center';
@@ -1595,6 +1711,15 @@ function meshLoop(){if(NET.camT){const t=NET.camT;const e=Math.min(1,t.t+.045);t
   if(e>=1)NET.camT=null}
  simStep();drawMesh();NET.raf=requestAnimationFrame(meshLoop)}
 function wake(){if(!NET.raf)NET.raf=requestAnimationFrame(meshLoop)}
+function toggleNeural(){NET.neural=!NET.neural;
+ const b=document.getElementById('neuralbtn');
+ if(b)b.textContent='signals: '+(NET.neural?'on':'off');
+ if(NET.neural)seedSignals();wake()}
+// Seed the field: a handful of signals along the newest records so the
+// first frame already reads as a living graph, not a static diagram.
+function seedSignals(){if(!NET.links.length)return;
+ const newest=[...NET.links].sort((x,y)=>((y.a.seq||0)+(y.b.seq||0))-((x.a.seq||0)+(x.b.seq||0)));
+ for(const l of newest.slice(0,14))spawnPulse(l)}
 function nodeAt(ev){const cv=document.getElementById('graph');const r=cv.getBoundingClientRect();
  const px=(ev.clientX-r.left)*(cv.width/r.width),py=(ev.clientY-r.top)*(cv.height/r.height);
  let best=null,bd=Math.max(7,12/Math.sqrt(NET.zoom));
@@ -1642,7 +1767,7 @@ function wireGraph(){if(NET.wired){wake();return}NET.wired=true;const cv=documen
   NET.hover=nodeAt(ev);cv.style.cursor=NET.hover?'pointer':'grab'};
  cv.onmouseleave=()=>{NET.hover=null};
  cv.onclick=ev=>{if(NET.moved>4)return;const n=nodeAt(ev);
-  if(n){NET.sel=n;calloutFor(n);wake()}else{NET.sel=null;document.getElementById('callout').style.display='none'}};
+  if(n){NET.sel=n;calloutFor(n);spawnBurst(n);wake()}else{NET.sel=null;document.getElementById('callout').style.display='none'}};
  cv.onwheel=ev=>{if(!ev.ctrlKey)return;ev.preventDefault();const r=cv.getBoundingClientRect();
   const px=(ev.clientX-r.left)*(cv.width/r.width),py=(ev.clientY-r.top)*(cv.height/r.height);
   const z2=zclamp(NET.zoom*Math.exp(-ev.deltaY*.0012));
@@ -1676,7 +1801,7 @@ function wireGraph(){if(NET.wired){wake();return}NET.wired=true;const cv=documen
   if(NET.drag){const d=NET.drag;NET.drag=null;
    if(d.c){d.c.vx=0;d.c.vy=0}
    if(NET.moved<=4){const n=NET.tapN;
-    if(n){NET.sel=n;calloutFor(n);wake()}
+    if(n){NET.sel=n;calloutFor(n);spawnBurst(n);wake()}
     else{NET.sel=null;document.getElementById('callout').style.display='none'}}}}});
  window.addEventListener('resize',()=>{fitCanvas();drawMesh()});
  wake()}
@@ -1735,6 +1860,15 @@ function buildClusters(){
   c.nodes.sort((x,y)=>x.seq-y.seq).forEach((n,i)=>{
    const ang=i*2.399963,rad=c.R*.72*Math.sqrt((i+.5)/c.nodes.length);
    n.ox=Math.cos(ang)*rad;n.oy=Math.sin(ang)*rad})}}
+// Views are deep-linkable: #mesh, #layers, #bubbles. Handy for sharing a
+// view and for screenshots and tests that must not click through modes.
+function applyHashView(){
+ const h=((typeof location!=='undefined'&&location.hash)||'').replace('#','').toLowerCase();
+ const btn=document.getElementById('laytoggle');
+ if(h==='mesh'&&NET.mode!=='mesh'){NET.mode='mesh';if(btn)btn.textContent='layered view';NET.alpha=1;NET.sub='bubbles';NET.strand=null;wake()}
+ else if(h==='layers'&&NET.mode!=='layers'){NET.mode='layers';layoutLayers();if(btn)btn.textContent='bubbles view';NET.alpha=.6;NET.sub='bubbles';NET.strand=null;wake()}
+ else if(h==='bubbles'&&NET.mode!=='bubbles'){NET.mode='bubbles';buildClusters();if(btn)btn.textContent='mesh view';NET.alpha=.6;NET.sub='bubbles';NET.strand=null;wake()}
+}
 function toggleLayout(){const btn=document.getElementById('laytoggle');
  const next={mesh:'layers',layers:'bubbles',bubbles:'mesh'}[NET.mode];
  if(next==='mesh'){NET.mode='mesh';btn.textContent='layered view';NET.alpha=1}
@@ -1770,6 +1904,8 @@ async function loadEcosystem(){
    [...counts.entries()].sort((a,b)=>b[1]-a[1]).map(([ns,n])=>`<option value="${esc(ns)}"${ns===NET.nsFilter?' selected':''}>${esc(ns)} · ${n}</option>`).join('')}
  const use=NET.nsFilter?entries.filter(e=>e.namespace===NET.nsFilter):entries;
  const meshCapped=buildMesh(use,2500);
+ seedSignals();
+ applyHashView();
  if(NET.mode==='layers')layoutLayers();else if(NET.mode==='bubbles')buildClusters();
  NET.sel=null;NET.hover=null;NET.pan={x:0,y:0};NET.zoom=1;NET.sub='bubbles';NET.strand=null;NET.camT=null;document.getElementById('callout').style.display='none';wireGraph();
  const known=(ps.known||[]);
@@ -2387,6 +2523,27 @@ mod request_limit_tests {
             MAX_BODY_BYTES + 1
         );
         assert!(parse(raw.into_bytes()).is_none());
+    }
+
+    #[test]
+    fn explorer_ships_the_neural_bubble_layer() {
+        // The ecosphere page is a string constant; these hooks are what a
+        // static page cannot prove and a reviewer cannot easily grep for
+        // once the file grows. Keep the neural rendering and its off-switch
+        // pinned.
+        for needle in [
+            "function stepSignals(",
+            "function synapsePoint(",
+            "function glowSprite(",
+            "function spawnPulse(",
+            "function toggleNeural(",
+            "#mesh, #layers, #bubbles",
+        ] {
+            assert!(
+                EXPLORER_HTML.contains(needle),
+                "explorer page lost: {needle}"
+            );
+        }
     }
 
     #[test]
