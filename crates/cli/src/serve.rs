@@ -1274,7 +1274,7 @@ const EXPLORER_HTML: &str = r##"<!doctype html>
  <div id="ecostats" class="muted" style="margin:.6rem 0 0;font-size:.78rem"></div>
 </div>
 <div class="bar"><input id="q" placeholder="entry id (64 hex) or author (64 hex)"><button onclick="search()">load</button>
-<button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button> <button onclick="loadAttestations()">attestations</button> <button onclick="loadConflicts()">disputes</button> <button onclick="loadEcosystem();window.scrollTo({top:0,behavior:'smooth'})">ecosphere</button> <button id="neuralbtn" onclick="toggleNeural()">signals: on</button></div>
+<button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button> <button onclick="loadAttestations()">attestations</button> <button onclick="loadConflicts()">disputes</button> <button onclick="loadEcosystem();window.scrollTo({top:0,behavior:'smooth'})">ecosphere</button> <button id="neuralbtn" onclick="toggleNeural()">signals: on</button> <button id="peersbtn" onclick="togglePeers()">peers: on</button></div>
 <div id="disputes"></div>
 <div id="governance"></div>
 <div class="tablewrap"><table id="rows"><tr><th>id</th><th>author</th><th>namespace</th><th>seq</th><th>payload</th></tr></table></div>
@@ -1294,7 +1294,7 @@ function hideEco(){document.getElementById('ecosphere').style.display='none';doc
 // ── ecosphere: every entry a node, every prev/ref a link in the mesh ─────
 const GENESIS_ID='37616bce5bfb8b773f7c99a9e52bcd7aa43294301ab074a908fbc9a334315d63';
 const REDUCED_MOTION=(typeof matchMedia==='function')&&matchMedia('(prefers-reduced-motion: reduce)').matches;
-let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'mesh',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null,neural:true,sprites:new Map(),pulses:[],ripples:[],lastT:0,lastAmbient:0};
+let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'mesh',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null,neural:true,sprites:new Map(),pulses:[],ripples:[],lastT:0,lastAmbient:0,peers:[],showPeers:true,selfKey:null};
 function fitCanvas(){const cv=document.getElementById('graph');if(!cv)return;
  // portrait phones get a taller canvas so the mesh has room; landscape and
  // desktop keep the wide hero
@@ -1648,6 +1648,42 @@ function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;cons
    ctx.beginPath();ctx.arc(sxp,syp,r2,0,7);ctx.fill()}}
  ctx.globalAlpha=1;
  const neuralNodes=NET.neural&&NET.mode==='bubbles'&&!strandMode;
+ // peers: the validators and mirrors this node actually talks to, drawn
+ // as satellites around the core. The ecosphere shows RECORDS (bubbles are
+ // authors); this layer answers the other question: who is feeding me, and
+ // when did they last answer? Teal = fresh, amber = stale, grey = never.
+ if(NET.showPeers&&NET.peers.length){
+  const sorted=[...NET.peers].sort((x,y)=>String(x.addr).localeCompare(String(y.addr)));
+  // outside the whole field, not just the biggest bubble: satellites must
+  // never sit on top of the organisms they feed
+  let baseR=120;
+  if(NET.mode==='bubbles'&&NET.clusters){
+   let ext=0;for(const c of NET.clusters)ext=Math.max(ext,Math.hypot(c.cx,c.cy)+c.R);
+   baseR=ext+90}
+  else{baseR=Math.max(...NET.nodes.map(n=>Math.hypot(n.x,n.y)),120)+90}
+
+  const nowMs=Date.now();
+  ctx.font=(9/NET.zoom)+'px ui-monospace,Menlo,monospace';
+  sorted.forEach((p,i)=>{
+   // start just off vertical so no label lands under the namespace legend
+   const ang=(i/Math.max(1,sorted.length))*Math.PI*2-Math.PI/2+0.42;
+   const px=Math.cos(ang)*baseR,py=Math.sin(ang)*baseR;
+   const age=nowMs-(p.last_success_ms||0);
+   const fresh=p.last_success_ms&&age<90000;
+   const stale=p.last_success_ms&&!fresh;
+   const col=fresh?'#4cd6c8':(stale?'#e3b341':'#5f6f85');
+   // tether to the core, faint and dashed so it never reads as a record link
+   ctx.setLineDash([3/NET.zoom,6/NET.zoom]);
+   ctx.strokeStyle='rgba(120,150,190,.18)';ctx.lineWidth=.7/NET.zoom;
+   ctx.beginPath();ctx.moveTo(Math.cos(ang)*(baseR*.32),Math.sin(ang)*(baseR*.32));ctx.lineTo(px,py);ctx.stroke();
+   ctx.setLineDash([]);
+   // the peer itself: a small ring, not a neuron - nodes are not records
+   ctx.strokeStyle=col;ctx.lineWidth=1.2/NET.zoom;
+   ctx.beginPath();ctx.arc(px,py,4.5/NET.zoom,0,7);ctx.stroke();
+   ctx.fillStyle=col;ctx.globalAlpha=.85;
+   ctx.beginPath();ctx.arc(px,py,1.6/NET.zoom,0,7);ctx.fill();ctx.globalAlpha=1;
+  });
+ }
  for(const n of NET.nodes){if(strandMode&&n.c!==NET.strand)continue;
   const fresh=NET.mode==='bubbles'&&n.c?(n.seq||0)/Math.max(1,n.c.maxSeq||1):0;
   if(n.root){const pu=Math.sin(now/700)*1.4;
@@ -1697,6 +1733,24 @@ function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;cons
    ctx.fillStyle=c.h<0?'#e3b341':`hsl(${c.h} 70% 72%)`;
    ctx.fillText(short(c.author)+' · '+c.nodes.length,sx,sy-c.R*NET.zoom-6)}
   ctx.textAlign='left'}
+ // peer HUD: who feeds this node, in plain text that never clips. The
+ // satellites show where they sit; this says who they are and how fresh.
+ if(NET.showPeers&&NET.peers.length){
+  const list=[...NET.peers].sort((x,y)=>(y.last_success_ms||0)-(x.last_success_ms||0));
+  const lineH=13, x0=14, y0=H-16-lineH*Math.min(list.length,6);
+  ctx.font='10px ui-monospace,Menlo,monospace';ctx.textAlign='left';
+  list.slice(0,6).forEach((p,i)=>{
+   const age=Date.now()-(p.last_success_ms||0);
+   const fresh=p.last_success_ms&&age<90000;
+   const stale=p.last_success_ms&&!fresh;
+   const col=fresh?'#4cd6c8':(stale?'#e3b341':'#5f6f85');
+   const y=y0+i*lineH;
+   ctx.fillStyle=col;ctx.beginPath();ctx.arc(x0+3,y-3,2.4,0,7);ctx.fill();
+   ctx.fillStyle='rgba(201,209,217,.85)';
+   const ageText=p.last_success_ms?(fresh?'now':Math.round(age/60000)+'m ago'):'never';
+   ctx.fillText(String(p.addr).replace(/^[a-z]+:\/\//,'')+'  '+ageText,x0+12,y);
+  });
+ }
  for(const n of [NET.hover,NET.sel]){if(!n)continue;const[sx,sy]=worldToScreen(n,cv);
   ctx.strokeStyle='#c9d1d9';ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(sx,sy,8,0,7);ctx.stroke();
   ctx.fillStyle=n.root?'#e3b341':'#c9d1d9';ctx.font='11px ui-monospace,Menlo,monospace';
@@ -1711,6 +1765,9 @@ function meshLoop(){if(NET.camT){const t=NET.camT;const e=Math.min(1,t.t+.045);t
   if(e>=1)NET.camT=null}
  simStep();drawMesh();NET.raf=requestAnimationFrame(meshLoop)}
 function wake(){if(!NET.raf)NET.raf=requestAnimationFrame(meshLoop)}
+function togglePeers(){NET.showPeers=!NET.showPeers;
+ const b=document.getElementById('peersbtn');
+ if(b)b.textContent='peers: '+(NET.showPeers?'on':'off');wake()}
 function toggleNeural(){NET.neural=!NET.neural;
  const b=document.getElementById('neuralbtn');
  if(b)b.textContent='signals: '+(NET.neural?'on':'off');
@@ -1862,6 +1919,20 @@ function buildClusters(){
    n.ox=Math.cos(ang)*rad;n.oy=Math.sin(ang)*rad})}}
 // Views are deep-linkable: #mesh, #layers, #bubbles. Handy for sharing a
 // view and for screenshots and tests that must not click through modes.
+// Fit the camera so the bubbles AND their peer satellites are framed. Runs
+// once per load; wheel/pinch still override it afterwards.
+function fitView(){
+ const cv=document.getElementById('graph');if(!cv)return;
+ if(NET.userZoomed)return;
+ let ext=0;
+ if(NET.mode==='bubbles'&&NET.clusters){for(const c of NET.clusters)ext=Math.max(ext,Math.hypot(c.cx,c.cy)+c.R)}
+ else{for(const n of NET.nodes)ext=Math.max(ext,Math.hypot(n.x,n.y))}
+ if(!ext)return;
+ // the peer ring sits at ext+90 with labels beyond; frame it whole
+ const needed=NET.showPeers?ext+90+80:ext+40;
+ const fit=((Math.min(cv.width,cv.height)/2)-10)/needed;
+ NET.zoom=Math.max(.3,Math.min(1,fit));
+}
 function applyHashView(){
  const h=((typeof location!=='undefined'&&location.hash)||'').replace('#','').toLowerCase();
  const btn=document.getElementById('laytoggle');
@@ -1896,6 +1967,8 @@ async function loadEcosystem(){
   if(batch.length<page||entries.length>=20000){if(entries.length>=20000)capped=true;break}
   offset+=page}
  const [ps,st]=await Promise.all([j('/v1/peers'),j('/v1/status')]);
+ NET.peers=(ps&&ps.peers)||[];
+ NET.selfKey=st&&st.identity?st.identity:null;
  NET.entriesAll=entries;
  const sel=document.getElementById('nsFilter');
  if(sel){const counts=new Map();
@@ -1906,6 +1979,7 @@ async function loadEcosystem(){
  const meshCapped=buildMesh(use,2500);
  seedSignals();
  applyHashView();
+ fitView();
  if(NET.mode==='layers')layoutLayers();else if(NET.mode==='bubbles')buildClusters();
  NET.sel=null;NET.hover=null;NET.pan={x:0,y:0};NET.zoom=1;NET.sub='bubbles';NET.strand=null;NET.camT=null;document.getElementById('callout').style.display='none';wireGraph();
  const known=(ps.known||[]);
