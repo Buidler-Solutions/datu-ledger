@@ -44,6 +44,8 @@ class _MobileSignInTabState extends ConsumerState<MobileSignInTab> {
   String? _error;
   bool _busy = false;
   late final AppLinks _links;
+  final _results = ScrollController();
+  bool _scanHandled = false;
 
   @override
   void initState() {
@@ -63,9 +65,11 @@ class _MobileSignInTabState extends ConsumerState<MobileSignInTab> {
   }
 
   @override
+  @override
   void dispose() {
     _link.dispose();
     _passphrase.dispose();
+    _results.dispose();
     super.dispose();
   }
 
@@ -86,6 +90,13 @@ class _MobileSignInTabState extends ConsumerState<MobileSignInTab> {
       } on DatuAuthException catch (e) {
         _request = null;
         _error = e.message;
+      }
+    });
+    // A scan or link can arrive while the list is scrolled anywhere; the
+    // review card is the thing the user must see.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_results.hasClients) {
+        _results.animateTo(0, duration: const Duration(milliseconds: 260), curve: Curves.easeOut);
       }
     });
   }
@@ -151,24 +162,39 @@ class _MobileSignInTabState extends ConsumerState<MobileSignInTab> {
   /// Barcode login: the dApp's QR is just the same datu-auth link, so the
   /// scanner returns text that goes through the identical parser and review.
   Future<void> _scanQr() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (context) => Scaffold(
+    _scanHandled = false;
+    final controller = MobileScannerController();
+    final scanned = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(
+        builder: (routeContext) => Scaffold(
           appBar: AppBar(title: const Text('Scan the dApp QR')),
           body: MobileScanner(
-            onDetect: (capture) {
+            controller: controller,
+            onDetect: (capture) async {
+              if (_scanHandled) return;
+              String? value;
               for (final barcode in capture.barcodes) {
-                final value = barcode.rawValue;
-                if (value == null || value.isEmpty) continue;
-                Navigator.of(context).pop();
-                _accept(value);
-                return;
+                final raw = barcode.rawValue;
+                if (raw != null && raw.isNotEmpty) {
+                  value = raw;
+                  break;
+                }
               }
+              if (value == null) return;
+              _scanHandled = true;
+              // Stop the camera before leaving the route: popping while the
+              // detection callback is still executing leaves a black view.
+              await controller.stop();
+              if (!routeContext.mounted) return;
+              Navigator.of(routeContext).pop(value);
             },
           ),
         ),
       ),
     );
+    await controller.dispose();
+    if (!mounted || scanned == null || scanned.isEmpty) return;
+    _accept(scanned);
   }
 
   Future<void> _copy(String value, String note) async {
@@ -187,6 +213,7 @@ class _MobileSignInTabState extends ConsumerState<MobileSignInTab> {
     });
     final request = _request;
     return ListView(
+      controller: _results,
       padding: const EdgeInsets.all(16),
       children: [
         const SectionTitle(

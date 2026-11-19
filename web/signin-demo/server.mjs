@@ -90,18 +90,16 @@ async function attestationsFor(pubkey) {
     const found = [];
     for (const entry of candidates.slice(-50)) {
       const full = await fetch(`${NODE_URL}/v1/entry/${entry.id}`).then((r) => r.json());
-      if (typeof full.payload === 'string' && full.payload.includes(pubkey)) {
-        let claims = null;
-        try {
-          claims = JSON.parse(full.payload);
-        } catch {}
-        found.push({
-          namespace: full.namespace,
-          by: full.author,
-          entry: full.id,
-          claims,
-        });
-      }
+      // The node API ships payloads as base64; the CLI's `get` shows text.
+      const text = typeof full.payload === 'string'
+        ? full.payload
+        : Buffer.from(full.payload_base64 || '', 'base64').toString('utf8');
+      if (!text.includes(pubkey)) continue;
+      let claims = null;
+      try {
+        claims = JSON.parse(text);
+      } catch {}
+      found.push({ namespace: full.namespace, by: full.author, entry: full.id, claims });
     }
     return { reachable: true, claims: found };
   } catch {
@@ -166,7 +164,7 @@ function pageHome(req) {
       'Sign in with DATU',
       `<h1>Sign in with DATU</h1>
        <p class="lede">Scan this with the DATU Signet app on your phone. It signs the challenge with its own key; no password, no extension, no desktop bridge.</p>
-       <div class="card">
+       <div class="card" id="card">
          <div class="qr">${svg}</div>
          <div class="row" style="justify-content:center">
            <span class="pill">rp_id ${challenge.rp_id}</span>
@@ -177,7 +175,45 @@ function pageHome(req) {
            <button class="btn" data-copy="${signLink.replaceAll('&', '&amp;').replaceAll('"', '&quot;')}">Copy the link</button>
            <a href="${signLink.replaceAll('&', '&amp;')}">Open on this device</a>
          </div>
-       </div>`,
+       </div>
+       <div class="card" id="result" style="margin-top:16px;display:none"></div>
+       <script>
+         (function () {
+           const nonce = ${JSON.stringify(challenge.nonce)};
+           const box = document.getElementById('result');
+           const qrCard = document.getElementById('card');
+           const timer = setInterval(async () => {
+             try {
+               const res = await fetch('/api/challenge?nonce=' + encodeURIComponent(nonce));
+               const data = await res.json();
+               if (data.state === 'verified') {
+                 clearInterval(timer);
+                 if (qrCard) qrCard.style.display = 'none';
+                 const claims = (data.attestations || []).map((a) =>
+                   '<tr><td class="mono">' + a.namespace + '</td><td class="mono">' + a.by.slice(0, 12) + '…</td><td class="mono">' +
+                   JSON.stringify(a.claims || {}) + '</td></tr>').join('');
+                 const attested = data.node_reachable
+                   ? (claims
+                       ? '<table><thead><tr><th>namespace</th><th>attestor</th><th>claims</th></tr></thead><tbody>' + claims + '</tbody></table>'
+                       : '<p class="lede">No attestation for this key on the node yet. Signed in, unattested.</p>')
+                   : '<p class="lede">Ledger node unreachable; signature verified, no attestation lookup.</p>';
+                 box.style.display = '';
+                 box.innerHTML = '<div class="row"><span class="pill ok">signed in</span></div>' +
+                   '<h2 style="font-size:1.05rem;margin:14px 0 6px" class="mono">' + data.pubkey.slice(0, 16) + '…' + data.pubkey.slice(-8) + '</h2>' +
+                   '<p class="lede">Verified datu-auth-v1 assertion by the relying-party verifier.</p>' + attested;
+               } else if (data.state === 'refused') {
+                 clearInterval(timer);
+                 box.style.display = '';
+                 box.innerHTML = '<div class="row"><span class="pill err">refused</span></div><p class="lede">That challenge was presented with an assertion that failed verification.</p>';
+               } else if (data.state === 'expired') {
+                 clearInterval(timer);
+                 box.style.display = '';
+                 box.innerHTML = '<div class="row"><span class="pill warn">expired</span></div><p class="lede">Reload this page for a fresh QR.</p>';
+               }
+             } catch (_) {}
+           }, 1500);
+         })();
+       </script>`,
       origin,
     ),
   );
@@ -265,7 +301,7 @@ async function verifyAssertion(assertion) {
   if (out.code !== 0) return { ok: false, error: out.err || out.out || 'signature did not verify' };
   entry.usedAt = Date.now();
   const attest = await attestationsFor(pubkey);
-  return {
+  const verdict = {
     ok: true,
     domain: 'datu-auth-v1',
     rp_id: c.rp_id,
@@ -273,6 +309,10 @@ async function verifyAssertion(assertion) {
     node_reachable: attest.reachable,
     attestations: attest.claims,
   };
+  // Recorded so the QR page can show the result live, without the phone
+  // having to come back to that tab.
+  entry.verified = verdict;
+  return verdict;
 }
 
 function send(res, status, body, type = 'application/json; charset=utf-8') {
@@ -288,6 +328,15 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/auth/callback') {
       return send(res, 200, pageCallback(req), 'text/html; charset=utf-8');
+    }
+    if (req.method === 'GET' && url.pathname === '/api/challenge') {
+      const nonce = url.searchParams.get('nonce') || '';
+      const entry = challenges.get(nonce);
+      if (!entry) return send(res, 404, { state: 'unknown' });
+      if (entry.verified) return send(res, 200, { state: 'verified', ...entry.verified });
+      if (entry.usedAt) return send(res, 200, { state: 'refused' });
+      if (Date.now() > entry.challenge.expires_at_ms) return send(res, 200, { state: 'expired' });
+      return send(res, 200, { state: 'open', expires_at_ms: entry.challenge.expires_at_ms });
     }
     if (req.method === 'GET' && url.pathname === '/api/status') {
       return send(res, 200, { ok: true, open: challenges.size, node: NODE_URL });
