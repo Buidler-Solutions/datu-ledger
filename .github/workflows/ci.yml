@@ -19,6 +19,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: format
         run: cargo fmt --check
+      - name: sources are text (no NUL bytes)
+        run: python3 deploy/checks/no-nul.py
       - name: clippy (warnings are errors)
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test (release, whole workspace)

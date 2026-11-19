@@ -2890,7 +2890,7 @@ fn pull_peer_http(store: &Store, peer: &str, page: usize) -> Result<SyncStats, S
             .ok_or("peer response missing entries")?
         {
             let entry = serve::entry_from_submission(item)?;
-            match store.insert_entry(&entry) {
+            match store.insert_entry_from(&entry, Some(peer)) {
                 Ok(true) => stats.new_entries += 1,
                 Ok(false) => stats.known += 1,
                 Err(datu_store::StoreError::Denied(reason)) => {
@@ -4913,7 +4913,7 @@ mod tests {
         run(cli(d, Commands::Init)).unwrap();
         // The 8-byte header alone is a valid (empty) wasm module.
         let wasm = d.join("rule.wasm");
-        std::fs::write(&wasm, b" asm   ").unwrap();
+        std::fs::write(&wasm, b"\x00asm\x01\x00\x00\x00").unwrap();
         let spec_path = d.join("spec.json");
         run(cli(
             d,
@@ -4934,7 +4934,7 @@ mod tests {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(spec["wasm"].as_str().unwrap())
             .unwrap();
-        assert_eq!(decoded, b" asm   ");
+        assert_eq!(decoded, b"\x00asm\x01\x00\x00\x00");
 
         // A module that does not parse fails before the signing steps.
         let bad = d.join("bad.wasm");

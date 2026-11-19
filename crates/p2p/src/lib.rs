@@ -642,7 +642,7 @@ pub fn pull_and_merge(
                 ServerMessage::Error(m) => return Err(format!("peer refused: {m}")),
             };
             for entry in &response.entries {
-                match store.insert_entry(entry) {
+                match store.insert_entry_from(entry, Some(peer_addr)) {
                     Ok(true) => stats.entries_new += 1,
                     Ok(false) => stats.entries_existing += 1,
                     Err(StoreError::Denied(reason)) => {

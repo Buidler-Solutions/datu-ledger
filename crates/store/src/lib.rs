@@ -352,6 +352,10 @@ CREATE TABLE IF NOT EXISTS entries (
   body BLOB NOT NULL,
   signature BLOB NOT NULL,
   pq_signature BLOB NOT NULL,
+  -- Where THIS node first saw the entry: local, a peer address, bundle or
+  -- delta. An observation, not a ledger fact: never signed, never synced,
+  -- never updated. Authorship remains the only origin the ledger claims.
+  first_seen TEXT,
   UNIQUE(author, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_entries_author_seq ON entries(author, seq);
@@ -469,6 +473,18 @@ impl Store {
     fn init(conn: Connection, policy: Option<WritePolicy>) -> StoreResult<Store> {
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         conn.execute_batch(SCHEMA)?;
+        // Migration: stores written before provenance existed get
+        // `first_seen` added in place (NULL = unknown). ADD COLUMN leaves
+        // every row untouched, and the append-only triggers are about
+        // UPDATE/DELETE, so they never see this.
+        let has_first_seen: bool = conn
+            .prepare("PRAGMA table_info(entries)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|name| name == "first_seen");
+        if !has_first_seen {
+            conn.execute_batch("ALTER TABLE entries ADD COLUMN first_seen TEXT")?;
+        }
         let store = Store { conn, policy };
         store.seed_genesis()?;
         Ok(store)
@@ -587,6 +603,22 @@ impl Store {
         Ok((count as u64).saturating_sub(1))
     }
 
+    /// Where this node first saw an entry. Local observation only: NULL for
+    /// rows written before provenance existed, "local"/"bundle"/"delta" or a
+    /// peer address otherwise. Never part of the signed entry.
+    pub fn first_seen_of(&self, id: &[u8; 32]) -> StoreResult<Option<String>> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT first_seen FROM entries WHERE id = ?1",
+                params![id.as_slice()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|v| v.flatten())
+            .map_err(Into::into)
+    }
+
     /// Entries with an internal `ord` greater than the cursor, oldest
     /// first: the tail a projection/indexer follows. The `ord` is returned
     /// alongside so the caller can persist a durable cursor (surfaced to
@@ -692,16 +724,28 @@ impl Store {
     /// games are simply not this node's business (Denied), while conflicts
     /// by admitted writers surface as fork-relevant `Conflict` errors.
     pub fn insert_entry(&self, entry: &Entry) -> StoreResult<bool> {
-        self.insert_entry_inner(entry, false)
+        self.insert_entry_from(entry, Some("local"))
+    }
+
+    /// Insert with a provenance note for *this* node's local log: "local",
+    /// a peer address, "bundle", "delta". Never signed, never synced, never
+    /// shown as a ledger fact.
+    pub fn insert_entry_from(&self, entry: &Entry, origin: Option<&str>) -> StoreResult<bool> {
+        self.insert_entry_inner(entry, false, origin)
     }
 
     /// Same insertion path, minus the writer policy - used only for the
     /// code-carried genesis record, which no local policy may refuse.
     fn insert_entry_ungated(&self, entry: &Entry) -> StoreResult<bool> {
-        self.insert_entry_inner(entry, true)
+        self.insert_entry_inner(entry, true, Some("local"))
     }
 
-    fn insert_entry_inner(&self, entry: &Entry, skip_gate: bool) -> StoreResult<bool> {
+    fn insert_entry_inner(
+        &self,
+        entry: &Entry,
+        skip_gate: bool,
+        origin: Option<&str>,
+    ) -> StoreResult<bool> {
         entry.verify()?;
         let id = entry.id()?;
         if let Some(existing) = self.entry_by_author_seq(&entry.body.author, entry.body.seq)? {
@@ -739,8 +783,8 @@ impl Store {
             }
         }
         self.conn.execute(
-            "INSERT INTO entries (id, author, namespace, seq, ts, body, signature, pq_signature)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO entries (id, author, namespace, seq, ts, body, signature, pq_signature, first_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id.as_slice(),
                 entry.body.author,
@@ -750,6 +794,7 @@ impl Store {
                 Entry::body_bytes(&entry.body).map_err(StoreError::Core)?,
                 entry.signature.as_slice(),
                 entry.pq_signature.as_slice(),
+                origin,
             ],
         )?;
         Ok(true)
@@ -1055,7 +1100,7 @@ impl Store {
         ensure_same_network(bundle.network_id.as_ref(), my_network_id)?;
         let mut summary = ImportSummary::default();
         for entry in &bundle.entries {
-            match self.insert_entry(entry) {
+            match self.insert_entry_from(entry, Some("bundle")) {
                 Ok(true) => summary.entries_new += 1,
                 Ok(false) => summary.entries_existing += 1,
                 Err(StoreError::Denied(reason)) => {
@@ -1178,7 +1223,7 @@ impl Store {
         ensure_same_network(response.network_id.as_ref(), my_network_id)?;
         let mut summary = ImportSummary::default();
         for entry in &response.entries {
-            match self.insert_entry(entry) {
+            match self.insert_entry_from(entry, Some("delta")) {
                 Ok(true) => summary.entries_new += 1,
                 Ok(false) => summary.entries_existing += 1,
                 Err(StoreError::Denied(reason)) => {

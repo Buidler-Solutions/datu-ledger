@@ -638,3 +638,49 @@ fn entries_after_follows_the_insertion_cursor() {
         .unwrap()
         .is_empty());
 }
+
+/// Provenance is local bookkeeping: authored rows say "local", imported
+/// rows name the channel, and the note never travels inside a bundle (a
+/// peer must not receive this node's observations).
+#[test]
+fn provenance_records_the_channel_without_entering_the_bundle() {
+    let store = Store::open_in_memory().unwrap();
+    let k = keys();
+    let local = Entry::sign(body(0, None, b"local record"), &k.ed, &k.pq).unwrap();
+    store.insert_entry(&local).unwrap();
+    assert_eq!(
+        store.first_seen_of(&local.id().unwrap()).unwrap(),
+        Some("local".to_string())
+    );
+
+    let peer = Entry::sign(
+        body(1, Some(local.id().unwrap()), b"from a peer"),
+        &k.ed,
+        &k.pq,
+    )
+    .unwrap();
+    store
+        .insert_entry_from(&peer, Some("192.168.254.118:7476"))
+        .unwrap();
+    assert_eq!(
+        store.first_seen_of(&peer.id().unwrap()).unwrap(),
+        Some("192.168.254.118:7476".to_string())
+    );
+
+    // A bundle out of this store carries entries, not this node's notes.
+    let bundle = store.export_bundle("").unwrap();
+    let other = Store::open_in_memory().unwrap();
+    other.import_bundle(&bundle, "").unwrap();
+    let moved = other.get_entry(&peer.id().unwrap()).unwrap().unwrap();
+    assert_eq!(moved.id().unwrap(), peer.id().unwrap());
+    assert_eq!(
+        other.first_seen_of(&peer.id().unwrap()).unwrap(),
+        Some("bundle".to_string()),
+        "the receiver records its own channel, never the sender's note"
+    );
+    let raw = String::from_utf8_lossy(&bundle);
+    assert!(
+        !raw.contains("192.168.254.118"),
+        "sender provenance must not appear in the bytes"
+    );
+}

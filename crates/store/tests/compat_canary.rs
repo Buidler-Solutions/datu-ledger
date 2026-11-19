@@ -88,3 +88,19 @@ fn golden_store_from_released_binary_opens_and_verifies() {
     assert_eq!(report.entries, 5);
     assert_eq!(report.feeds, 3, "the new author adds a feed");
 }
+
+/// Provenance column migration: a store written before `first_seen`
+/// existed opens without touching its rows; unknown provenance reads as
+/// None (the UI says "unknown", never a guess).
+#[test]
+fn golden_store_gets_the_provenance_column_without_rewriting_rows() {
+    let store = datu_store::Store::open(std::path::Path::new("tests/fixtures/golden-node.db"))
+        .expect("golden store opens");
+    let first = store.all_entries().expect("entries readable").remove(0);
+    let id = first.id().expect("id");
+    assert_eq!(
+        store.first_seen_of(&id).expect("provenance readable"),
+        None,
+        "rows from before the migration must not invent an origin"
+    );
+}

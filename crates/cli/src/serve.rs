@@ -414,7 +414,19 @@ fn handle_inner(
                 .and_then(|b| <[u8; 32]>::try_from(b).ok())
             {
                 Some(id) => match store.get_entry(&id).map_err(|e| e.to_string())? {
-                    Some(entry) => respond_json(stream, "200 OK", &entry_full_json(&entry)?),
+                    Some(entry) => {
+                        let mut json = entry_full_json(&entry)?;
+                        if let Some(obj) = json.as_object_mut() {
+                            // This node's own note about where it first saw
+                            // the entry. Not signed, not synced, not a
+                            // ledger fact - labelled accordingly in the UI.
+                            obj.insert(
+                                "first_seen".into(),
+                                serde_json::json!(store.first_seen_of(&id).unwrap_or(None)),
+                            );
+                        }
+                        respond_json(stream, "200 OK", &json)
+                    }
                     None => respond_json(
                         stream,
                         "404 Not Found",
@@ -1038,6 +1050,12 @@ fn entry_summary_json(store: &Store, entry: &Entry) -> Result<serde_json::Value,
         "timestamp_ms": entry.body.timestamp_ms,
         "refs": entry.body.refs.iter().map(hex::encode).collect::<Vec<_>>(),
         "payload_preview": payload_preview(entry),
+        // This node's own note: where it first saw the record. Never signed
+        // and never served to peers - a local observation, not a ledger fact.
+        "first_seen": entry
+            .id()
+            .ok()
+            .and_then(|id| store.first_seen_of(&id).ok().flatten()),
     }))
 }
 
@@ -1307,7 +1325,8 @@ function buildMesh(entries,cap){
  for(const e of use){const n={id:e.id,ns:e.namespace||'x',seq:e.seq,
   nseq:e.ns_seq!==undefined?e.ns_seq:e.seq,
   author:e.author,ts:e.timestamp_ms,
-  prev:e.payload_preview||'',h:hue(e.namespace||'x'),root:e.id===GENESIS_ID,deg:0,x:0,y:0,vx:0,vy:0};
+  prev:e.payload_preview||'',h:hue(e.namespace||'x'),root:e.id===GENESIS_ID,deg:0,x:0,y:0,vx:0,vy:0,
+  fs:e.first_seen||null};
   NET.nodes.push(n);NET.byId.set(n.id,n)}
  for(const e of use){const n=NET.byId.get(e.id);if(!n)continue;
   const targets=[e.prev].concat(e.refs||[]);
@@ -1799,6 +1818,7 @@ function calloutFor(p){const co=document.getElementById('callout');
  co.innerHTML=`<div><b style="color:hsl(${p.h} 70% 70%)">${esc(p.ns)}</b> <span class="muted">#${p.nseq??p.seq}</span>${p.root?' <span class="tag" style="background:#d2992233;color:#e3b341">lineage mark</span>':''}</div>`+
   `<div class="muted">${short(p.id)} · by ${short(p.author)}</div>`+
   `<div class="muted">${new Date(p.ts).toLocaleString()} · ${p.deg} link(s) · feed #${p.seq}</div>`+
+  `<div class="muted">first seen from <b>${esc(p.fs||'unknown (older row)')}</b> <span class="dim">· this node's note, not signed</span></div>`+
   `<div style="margin-top:.3rem;word-break:break-all">${esc(p.prev.slice(0,90))}</div>`+
   `<div style="margin-top:.4rem"><a href="#" onclick="show('${p.id}');return false">open full record →</a></div>`;
  co.onclick=e=>{if(e.target===co){co.style.display='none';NET.sel=null}}}
@@ -2041,10 +2061,10 @@ if(typeof window!=='undefined'&&window.scrollTo)window.scrollTo(0,0);
 loadEcosystem();
 async function loadEntries(){hideEco();
  const rows=document.getElementById('rows');
- rows.innerHTML='<tr><th>id</th><th>author</th><th>namespace</th><th>seq</th><th>payload</th></tr>';
+ rows.innerHTML='<tr><th>id</th><th>author</th><th>namespace</th><th>seq</th><th>first seen from</th><th>payload</th></tr>';
  const d=await j('/v1/entries?limit=50');
  (d.entries||[]).forEach(e=>{const tr=document.createElement('tr');
-  tr.innerHTML=`<td><a href="#" onclick="show('${e.id}');return false">${short(e.id)}</a></td><td>${short(e.author)}</td><td>${esc(e.namespace)}</td><td>${e.seq}</td><td>${esc(e.payload_preview.slice(0,80))}</td>`;
+  tr.innerHTML=`<td><a href="#" onclick="show('${e.id}');return false">${short(e.id)}</a></td><td>${short(e.author)}</td><td>${esc(e.namespace)}</td><td>${e.seq}</td><td class="dim">${esc(e.first_seen||'unknown')}</td><td>${esc(e.payload_preview.slice(0,80))}</td>`;
   rows.appendChild(tr)})}
 async function show(id){let e=await j('/v1/entry/'+id);if(e.error)e=await j('/v1/conflict/'+id);
  document.getElementById('modaltitle').textContent='record '+short(id)+(e.namespace?' · '+e.namespace:'');
