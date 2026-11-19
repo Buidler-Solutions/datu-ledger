@@ -171,3 +171,43 @@ signed string  datu-auth-v1\napp.example.com\nhttps://app.example.com\nababababa
 
 Every implementation must byte-match this string; any deviation changes
 the signature and fails verification.
+
+## 8. Phone sign-in (no extension, no bridge)
+
+The same assertion, carried by a QR instead of an extension. The phone runs
+the wallet core in-process, so the dApp needs nothing installed and the
+phone needs no desktop:
+
+```
+datu-auth://sign?rp_id=<rp>&origin=<origin>&nonce=<32 hex>&expires_at_ms=<ms>&redirect=<https or http url>
+```
+
+1. The dApp issues a challenge and renders the link as a QR (or a button).
+2. The phone app shows `rp_id` and `origin` next to the canonical bytes it is
+   about to sign, unlocks with the passphrase, and returns
+   `redirect#datu-assertion=<base64url(assertion JSON)>`.
+3. The dApp verifies with the same §3 obligations: domain, nonce match and
+   single use, expiry, then the Ed25519 signature. The fragment never
+   reaches a server in transit.
+
+SDK support (out of the box):
+
+```js
+// once installed, an app without the extension still logs in:
+const flow = datu.phoneSignIn({ rpId, origin });   // or client.signInAuto()
+renderQr(flow.link);                                // any QR library
+const result = await flow.completed;                // { ok, pubkey } or { ok:false, reason }
+// on the page the phone redirects back to:
+const resumed = await datu.resumePhoneSignIn();     // reads #datu-assertion=, burns the nonce
+```
+
+React: `usePhoneSignIn()` returns `{ begin, link, result }` and resumes a
+redirect-back on mount. Server-verified flows (verification done by the
+backend, as in `web/signin-demo`) call `flow.accept(assertion)` with the
+assertion the server accepted; the SDK re-checks it locally before resolving.
+
+Rules the SDK enforces for this path: the challenge lives in
+sessionStorage keyed by nonce (so a reload mid-flight does not lose it), a
+nonce signs in exactly once (burned on success), expiry is checked against
+the local clock, and the fragment is scrubbed from the URL after a
+successful resume so the assertion does not linger in history.

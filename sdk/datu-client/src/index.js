@@ -29,6 +29,7 @@ import {
   verifyProviderProof,
 } from './provider.js';
 import { DatuError, ErrorCode, mapError } from './errors.js';
+import { beginPhoneSignIn, finishPhoneSignIn, resumePhoneSignIn } from './phone.js';
 
 export {
   AUTH_DOMAIN,
@@ -48,6 +49,9 @@ export {
   ErrorCode,
   createExtensionTransport,
   createNodeClient,
+  beginPhoneSignIn,
+  finishPhoneSignIn,
+  resumePhoneSignIn,
 };
 
 const require = (value, message) => {
@@ -224,6 +228,45 @@ export async function connect({
     return { assertion, verified: verdict.ok, challenge };
   }
 
+  /**
+   * Phone sign-in, out of the box. No extension, no bridge: returns the
+   * link to render as a QR and a promise that settles when the phone
+   * returns (same page + #datu-assertion=..., or a server calling accept()).
+   * Call resumePhoneSignIn() on page load to pick up a redirect-back.
+   */
+  function phoneSignIn({ rpId, origin, ttlMs, nonce, redirect } = {}) {
+    return beginPhoneSignIn({
+      rpId: rpId || defaultRpId,
+      origin: origin || defaultOrigin,
+      ttlMs,
+      nonce,
+      redirect,
+    });
+  }
+
+  /** Pick up a phone redirect-back on page load; null when there is none. */
+  const resumePhone = (options = {}) => resumePhoneSignIn(options);
+
+  /**
+   * One call, either signer: the extension when it is present, the phone
+   * otherwise. Extension results resolve immediately; phone results return
+   * the flow ({ link, completed }) so the app can show a QR.
+   */
+  async function signInAuto({ name, rpId, origin, ttlMs } = {}) {
+    let extension = false;
+    try {
+      extension = Boolean(await rpc.ping());
+    } catch {
+      extension = false;
+    }
+    if (extension) {
+      const result = await signIn({ name, rpId, origin, ttlMs });
+      return { method: 'extension', ...result };
+    }
+    const flow = phoneSignIn({ rpId, origin, ttlMs });
+    return { method: 'phone', challenge: flow.challenge, link: flow.link, completed: flow.completed, accept: flow.accept };
+  }
+
   /** Party signature on a document, as a role (holder, registrar, ...). */
   const partySign = async ({ name, role, document, kind, summary } = {}) => {
     require(role, 'role is required');
@@ -386,6 +429,9 @@ export async function connect({
     sign,
     bridge,
     startLogin,
+    phoneSignIn,
+    resumePhoneSignIn: resumePhone,
+    signInAuto,
     signIn,
     proveGenuine,
     partySign,

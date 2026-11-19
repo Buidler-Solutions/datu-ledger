@@ -341,3 +341,149 @@ test('a tampered fragment is rejected by verifyAssertion', async () => {
   const verdict = await verifyAssertion(back, challenge);
   assert.equal(verdict.ok, false);
 });
+
+// Phone sign-in, out of the box: challenge issuance, single use, expiry,
+// redirect-back resumption, and the auto path when no extension is present.
+
+const memStorage = () => {
+  const m = new Map();
+  return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => m.set(k, String(v)),
+    removeItem: (k) => m.delete(k),
+  };
+};
+
+test('beginPhoneSignIn issues a complete challenge and a link', async () => {
+  const { beginPhoneSignIn } = await import('../src/index.js');
+  const flow = beginPhoneSignIn({
+    rpId: 'demo.datu.local',
+    origin: 'https://demo.datu.local',
+    redirect: 'https://demo.datu.local/auth/callback',
+    storage: memStorage(),
+  });
+  assert.equal(flow.mode, 'phone');
+  assert.match(flow.challenge.nonce, /^[0-9a-f]{32}$/);
+  assert.ok(flow.challenge.expires_at_ms > Date.now());
+  const q = new URL(flow.link).searchParams;
+  assert.equal(q.get('rp_id'), 'demo.datu.local');
+  assert.equal(q.get('nonce'), flow.challenge.nonce);
+  assert.equal(q.get('redirect'), 'https://demo.datu.local/auth/callback');
+});
+
+test('phone sign-in completes once and only once', async () => {
+  const { beginPhoneSignIn, authSignedBytes } = await import('../src/index.js');
+  const storage = memStorage();
+  const kp = keypair();
+  const flow = beginPhoneSignIn({ rpId: 'rp.example', origin: 'https://rp.example', storage });
+  const assertion = {
+    domain: 'datu-auth-v1',
+    rp_id: flow.challenge.rp_id,
+    origin: flow.challenge.origin,
+    nonce: flow.challenge.nonce,
+    expires_at_ms: flow.challenge.expires_at_ms,
+    pubkey: kp.pubkeyHex,
+    signature: kp.sign(authSignedBytes(flow.challenge)),
+  };
+
+  const first = await flow.accept(assertion);
+  assert.equal(first.ok, true);
+  assert.equal(first.pubkey, kp.pubkeyHex);
+  assert.equal((await flow.completed).ok, true);
+
+  const replay = await flow.accept(assertion);
+  assert.equal(replay.ok, false);
+  assert.match(replay.reason, /already completed/);
+
+  // A fresh flow with the same nonce cannot reuse the spent nonce either,
+  // because the stored challenge was burned.
+  const again = beginPhoneSignIn({
+    rpId: 'rp.example',
+    origin: 'https://rp.example',
+    nonce: flow.challenge.nonce,
+    storage,
+  });
+  const reused = await again.accept(assertion);
+  assert.equal(reused.ok, false);
+});
+
+test('finishPhoneSignIn refuses expiry, mismatch and unknown nonces', async () => {
+  const { beginPhoneSignIn, finishPhoneSignIn, authSignedBytes } = await import('../src/index.js');
+  const storage = memStorage();
+  const kp = keypair();
+  const flow = beginPhoneSignIn({ rpId: 'rp.example', origin: 'https://rp.example', storage });
+  const sign = (challenge) => ({
+    domain: 'datu-auth-v1',
+    rp_id: challenge.rp_id,
+    origin: challenge.origin,
+    nonce: challenge.nonce,
+    expires_at_ms: challenge.expires_at_ms,
+    pubkey: kp.pubkeyHex,
+    signature: kp.sign(authSignedBytes(challenge)),
+  });
+
+  const expired = await finishPhoneSignIn({
+    challenge: flow.challenge,
+    assertion: sign(flow.challenge),
+    storage,
+    nowMs: flow.challenge.expires_at_ms + 1,
+  });
+  assert.equal(expired.ok, false);
+  assert.match(expired.reason, /expired/);
+
+  const mismatch = await finishPhoneSignIn({
+    challenge: flow.challenge,
+    assertion: { ...sign(flow.challenge), origin: 'https://evil.example' },
+    storage,
+  });
+  assert.equal(mismatch.ok, false);
+
+  const unknown = await finishPhoneSignIn({
+    challenge: { ...flow.challenge, nonce: 'cd'.repeat(16) },
+    assertion: sign({ ...flow.challenge, nonce: 'cd'.repeat(16) }),
+    storage,
+  });
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.reason, /unknown/);
+});
+
+test('resumePhoneSignIn completes from the redirect URL and burns the nonce', async () => {
+  const { beginPhoneSignIn, resumePhoneSignIn, authSignedBytes } = await import('../src/index.js');
+  const storage = memStorage();
+  const kp = keypair();
+  const flow = beginPhoneSignIn({
+    rpId: 'rp.example',
+    origin: 'https://rp.example',
+    storage,
+    redirect: 'https://rp.example/app',
+  });
+  const assertion = {
+    domain: 'datu-auth-v1',
+    rp_id: flow.challenge.rp_id,
+    origin: flow.challenge.origin,
+    nonce: flow.challenge.nonce,
+    expires_at_ms: flow.challenge.expires_at_ms,
+    pubkey: kp.pubkeyHex,
+    signature: kp.sign(authSignedBytes(flow.challenge)),
+  };
+  const payload = Buffer.from(JSON.stringify(assertion), 'utf8').toString('base64url');
+  const url = `https://rp.example/app#datu-assertion=${payload}`;
+
+  const resumed = await resumePhoneSignIn({ url, storage });
+  assert.equal(resumed.ok, true);
+  assert.equal(resumed.pubkey, kp.pubkeyHex);
+
+  const second = await resumePhoneSignIn({ url, storage });
+  assert.equal(second, null, 'a spent challenge cannot be resumed again');
+});
+
+test('signInAuto falls back to the phone when no extension answers', async () => {
+  const { connect } = await import('../src/index.js');
+  const rpc = mockTransport({});
+  rpc.ping = async () => null;
+  const datu = await connect({ detect: false, transport: rpc, rpId: 'rp.example', origin: 'https://rp.example' });
+  const result = await datu.signInAuto();
+  assert.equal(result.method, 'phone');
+  assert.ok(result.link.startsWith('datu-auth://sign?'));
+  assert.equal(typeof result.completed.then, 'function');
+});

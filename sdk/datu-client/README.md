@@ -58,6 +58,42 @@ datu signet auth-verify --rp-id app.example.com --origin https://app.example.com
 
 Wire standard: `specs/signetauth.md`.
 
+## Log in with a phone (no extension, no bridge)
+
+`npm install` is enough for the QR path: a dApp can issue the challenge,
+show it, and verify the assertion without any Signet extension present.
+
+```js
+import { connect } from '@greenarmor/datu-client';
+
+// detect:false lets the page run on browsers with no extension installed
+const datu = await connect({ detect: false, rpId: 'app.example.com', origin: 'https://app.example.com' });
+
+const flow = datu.phoneSignIn();      // { challenge, link, completed }
+renderQr(flow.link);                  // any QR library; the link is also scannable from a copy button
+const result = await flow.completed;  // { ok: true, pubkey } or { ok: false, reason }
+```
+
+The phone returns to the same page with `#datu-assertion=…`; pick it up on
+load (the SDK burns the nonce and scrubs the fragment from the URL):
+
+```js
+const resumed = await datu.resumePhoneSignIn();
+if (resumed?.ok) signedInAs(resumed.pubkey);
+```
+
+Or let the SDK choose: `await datu.signInAuto()` returns the extension
+result when one is present and the phone flow (`method: 'phone'`) when not.
+React: `usePhoneSignIn()` from `@greenarmor/datu-react` does the same with a
+`{ begin, link, result }` shape and resumes on mount.
+
+Enforced by the SDK for this path: challenge stored per nonce (survives a
+reload), single use (burned on success), expiry against the local clock, and
+field match against the challenge you issued. If your backend performs the
+relying-party check too, hand its verdict back with `flow.accept(assertion)`;
+the SDK re-verifies locally before resolving.
+
+
 ## Prove the wallet is genuine (before asking a human for anything)
 
 An impostor extension can imitate every page-facing API, but it holds no

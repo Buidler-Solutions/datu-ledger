@@ -146,6 +146,54 @@ export function useSignIn() {
   return { signIn, pending, result, error, reset };
 }
 
+/**
+ * Phone sign-in (no extension required): { begin, flow, link, challenge,
+ * result, error }. begin() returns the SDK flow; render flow.link as a QR.
+ * On mount it also resumes a redirect-back assertion if one is in the URL.
+ */
+export function usePhoneSignIn() {
+  const { client } = useDatu();
+  const [flow, setFlow] = useState(null);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!client) return;
+    let live = true;
+    client
+      .resumePhoneSignIn()
+      .then((r) => {
+        if (live && r) setResult(r);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [client]);
+
+  const begin = useCallback(
+    (args = {}) => {
+      if (!client) throw new Error('not connected yet');
+      const started = client.phoneSignIn(args);
+      setFlow(started);
+      setResult(null);
+      setError(null);
+      started.completed.then(setResult).catch(setError);
+      return started;
+    },
+    [client],
+  );
+
+  return {
+    begin,
+    flow,
+    link: flow ? flow.link : null,
+    challenge: flow ? flow.challenge : null,
+    result,
+    error,
+  };
+}
+
 /** Party signing: { partySign, pending, result, error } over client.partySign. */
 export function usePartySign() {
   const { client } = useDatu();

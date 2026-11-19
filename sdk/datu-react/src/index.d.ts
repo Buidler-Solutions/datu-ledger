@@ -68,3 +68,23 @@ export declare function useCoverage(
   entryId: string | null | undefined,
   opts?: { enabled?: boolean },
 ): UseCoverageResult;
+
+export interface PhoneSignInFlow {
+  mode: 'phone';
+  challenge: { rp_id: string; origin: string; nonce: string; expires_at_ms: number };
+  link: string;
+  redirect: string;
+  accept: (assertion: Record<string, unknown>) => Promise<{ ok: boolean; pubkey?: string; reason?: string }>;
+  completed: Promise<{ ok: boolean; pubkey?: string; reason?: string }>;
+}
+
+export interface UsePhoneSignInResult {
+  begin: (args?: { rpId?: string; origin?: string; ttlMs?: number; nonce?: string; redirect?: string }) => PhoneSignInFlow;
+  flow: PhoneSignInFlow | null;
+  link: string | null;
+  challenge: PhoneSignInFlow['challenge'] | null;
+  result: { ok: boolean; pubkey?: string; reason?: string } | null;
+  error: unknown;
+}
+
+export declare function usePhoneSignIn(): UsePhoneSignInResult;
