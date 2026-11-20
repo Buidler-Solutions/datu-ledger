@@ -74,3 +74,23 @@ survives any single host loss with zero data loss and no write outage
 - Cold evidence: after each anchor checkpoint, `datu bundle export` to
   offline media; the genesis lineage check makes tampering with bundles
   detectable.
+
+## One explorer per cell
+
+Every `datu serve` and every `datu node --http` exposes the full explorer UI
+on its HTTP port. That is convenient on one node and confusing on five: a
+pile of test runs reads as "the explorer is replicating" when it is simply
+five nodes each honestly serving its own view.
+
+Convention:
+
+- exactly one node in a deployment serves `--http` (the anchor or mirror);
+- validators and witness nodes run p2p-only (`--addr` without `--http`);
+- ad-hoc test nodes are stopped when the test ends, not left listening.
+
+`deploy/checks/observers.sh` lists every local endpoint that answers
+`/v1/status`, with pid and command line, so answering "who is serving an
+explorer right now" is one command. Lab sandboxes (`web/lab`) also run
+`datu serve` per browser session; they bind loopback, expire on idle, and
+appear in that list while a session is warm.
+

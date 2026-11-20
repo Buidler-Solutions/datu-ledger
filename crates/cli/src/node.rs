@@ -355,6 +355,7 @@ pub fn run(
     if let Some(http_addr) = &http {
         println!("  http explorer:    http://{http_addr}/");
         println!("    ecosystem view: http://{http_addr}/ (ecosphere tab - every entry a node in the mesh)");
+        println!("    note: one explorer per deployment is enough - peers and validators can run p2p-only");
     }
     println!("  offline paths:    datu delta / datu bundle (USB, email, any channel)");
     println!("ctrl-c to stop");
