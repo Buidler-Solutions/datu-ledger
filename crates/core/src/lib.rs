@@ -13,6 +13,7 @@ pub mod genesis;
 pub mod merkle;
 pub mod parties;
 pub mod pq;
+pub mod watch;
 
 pub use auth::{
     sign_assertion, sign_bytes, verify_assertion, AuthChallenge, AUTH_DOMAIN,

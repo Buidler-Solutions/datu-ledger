@@ -117,6 +117,25 @@ enum Commands {
         #[command(subcommand)]
         cmd: EnrollCmd,
     },
+    /// Watch an identity chain: report new attestations, cosigner weight and
+    /// revocations; exits 2 when the watched key itself is revoked
+    Watch {
+        /// Subject key (hex), repeatable; default: this node's key
+        #[arg(long)]
+        subject: Vec<String>,
+        /// Ledger node serving /v1/identity
+        #[arg(long, default_value = "http://127.0.0.1:7474")]
+        node: String,
+        /// Seconds between checks
+        #[arg(long, default_value_t = 30)]
+        every: u64,
+        /// One check then exit (a revoked key exits 2, so cron can alert)
+        #[arg(long)]
+        once: bool,
+        /// One JSON object per check, machine-readable
+        #[arg(long)]
+        json: bool,
+    },
     /// Writer policy: gate validators' namespaces; observers stay free
     Policy {
         #[command(subcommand)]
@@ -2885,6 +2904,234 @@ fn cmd_enroll_approve(
     Ok(())
 }
 
+// ---- identity watch ----
+
+/// "YYYY-MM-DD HH:MM:SSZ" from epoch milliseconds, UTC, no chrono dependency
+/// (Howard Hinnant's civil-from-days). Watchers read timestamps by eye, so a
+/// wrong one would be worse than none.
+fn utc_stamp(ms: u64) -> String {
+    let secs = ms / 1000;
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{d:02} {h:02}:{m:02}:{s:02}Z")
+}
+
+fn watch_event_json(event: &datu_core::watch::Event) -> serde_json::Value {
+    use datu_core::watch::Event;
+    match event {
+        Event::AttestationAdded {
+            id,
+            by,
+            label,
+            claims,
+            cosigners,
+            enroll,
+        } => serde_json::json!({
+            "event": "attestation_added",
+            "attestation": id, "by": by, "label": label,
+            "claims": claims, "cosigners": cosigners, "enroll": enroll,
+        }),
+        Event::CosignersGained { id, by, cosigners } => serde_json::json!({
+            "event": "cosigners_gained",
+            "attestation": id, "by": by, "cosigners": cosigners,
+        }),
+        Event::AttestationRevoked { id, by, reason } => serde_json::json!({
+            "event": "attestation_revoked",
+            "attestation": id, "by": by, "reason": reason,
+        }),
+        Event::KeyRevoked { by, reason } => serde_json::json!({
+            "event": "key_revoked", "by": by, "reason": reason,
+        }),
+    }
+}
+
+fn watch_event_line(stamp: &str, event: &datu_core::watch::Event) -> String {
+    use datu_core::watch::Event;
+    match event {
+        Event::AttestationAdded {
+            by,
+            label,
+            claims,
+            cosigners,
+            enroll,
+            ..
+        } => {
+            let mut line = format!("{stamp}  attested by {}", short(by));
+            if let Some(label) = label {
+                line.push_str(&format!(" as {label}"));
+            }
+            line.push_str(&format!(" - {claims}"));
+            if *cosigners > 0 {
+                line.push_str(&format!(" | cosigned by {cosigners}"));
+            }
+            if let Some(enroll) = enroll {
+                line.push_str(&format!(" | via enrollment {}", short(enroll)));
+            }
+            line
+        }
+        Event::CosignersGained { id, by, cosigners } => format!(
+            "{stamp}  cosigner weight now {cosigners} on {} (attested by {})",
+            short(id),
+            short(by)
+        ),
+        Event::AttestationRevoked { id, by, reason } => {
+            let mut line = format!("{stamp}  REVOKED {} by {}", short(id), short(by));
+            if let Some(reason) = reason {
+                line.push_str(&format!(" - {reason}"));
+            }
+            line
+        }
+        Event::KeyRevoked { by, reason } => {
+            let mut line = format!("{stamp}  KEY REVOKED by {}", short(by));
+            if let Some(reason) = reason {
+                line.push_str(&format!(" - {reason}"));
+            }
+            line
+        }
+    }
+}
+
+/// `datu watch`: poll a node's `/v1/identity/{key}` and report what changed.
+/// The first cycle is a baseline (current state, no events); every later
+/// cycle prints only transitions. A key-level revocation is terminal: the
+/// command exits 2 after reporting it, so `datu watch ... --once` in cron or
+/// systemd is enough to hear about it. Attestation-level revocations are
+/// reported but not terminal - another attestation may still vouch.
+fn cmd_watch(
+    data_dir: &Path,
+    subjects: Vec<String>,
+    node_url: String,
+    every: u64,
+    once: bool,
+    json: bool,
+) -> Result<(), String> {
+    let subjects: Vec<String> = if subjects.is_empty() {
+        vec![load_node_reader(data_dir)?.identity]
+    } else {
+        subjects
+    };
+    for subject in &subjects {
+        parse_id(subject)?;
+    }
+    let mut seen: std::collections::HashMap<String, datu_core::watch::ChainSnapshot> =
+        std::collections::HashMap::new();
+    loop {
+        let mut revoked_key = false;
+        for subject in &subjects {
+            let chain = http_get_json(&node_url, &format!("/v1/identity/{subject}"))?;
+            let snapshot = datu_core::watch::snapshot(&chain)?;
+            let stamp = utc_stamp(now_ms());
+            match seen.get(subject) {
+                None => {
+                    let revoked_attestations = snapshot
+                        .attestations
+                        .values()
+                        .filter(|a| a.revoked_by.is_some())
+                        .count();
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "subject": subject,
+                                "at_ms": now_ms(),
+                                "baseline": true,
+                                "attestations": snapshot.attestations.len(),
+                                "revoked_attestations": revoked_attestations,
+                                "key_revoked": datu_core::watch::key_revoked(&snapshot),
+                            })
+                        );
+                    } else {
+                        println!(
+                            "{stamp}  watching {} on {}: {} attestation(s){}",
+                            short(subject),
+                            node_url,
+                            snapshot.attestations.len(),
+                            if datu_core::watch::key_revoked(&snapshot) {
+                                " - KEY REVOKED"
+                            } else {
+                                ""
+                            }
+                        );
+                        // `--once` has no previous cycle to diff against, so
+                        // the baseline carries the facts: an unattended
+                        // check must still see a revocation that already
+                        // happened.
+                        for a in snapshot.attestations.values() {
+                            let mut line = format!(
+                                "{stamp}    {} by {} - {}",
+                                short(&a.id),
+                                short(&a.by),
+                                a.claims
+                            );
+                            if a.cosigners > 0 {
+                                line.push_str(&format!(" | cosigned by {}", a.cosigners));
+                            }
+                            if let Some(enroll) = &a.enroll {
+                                line.push_str(&format!(" | via enrollment {}", short(enroll)));
+                            }
+                            if let Some(r) = &a.revoked_by {
+                                line.push_str(&format!(" [REVOKED by {}", short(&r.by)));
+                                if let Some(reason) = &r.reason {
+                                    line.push_str(&format!(" - {reason}"));
+                                }
+                                line.push(']');
+                            }
+                            println!("{line}");
+                        }
+                        if let Some(r) = &snapshot.key_revoker {
+                            let mut line = format!("{stamp}    KEY REVOKED by {}", short(&r.by));
+                            if let Some(reason) = &r.reason {
+                                line.push_str(&format!(" - {reason}"));
+                            }
+                            println!("{line}");
+                        }
+                    }
+                }
+                Some(prev) => {
+                    let events = datu_core::watch::diff(prev, &snapshot);
+                    for event in &events {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "subject": subject,
+                                    "at_ms": now_ms(),
+                                    "event": watch_event_json(event)["event"].clone(),
+                                    "detail": watch_event_json(event),
+                                })
+                            );
+                        } else {
+                            println!("{}", watch_event_line(&stamp, event));
+                        }
+                    }
+                }
+            }
+            revoked_key |= datu_core::watch::key_revoked(&snapshot);
+            seen.insert(subject.clone(), snapshot);
+        }
+        if once {
+            if revoked_key {
+                std::process::exit(2);
+            }
+            return Ok(());
+        }
+        if revoked_key {
+            std::process::exit(2);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(every.max(1)));
+    }
+}
+
 // ---- bloom-filter sync ----
 
 /// Minimal std-only HTTP POST of a JSON body; returns the parsed JSON
@@ -4493,6 +4740,20 @@ fn run(cli: Cli) -> Result<(), String> {
                 min_cosigners,
             } => cmd_enroll_approve(&load_node(&cli.data_dir)?, input, *min_cosigners),
         },
+        Commands::Watch {
+            subject,
+            node,
+            every,
+            once,
+            json,
+        } => cmd_watch(
+            &cli.data_dir,
+            subject.clone(),
+            node.clone(),
+            *every,
+            *once,
+            *json,
+        ),
         Commands::Policy { cmd } => match cmd {
             PolicyCmd::Init {
                 attestors,
@@ -5227,6 +5488,40 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.contains("does not parse"), "typo caught early: {err}");
+    }
+
+    /// Watch rendering: a timestamp a human can check, and event lines that
+    /// name what changed. The diff itself is pinned in datu-core.
+    #[test]
+    fn watch_lines_name_the_change() {
+        use datu_core::watch::Event;
+        assert_eq!(utc_stamp(0), "1970-01-01 00:00:00Z");
+        assert_eq!(utc_stamp(1795166796592), "2026-11-20 09:26:36Z");
+
+        let added = Event::AttestationAdded {
+            id: "a1".into(),
+            by: "d53ad911d3f9d62b0b940a0711ef99740c1733c2ba14f680dbc1fe203e0cd21c".into(),
+            label: Some("Acme Ltd".into()),
+            claims: serde_json::json!({"role": "clerk"}),
+            cosigners: 2,
+            enroll: Some("13e52900d67eebe2a11e4891eb64042cde13e853b6e7cb795f6a1395b9687bbe".into()),
+        };
+        let line = watch_event_line("t", &added);
+        assert!(line.contains("attested by d53ad911"), "{line}");
+        assert!(line.contains("as Acme Ltd"), "{line}");
+        assert!(line.contains("cosigned by 2"), "{line}");
+        assert!(line.contains("via enrollment"), "{line}");
+
+        let revoked = Event::KeyRevoked {
+            by: "d53ad911d3f9d62b0b940a0711ef99740c1733c2ba14f680dbc1fe203e0cd21c".into(),
+            reason: Some("key compromised".into()),
+        };
+        let line = watch_event_line("t", &revoked);
+        assert_eq!(
+            line, "t  KEY REVOKED by d53ad911 - key compromised",
+            "the terminal event must be unmistakable"
+        );
+        assert_eq!(watch_event_json(&revoked)["event"], "key_revoked");
     }
 
     /// The two-signature enrollment ceremony end to end, and every ghost

@@ -35,6 +35,7 @@ jobs:
           ./deploy/drills/fork-drill.sh
           ./deploy/drills/key-rotation.sh
           ./deploy/drills/enroll-ghost.sh
+          ./deploy/drills/watch-revoke.sh
       - name: dependency inventory + SPDX SBOM (denied licenses)
         run: |
           python3 deploy/checks/inventory.py
