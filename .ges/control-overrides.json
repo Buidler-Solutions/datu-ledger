@@ -573,5 +573,205 @@
     "control_id": "DPA-PH-09",
     "status": "not-applicable",
     "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "PRIV-GOV-01",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-GOV-02",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-GOV-04",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-GOV-05",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-INV-01",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-INV-02",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-INV-03",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-INV-04",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-CNS-01",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-CNS-02",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-CNS-03",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-CNS-04",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-DSR-01",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-DSR-02",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-DSR-03",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-DSR-04",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-DSR-05",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-SEC-01",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-SEC-02",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-SEC-03",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-SEC-04",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-INC-01",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-INC-02",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-INC-03",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-INC-04",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-XBT-01",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-RET-01",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-RET-02",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-RET-03",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "PRIV-GOV-03",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "PRIV-DSR-06",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "PRIV-VEN-01",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "PRIV-VEN-02",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "PRIV-VEN-03",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "PRIV-XBT-02",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "PRIV-XBT-03",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "PRIV-XBT-04",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "PRIV-TRN-01",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "PRIV-TRN-02",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "PRIV-TRN-03",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
   }
 ]
