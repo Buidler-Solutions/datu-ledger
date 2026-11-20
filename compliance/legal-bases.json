@@ -1,0 +1,157 @@
+{
+  "version": 1,
+  "note": "Register of processing activities and their lawful bases. The software is the same everywhere; each operator deployment is the controller for what its node publishes and must confirm or amend this register in its own copy. Bases cite GDPR Article 6 (and Article 9 where relevant) plus the Philippine DPA 2012 counterpart.",
+  "updated": "2026-11-20",
+  "activities": [
+    {
+      "id": "identity-attestation",
+      "activity": "Registry statements vouching for a key",
+      "description": "An institution publishes identity.attest entries binding a public key to claims (legal name, role, label). The subject's own consent is recorded separately by the enrollment ceremony.",
+      "data_categories": ["public keys", "legal name", "role", "institution label"],
+      "legal_basis": {
+        "regulation": "GDPR",
+        "article": "6(1)(e)",
+        "name": "Exercise of official authority / public task of the registry",
+        "ph_dpa": "DPA 2012 Sec. 13(a)-(c) (public function, legal obligation, contract)"
+      },
+      "evidence": ["crates/core/src/attest.rs", "crates/cli/src/main.rs"],
+      "retention": "append-only while mirrors hold the entries; revocation is a new statement",
+      "recipients": "every mirror of the ledger (public by design)"
+    },
+    {
+      "id": "enrollment-ceremony",
+      "activity": "Two-signature enrollment (consent record)",
+      "description": "The citizen signs the enrollment document with the key being enrolled; the signature is the consent record and is published inside the identity.enroll entry.",
+      "data_categories": ["public keys", "legal name", "role", "signature metadata"],
+      "legal_basis": {
+        "regulation": "GDPR",
+        "article": "6(1)(a)",
+        "name": "Consent (Art. 7 conditions: specific, informed, unambiguous)",
+        "ph_dpa": "DPA 2012 Sec. 12(a) (consent)"
+      },
+      "evidence": ["crates/core/src/enroll.rs", "crates/cli/src/main.rs", "tests: enrollment_ceremony_publishes_and_ghosts_never_complete"],
+      "retention": "append-only; withdrawal by revocation, never by deletion",
+      "recipients": "every mirror of the ledger"
+    },
+    {
+      "id": "guardian-recovery",
+      "activity": "Guardian recovery of a lost key",
+      "description": "The holder of a NEW key opens a recovery for a lost one; distinct guardians co-sign; the registry attests the new key and revokes the lost one in the same act.",
+      "data_categories": ["public keys", "guardian keys", "labels", "claims"],
+      "legal_basis": {
+        "regulation": "GDPR",
+        "article": "6(1)(a)",
+        "name": "Consent of the citizen (new key) and of each guardian co-signer",
+        "ph_dpa": "DPA 2012 Sec. 12(a) (consent)"
+      },
+      "evidence": ["crates/core/src/enroll.rs", "deploy/drills/enroll-ghost.sh", "compliance/consent-management.md"],
+      "retention": "append-only; the lost key is revoked in the same act",
+      "recipients": "every mirror of the ledger"
+    },
+    {
+      "id": "party-signed-records",
+      "activity": "Operator records with party consent",
+      "description": "Operators publish records about people (for example land titles) as party-signed documents: the affected parties sign the exact document before publication.",
+      "data_categories": ["names", "roles", "document identifiers", "any fields the operator publishes or seals"],
+      "legal_basis": {
+        "regulation": "GDPR",
+        "article": "6(1)(e)",
+        "name": "Public task of the operator (or 6(1)(b)/(c) as its mandate dictates)",
+        "ph_dpa": "DPA 2012 Sec. 12-13 as applicable to the operator"
+      },
+      "evidence": ["crates/core/src/parties.rs", "crates/cli/src/main.rs", "compliance/consent-management.md"],
+      "retention": "append-only; personal fields must be sealed or omitted",
+      "recipients": "every mirror of the ledger"
+    },
+    {
+      "id": "witness-checkpoints",
+      "activity": "Witnessing and integrity checkpoints",
+      "description": "Witnesses sign checkpoint streams over ranges of entries. The only personal data involved is public keys.",
+      "data_categories": ["public keys of witnesses"],
+      "legal_basis": {
+        "regulation": "GDPR",
+        "article": "6(1)(f)",
+        "name": "Legitimate interests: integrity and tamper evidence",
+        "ph_dpa": "DPA 2012 Sec. 12(b) (legitimate interest)"
+      },
+      "evidence": ["crates/core/src/checkpoint.rs", "deploy/drills/fork-drill.sh"],
+      "retention": "append-only",
+      "recipients": "every mirror that exchanges checkpoint streams"
+    },
+    {
+      "id": "signet-auth-login",
+      "activity": "SignetAuth sign-in",
+      "description": "A relying party verifies a signed challenge; no password is stored and the assertion is single-use. The relying party holds a session token after login under its own basis.",
+      "data_categories": ["public keys", "request logs (relying party side)"],
+      "legal_basis": {
+        "regulation": "GDPR",
+        "article": "6(1)(b)",
+        "name": "Contract: delivering the service you sign in to",
+        "ph_dpa": "DPA 2012 Sec. 12(b)-(c)"
+      },
+      "evidence": ["crates/core/src/auth.rs", "sdk/datu-client/src/auth.js", "web/signin-demo/README.md"],
+      "retention": "relying party's session policy; the ledger holds nothing for a login",
+      "recipients": "the relying party only"
+    },
+    {
+      "id": "http-request-logs",
+      "activity": "Node request logs (operator-side)",
+      "description": "A node may log IP addresses and request lines for security and rate limiting. These logs are local, never synced to peers.",
+      "data_categories": ["IP addresses", "request metadata"],
+      "legal_basis": {
+        "regulation": "GDPR",
+        "article": "6(1)(f)",
+        "name": "Legitimate interests: security and abuse prevention",
+        "ph_dpa": "DPA 2012 Sec. 12(b)"
+      },
+      "evidence": ["crates/cli/src/serve.rs"],
+      "retention": "operator policy (typical: 30 days); documented in deploy/operations/",
+      "recipients": "the operator only"
+    },
+    {
+      "id": "local-provenance",
+      "activity": "First-seen provenance note",
+      "description": "Each node records where an entry first arrived from (local, peer address, bundle, delta) for tamper detection. It is a local note: never signed, never synced, never served.",
+      "data_categories": ["peer addresses (transient)"],
+      "legal_basis": {
+        "regulation": "GDPR",
+        "article": "6(1)(f)",
+        "name": "Legitimate interests: integrity of the local store",
+        "ph_dpa": "DPA 2012 Sec. 12(b)"
+      },
+      "evidence": ["crates/store/src/lib.rs"],
+      "retention": "local to the node; discarded with the store",
+      "recipients": "none (never leaves the node)"
+    },
+    {
+      "id": "sealed-documents",
+      "activity": "Field-level sealing and deferred delivery",
+      "description": "Operators encrypt personal fields to named readers before publishing; the ciphertext may be on the ledger, the key half stays with the operator or is released time-locked.",
+      "data_categories": ["whatever the operator seals"],
+      "legal_basis": {
+        "regulation": "GDPR",
+        "article": "6(1)(e)",
+        "name": "Inherits the operator's basis for the underlying record",
+        "ph_dpa": "as the operator's mandate dictates"
+      },
+      "evidence": ["crates/wallet/src/lib.rs", "deploy/operations/sealing-retention-gdpr.md"],
+      "retention": "operator policy; ciphertext alone is not personal data without the key half",
+      "recipients": "authorized readers named at seal time"
+    },
+    {
+      "id": "projection-index",
+      "activity": "Derived projection databases",
+      "description": "An optional indexer copies entries into SQLite/PostgreSQL/MySQL for querying. It is derived, disposable data and inherits the basis of the entries it copies.",
+      "data_categories": ["copies of ledger fields", "derived ordinals"],
+      "legal_basis": {
+        "regulation": "GDPR",
+        "article": "6(1)(e)",
+        "name": "Inherits the basis of the source entries",
+        "ph_dpa": "as the operator's mandate dictates"
+      },
+      "evidence": ["crates/indexer/src/lib.rs", "deploy/projection/README.md"],
+      "retention": "operator policy; drop and replay is safe",
+      "recipients": "the operator only"
+    }
+  ]
+}

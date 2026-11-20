@@ -41,3 +41,8 @@ Each processing activity must document:
 
 No KYC data, accounts, or marketing categories exist in this system. The
 generic rows above are the template default and do not describe DATU.
+
+Per-activity legal bases with article citations, evidence pointers and
+retention live in the machine-readable register at
+`compliance/legal-bases.json`; the public notice is `PRIVACY.md`. Both are
+checked in CI (`deploy/checks/legal-bases.py`).

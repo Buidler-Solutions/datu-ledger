@@ -1,0 +1,46 @@
+[
+  {
+    "id": "fa-1795174920512-1",
+    "finding_key": "GDPR-ART5-001",
+    "finding_rule_id": "GDPR-ART5-001",
+    "finding_title": "Lawfulness, Fairness, and Transparency",
+    "finding_file": "",
+    "finding_severity": "critical",
+    "finding_control_ids": [
+      "GDPR-ART5-001"
+    ],
+    "governance_record_id": "gov-1795171328891-1",
+    "governance_system_name": "DATU Ledger",
+    "assignee": "greenarmor",
+    "assignee_role": "Security Engineer",
+    "assigned_at": "2026-11-20T11:42:00.512Z",
+    "assigned_by": "greenarmor",
+    "status": "assigned",
+    "notes": "",
+    "resolution": null,
+    "created_at": "2026-11-20T11:42:00.512Z",
+    "updated_at": "2026-11-20T11:42:00.512Z"
+  },
+  {
+    "id": "fa-1795175032227-2",
+    "finding_key": "GDPR-ART5-001::0",
+    "finding_rule_id": "GDPR-ART5-001",
+    "finding_title": "Lawfulness, Fairness, and Transparency",
+    "finding_file": "",
+    "finding_severity": "critical",
+    "finding_control_ids": [
+      "GDPR-ART5-001"
+    ],
+    "governance_record_id": "gov-1795171328891-1",
+    "governance_system_name": "DATU Ledger",
+    "assignee": "greenarmor",
+    "assignee_role": "Security Engineer",
+    "assigned_at": "2026-11-20T11:43:52.227Z",
+    "assigned_by": "greenarmor",
+    "status": "assigned",
+    "notes": "",
+    "resolution": null,
+    "created_at": "2026-11-20T11:43:52.227Z",
+    "updated_at": "2026-11-20T11:43:52.227Z"
+  }
+]

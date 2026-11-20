@@ -2,6 +2,11 @@
 
 [![ci](https://github.com/greenarmor/datu-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/greenarmor/datu-ledger/actions/workflows/ci.yml)
 
+**Privacy:** the ledger is public and append-only. Read the
+[privacy notice](PRIVACY.md) and the
+[legal-basis register](compliance/legal-bases.json) before publishing
+personal data; `datu consent` lists everything a key has signed.
+
 **DATU** - **D**ecentralized **A**ccountable **T**rust **U**nion - is a tokenless,
 quantum-resistant accountability ledger: a distributed system for
 **accountability and transparency** where:

@@ -117,6 +117,16 @@ enum Commands {
         #[command(subcommand)]
         cmd: EnrollCmd,
     },
+    /// Consent register: every party-signed statement this key gave, from
+    /// enrollment to recovery, and how to withdraw consent
+    Consent {
+        /// Subject key (hex); default: this node's key
+        #[arg(long)]
+        subject: Option<String>,
+        /// Machine-readable list
+        #[arg(long)]
+        json: bool,
+    },
     /// Watch an identity chain: report new attestations, cosigner weight and
     /// revocations; exits 2 when the watched key itself is revoked
     Watch {
@@ -3213,6 +3223,69 @@ fn cmd_recover_approve(
     Ok(())
 }
 
+// ---- consent register ----
+
+/// `datu consent`: the statements a key signed, read back from the ledger.
+/// Consent in DATU is a signature on a specific document (enrollment,
+/// recovery, a party-signed record); this lists exactly those, so a data
+/// subject can see what they agreed to. Withdrawal is a statement too:
+/// revocation or a guardian recovery, never a silent edit.
+fn cmd_consent(data_dir: &Path, subject: Option<String>, json: bool) -> Result<(), String> {
+    let node = load_node_reader(data_dir)?;
+    let subject = match subject {
+        Some(key) => {
+            parse_id(&key)?;
+            key
+        }
+        None => node.identity.clone(),
+    };
+    let entries = s(node.store.all_entries())?;
+    let statements = datu_core::consent::consents_of(&entries, &subject);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "subject": subject,
+                "statements": statements,
+                "withdraw": {
+                    "attestation": "a trust root publishes an identity.revoke statement naming the attestation or the key",
+                    "recovery": "datu enroll recover replaces a lost key; the old key is revoked in the same act",
+                }
+            }))
+            .map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+    println!("consent statements for {}", short(&subject));
+    if statements.is_empty() {
+        println!("  none on this node: this key has not signed an enrollment, a recovery or a party-signed record here");
+    }
+    for statement in &statements {
+        let stamp = utc_stamp(statement.timestamp_ms);
+        let mut line = format!(
+            "  {stamp}  {}  role {}  by {}{}",
+            statement.kind,
+            statement.role,
+            short(&statement.by),
+            statement
+                .summary
+                .as_deref()
+                .map(|x| format!("  ({x})"))
+                .unwrap_or_default()
+        );
+        line.push_str(&format!("  id {}", short(&statement.entry)));
+        println!("{line}");
+    }
+    println!();
+    println!(
+        "withdrawing: consent is withdrawn, not erased - a trust root publishes an identity.revoke"
+    );
+    println!(
+        "statement naming the attestation or the key, or a guardian recovery replaces the key."
+    );
+    Ok(())
+}
+
 // ---- identity watch ----
 
 /// "YYYY-MM-DD HH:MM:SSZ" from epoch milliseconds, UTC, no chrono dependency
@@ -5101,6 +5174,7 @@ fn run(cli: Cli) -> Result<(), String> {
             *once,
             *json,
         ),
+        Commands::Consent { subject, json } => cmd_consent(&cli.data_dir, subject.clone(), *json),
         Commands::Policy { cmd } => match cmd {
             PolicyCmd::Init {
                 attestors,

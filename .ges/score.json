@@ -44,7 +44,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 352,
-      "evaluated_at": "2026-11-20T11:05:32.824Z"
+      "evaluated_at": "2026-11-20T11:49:31.066Z"
     },
     "OWASP": {
       "framework": "OWASP",
@@ -88,7 +88,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 60,
-      "evaluated_at": "2026-11-20T11:05:32.825Z"
+      "evaluated_at": "2026-11-20T11:49:31.067Z"
     },
     "CIS": {
       "framework": "CIS",
@@ -132,7 +132,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 44,
-      "evaluated_at": "2026-11-20T11:05:32.825Z"
+      "evaluated_at": "2026-11-20T11:49:31.067Z"
     },
     "NIST": {
       "framework": "NIST",
@@ -176,7 +176,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 164,
-      "evaluated_at": "2026-11-20T11:05:32.825Z"
+      "evaluated_at": "2026-11-20T11:49:31.067Z"
     },
     "PRIVACY-CORE": {
       "framework": "PRIVACY-CORE",
@@ -220,7 +220,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 295,
-      "evaluated_at": "2026-11-20T11:05:32.825Z"
+      "evaluated_at": "2026-11-20T11:49:31.067Z"
     },
     "CIS-DOCKER": {
       "framework": "CIS-DOCKER",
@@ -264,7 +264,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 58,
-      "evaluated_at": "2026-11-20T11:05:32.825Z"
+      "evaluated_at": "2026-11-20T11:49:31.067Z"
     },
     "CIS-K8S": {
       "framework": "CIS-K8S",
@@ -308,7 +308,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 87,
-      "evaluated_at": "2026-11-20T11:05:32.825Z"
+      "evaluated_at": "2026-11-20T11:49:31.067Z"
     },
     "ISO27001": {
       "framework": "ISO27001",
@@ -352,7 +352,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 82,
-      "evaluated_at": "2026-11-20T11:05:32.825Z"
+      "evaluated_at": "2026-11-20T11:49:31.067Z"
     },
     "ISO27701": {
       "framework": "ISO27701",
@@ -396,7 +396,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 92,
-      "evaluated_at": "2026-11-20T11:05:32.825Z"
+      "evaluated_at": "2026-11-20T11:49:31.067Z"
     },
     "DPA-PH": {
       "framework": "DPA-PH",
@@ -440,8 +440,8 @@
       },
       "critical_failures": 0,
       "max_possible_score": 82,
-      "evaluated_at": "2026-11-20T11:05:32.825Z"
+      "evaluated_at": "2026-11-20T11:49:31.067Z"
     }
   },
-  "evaluated_at": "2026-11-20T11:05:32.825Z"
+  "evaluated_at": "2026-11-20T11:49:31.068Z"
 }

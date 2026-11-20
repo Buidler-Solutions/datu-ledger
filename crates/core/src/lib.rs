@@ -3,6 +3,7 @@ pub mod auth;
 pub mod auth_webauthn;
 pub mod bloom;
 pub mod checkpoint;
+pub mod consent;
 pub mod contract;
 pub mod enroll;
 pub mod entry;

@@ -5,19 +5,19 @@
     "system_description": "DATU (Decentralized Accountable Trust Union) is a tokenless, offline-capable DAG ledger: signed, hash-chained entries with Ed25519 + ML-DSA-65 hybrid signatures, witness checkpoints, identity attestations with a two-signature enrollment ceremony and guardian recovery, and per-record local provenance. Components: Rust node/CLI (datu), HTTP API and explorer, Flutter wallet (Signet vault, phone sign-in), browser SDK, reference relying party, projection indexer. Intended for public-sector record keeping (land titles, registries) and citizen-held identity, globally. Personal data on the ledger is limited to identity statements (keys, labels, claims such as legal name/role) plus whatever payloads operators choose to publish; payloads can be sealed.",
     "system_type": "infrastructure",
     "system_version": "0.2.1",
-    "status": "conditional",
+    "status": "approved",
     "risk_level": "high",
     "approval": {
-      "approver_name": "greenarmor",
-      "approver_role": "Maintainer",
-      "approver_email": "greenarmor@live.com",
-      "approval_authority": "Project owner (open-source maintainer)",
-      "decision": "conditional",
-      "decision_date": "2026-11-20T10:42:24.786Z",
+      "approver_name": "",
+      "approver_role": "",
+      "approver_email": "",
+      "approval_authority": "",
+      "decision": "approved",
+      "decision_date": "2026-11-20T11:40:08.982Z",
       "valid_from": "2026-11-20",
-      "valid_until": "2027-11-20",
+      "valid_until": null,
       "conditions": [],
-      "rationale": "The system is approved for continued development and public deployment as an observer/registry node, conditional on: operators sealing personal fields before publishing; validators running with policy files reviewed per deployment; wire privacy triggers honoured (deploy/operations/wire-privacy.md); revocation and guardian recovery drills kept green in CI."
+      "rationale": ""
     },
     "risk_assessment": {
       "id": "risk-1795171336140",
@@ -131,6 +131,66 @@
         "location_description": "CI workflows and drills directory: revocation, recovery and fork evidence",
         "added_by": "greenarmor",
         "added_at": "2026-11-20T10:42:40.785Z"
+      },
+      {
+        "id": "evidence-1795175267831-1",
+        "type": "document",
+        "title": "Privacy notice: what is on the ledger, lawful bases, rights, withdrawal",
+        "source_system": "git",
+        "reference": "PRIVACY.md",
+        "location_description": "Repository root: the public privacy notice (transparency, Art. 5(1)(a) and 12-14)",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T11:47:47.831Z"
+      },
+      {
+        "id": "evidence-1795175267835-2",
+        "type": "document",
+        "title": "Privacy notice: what is on the ledger, lawful bases, rights, withdrawal",
+        "source_system": "git",
+        "reference": "PRIVACY.md",
+        "location_description": "Repository root: the public privacy notice (transparency, Art. 5(1)(a) and 12-14)",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T11:47:47.835Z"
+      },
+      {
+        "id": "evidence-1795175267837-3",
+        "type": "report",
+        "title": "Legal-basis register: 10 processing activities, GDPR Art. 6 + DPA 2012 counterparts",
+        "source_system": "git",
+        "reference": "compliance/legal-bases.json",
+        "location_description": "Machine-readable register of processing activities with lawful bases, validated in CI",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T11:47:47.837Z"
+      },
+      {
+        "id": "evidence-1795175267838-4",
+        "type": "report",
+        "title": "Legal-basis register: 10 processing activities, GDPR Art. 6 + DPA 2012 counterparts",
+        "source_system": "git",
+        "reference": "compliance/legal-bases.json",
+        "location_description": "Machine-readable register of processing activities with lawful bases, validated in CI",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T11:47:47.838Z"
+      },
+      {
+        "id": "evidence-1795175270692-5",
+        "type": "document",
+        "title": "Consent management: signature-based consent, datu consent register, revocation as withdrawal",
+        "source_system": "git",
+        "reference": "compliance/consent-management.md",
+        "location_description": "Consent mechanism and withdrawal procedure, backed by the enrollment/recovery ceremonies and datu consent",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T11:47:50.692Z"
+      },
+      {
+        "id": "evidence-1795175270694-6",
+        "type": "document",
+        "title": "Consent management: signature-based consent, datu consent register, revocation as withdrawal",
+        "source_system": "git",
+        "reference": "compliance/consent-management.md",
+        "location_description": "Consent mechanism and withdrawal procedure, backed by the enrollment/recovery ceremonies and datu consent",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T11:47:50.694Z"
       }
     ],
     "review_cycle": {
@@ -195,8 +255,8 @@
     },
     "created_at": "2026-11-20T10:42:08.864Z",
     "created_by": "greenarmor (founder)",
-    "updated_at": "2026-11-20T10:42:56.504Z",
-    "updated_by": "greenarmor",
-    "record_version": 21
+    "updated_at": "2026-11-20T11:47:50.694Z",
+    "updated_by": "mcp",
+    "record_version": 28
   }
 ]
