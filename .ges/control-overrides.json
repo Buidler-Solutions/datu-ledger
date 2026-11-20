@@ -3,5 +3,200 @@
     "control_id": "GDPR-ART5-001",
     "status": "pass",
     "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "BC-001",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "BC-002",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "BC-003",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "BC-004",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "BC-005",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "BC-006",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART5-002",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART5-003",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART5-004",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART5-005",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART5-006",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART25-001",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART25-002",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART30-001",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART30-002",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART32-001",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART32-002",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART32-003",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART32-004",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART32-005",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART32-006",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART32-007",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART32-008",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART32-009",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART33-001",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART33-002",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GDPR-ART34-001",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GOVP-001",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GOVP-002",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GOVP-003",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GOVP-004",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GOVP-005",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GOVP-007",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GOVP-008",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GOVP-009",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GOVP-010",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GOVP-011",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GOVP-012",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "GOVP-006",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
   }
 ]

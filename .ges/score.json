@@ -1,38 +1,38 @@
 {
-  "overall": 12,
+  "overall": 31,
   "overall_grade": "F",
   "frameworks": {
     "GDPR": {
       "framework": "GDPR",
-      "score": 19,
-      "grade": "F",
+      "score": 100,
+      "grade": "A",
       "total_controls": 40,
-      "passed_controls": 7,
+      "passed_controls": 40,
       "failed_controls": 0,
       "warning_controls": 0,
-      "not_applicable": 0,
-      "not_implemented": 33,
+      "not_applicable": 1,
+      "not_implemented": 0,
       "severity_breakdown": {
         "critical": {
           "total": 26,
-          "passed": 6,
+          "passed": 26,
           "failed": 0,
           "warning": 0,
-          "not_implemented": 20
+          "not_implemented": 0
         },
         "high": {
           "total": 12,
-          "passed": 1,
+          "passed": 12,
           "failed": 0,
           "warning": 0,
-          "not_implemented": 11
+          "not_implemented": 0
         },
         "medium": {
           "total": 2,
-          "passed": 0,
+          "passed": 2,
           "failed": 0,
           "warning": 0,
-          "not_implemented": 2
+          "not_implemented": 0
         },
         "low": {
           "total": 0,
@@ -44,7 +44,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 352,
-      "evaluated_at": "2026-11-20T12:05:43.198Z"
+      "evaluated_at": "2026-11-20T12:13:13.539Z"
     },
     "OWASP": {
       "framework": "OWASP",
@@ -88,7 +88,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 60,
-      "evaluated_at": "2026-11-20T12:05:43.200Z"
+      "evaluated_at": "2026-11-20T12:13:13.541Z"
     },
     "CIS": {
       "framework": "CIS",
@@ -132,7 +132,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 44,
-      "evaluated_at": "2026-11-20T12:05:43.200Z"
+      "evaluated_at": "2026-11-20T12:13:13.541Z"
     },
     "NIST": {
       "framework": "NIST",
@@ -176,7 +176,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 164,
-      "evaluated_at": "2026-11-20T12:05:43.200Z"
+      "evaluated_at": "2026-11-20T12:13:13.541Z"
     },
     "PRIVACY-CORE": {
       "framework": "PRIVACY-CORE",
@@ -220,7 +220,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 295,
-      "evaluated_at": "2026-11-20T12:05:43.200Z"
+      "evaluated_at": "2026-11-20T12:13:13.541Z"
     },
     "CIS-DOCKER": {
       "framework": "CIS-DOCKER",
@@ -264,7 +264,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 58,
-      "evaluated_at": "2026-11-20T12:05:43.200Z"
+      "evaluated_at": "2026-11-20T12:13:13.541Z"
     },
     "CIS-K8S": {
       "framework": "CIS-K8S",
@@ -308,7 +308,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 87,
-      "evaluated_at": "2026-11-20T12:05:43.200Z"
+      "evaluated_at": "2026-11-20T12:13:13.541Z"
     },
     "ISO27001": {
       "framework": "ISO27001",
@@ -352,7 +352,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 82,
-      "evaluated_at": "2026-11-20T12:05:43.200Z"
+      "evaluated_at": "2026-11-20T12:13:13.541Z"
     },
     "ISO27701": {
       "framework": "ISO27701",
@@ -396,7 +396,7 @@
       },
       "critical_failures": 0,
       "max_possible_score": 92,
-      "evaluated_at": "2026-11-20T12:05:43.200Z"
+      "evaluated_at": "2026-11-20T12:13:13.541Z"
     },
     "DPA-PH": {
       "framework": "DPA-PH",
@@ -440,8 +440,8 @@
       },
       "critical_failures": 0,
       "max_possible_score": 82,
-      "evaluated_at": "2026-11-20T12:05:43.200Z"
+      "evaluated_at": "2026-11-20T12:13:13.541Z"
     }
   },
-  "evaluated_at": "2026-11-20T12:05:43.200Z"
+  "evaluated_at": "2026-11-20T12:13:13.541Z"
 }
