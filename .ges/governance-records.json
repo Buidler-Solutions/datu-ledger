@@ -1,0 +1,202 @@
+[
+  {
+    "id": "gov-1795171328891-1",
+    "system_name": "DATU Ledger",
+    "system_description": "DATU (Decentralized Accountable Trust Union) is a tokenless, offline-capable DAG ledger: signed, hash-chained entries with Ed25519 + ML-DSA-65 hybrid signatures, witness checkpoints, identity attestations with a two-signature enrollment ceremony and guardian recovery, and per-record local provenance. Components: Rust node/CLI (datu), HTTP API and explorer, Flutter wallet (Signet vault, phone sign-in), browser SDK, reference relying party, projection indexer. Intended for public-sector record keeping (land titles, registries) and citizen-held identity, globally. Personal data on the ledger is limited to identity statements (keys, labels, claims such as legal name/role) plus whatever payloads operators choose to publish; payloads can be sealed.",
+    "system_type": "infrastructure",
+    "system_version": "0.2.1",
+    "status": "conditional",
+    "risk_level": "high",
+    "approval": {
+      "approver_name": "greenarmor",
+      "approver_role": "Maintainer",
+      "approver_email": "greenarmor@live.com",
+      "approval_authority": "Project owner (open-source maintainer)",
+      "decision": "conditional",
+      "decision_date": "2026-11-20T10:42:24.786Z",
+      "valid_from": "2026-11-20",
+      "valid_until": "2027-11-20",
+      "conditions": [],
+      "rationale": "The system is approved for continued development and public deployment as an observer/registry node, conditional on: operators sealing personal fields before publishing; validators running with policy files reviewed per deployment; wire privacy triggers honoured (deploy/operations/wire-privacy.md); revocation and guardian recovery drills kept green in CI."
+    },
+    "risk_assessment": {
+      "id": "risk-1795171336140",
+      "assessor": "GESF compliance audit + project threat model review",
+      "assessment_date": "2026-11-20T10:42:16.140Z",
+      "methodology": "NIST RMF + ISO 27005 style walkthrough, documented in .dev-logs/design/production-readiness.md",
+      "risk_score": "7.5/10",
+      "identified_risks": [
+        "Ledger data is public by design (personal fields must be sealed); key compromise requires revocation and recovery ceremonies; validator admission policy misconfiguration; wire transport is plaintext TCP today (documented decision with triggers); impostor apps/sites must be countered with attestation and pinning; denial of service on the HTTP surface (bounded by rate limits); regulator obligations for personal claims (GDPR/DPA-PH)"
+      ],
+      "residual_risk": "medium: public-by-default payloads and plaintext transport remain operator decisions documented in deploy/operations/wire-privacy.md",
+      "mitigation_measures": [
+        "Hybrid Ed25519 + ML-DSA-65 signatures; append-only revocation as statements; guardian recovery with quorum; sealed fields (deferred delivery supported); HTTP admission limits and per-IP quotas; witness checkpoints and fork evidence; reproducibility",
+        "SBOM and signed releases; GESF audit + CI gates"
+      ],
+      "evidence": []
+    },
+    "policy_basis": {
+      "policy_id": "DATU-PRIV-001",
+      "policy_name": "DATU privacy and security baseline (GDPR + PH DPA + privacy-core)",
+      "version": "1.0",
+      "clauses": [
+        "Art. 5 principles",
+        "Art. 6 lawfulness",
+        "Art. 17 erasure vs append-only design",
+        "Art. 25 data protection by design",
+        "Art. 30 records of processing",
+        "Art. 32 security of processing"
+      ],
+      "standard": "GDPR",
+      "evidence": []
+    },
+    "committee": null,
+    "evidence": [
+      {
+        "id": "evidence-1795171357805-1",
+        "type": "document",
+        "title": "Incident runbooks (key compromise, disk full, fork, doxxed record)",
+        "source_system": "git",
+        "reference": "deploy/operations/incident-runbooks.md",
+        "location_description": "Repository docs and CI: runbooks, drills and the readiness matrix",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T10:42:37.806Z"
+      },
+      {
+        "id": "evidence-1795171357813-2",
+        "type": "document",
+        "title": "Incident runbooks (key compromise, disk full, fork, doxxed record)",
+        "source_system": "git",
+        "reference": "deploy/operations/incident-runbooks.md",
+        "location_description": "Repository docs and CI: runbooks, drills and the readiness matrix",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T10:42:37.813Z"
+      },
+      {
+        "id": "evidence-1795171357823-3",
+        "type": "document",
+        "title": "Wire privacy: plaintext-today decision with explicit triggers",
+        "source_system": "git",
+        "reference": "deploy/operations/wire-privacy.md",
+        "location_description": "Repository: transport privacy decision and triggers",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T10:42:37.823Z"
+      },
+      {
+        "id": "evidence-1795171357827-4",
+        "type": "document",
+        "title": "Wire privacy: plaintext-today decision with explicit triggers",
+        "source_system": "git",
+        "reference": "deploy/operations/wire-privacy.md",
+        "location_description": "Repository: transport privacy decision and triggers",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T10:42:37.827Z"
+      },
+      {
+        "id": "evidence-1795171360779-5",
+        "type": "document",
+        "title": "Release signing, reproducibility and SBOM gates",
+        "source_system": "git",
+        "reference": "deploy/operations/release-signing.md",
+        "location_description": "Repository: signed release procedure and supply-chain gates",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T10:42:40.779Z"
+      },
+      {
+        "id": "evidence-1795171360781-6",
+        "type": "document",
+        "title": "Release signing, reproducibility and SBOM gates",
+        "source_system": "git",
+        "reference": "deploy/operations/release-signing.md",
+        "location_description": "Repository: signed release procedure and supply-chain gates",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T10:42:40.781Z"
+      },
+      {
+        "id": "evidence-1795171360783-7",
+        "type": "report",
+        "title": "CI drills: backup/restore, crash, soak, fork, key rotation, ghost enrollment, watch, guardian recovery",
+        "source_system": "git",
+        "reference": "deploy/drills/",
+        "location_description": "CI workflows and drills directory: revocation, recovery and fork evidence",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T10:42:40.783Z"
+      },
+      {
+        "id": "evidence-1795171360785-8",
+        "type": "report",
+        "title": "CI drills: backup/restore, crash, soak, fork, key rotation, ghost enrollment, watch, guardian recovery",
+        "source_system": "git",
+        "reference": "deploy/drills/",
+        "location_description": "CI workflows and drills directory: revocation, recovery and fork evidence",
+        "added_by": "greenarmor",
+        "added_at": "2026-11-20T10:42:40.785Z"
+      }
+    ],
+    "review_cycle": {
+      "frequency": "quarterly",
+      "last_review": "2026-11-20",
+      "next_review": "2027-02-20",
+      "review_history": []
+    },
+    "data_inventory": {
+      "personal_data_categories": [
+        "Ed25519 and ML-DSA-65 public keys (pseudonymous identifiers)",
+        "labels and claims in identity.attest statements (legal name",
+        "role)",
+        "operator-published payloads (may include sealed personal fields)",
+        "IP addresses in transient HTTP logs"
+      ],
+      "processing_purposes": [
+        "identity attestation and verification",
+        "record keeping with auditability",
+        "sign-in (SignetAuth)",
+        "consent ceremonies (enrollment",
+        "guardian recovery)"
+      ],
+      "data_subjects": [
+        "citizens holding keys",
+        "registry and institution staff",
+        "wallet users",
+        "attestors and cosigners",
+        "guardians"
+      ],
+      "cross_border_transfers": [
+        "Global by design: the ledger is public and any node may mirror it; operators must assess their own transfers per GDPR Ch. V / DPA-PH"
+      ],
+      "retention_period": "Append-only: statements persist while mirrors hold them; erasure is handled by revocation and by not publishing personal payloads (seal instead). Local provenance notes are never synced or served."
+    },
+    "compliance": {
+      "frameworks": [
+        "GDPR",
+        "OWASP",
+        "ISO27001",
+        "ISO27701",
+        "DPA-PH"
+      ],
+      "controls_satisfied": [
+        "GDPR-ART30-001",
+        "GDPR-ART32-002",
+        "GDPR-ART25-001",
+        "OWASP-ASVS-005",
+        "GOVP-001"
+      ],
+      "control_pack_ids": [
+        "gdpr",
+        "privacy-core",
+        "ph-dpa",
+        "owasp",
+        "iso27001",
+        "iso27701",
+        "blockchain",
+        "governance",
+        "cis-docker"
+      ]
+    },
+    "created_at": "2026-11-20T10:42:08.864Z",
+    "created_by": "greenarmor (founder)",
+    "updated_at": "2026-11-20T10:42:56.504Z",
+    "updated_by": "greenarmor",
+    "record_version": 21
+  }
+]

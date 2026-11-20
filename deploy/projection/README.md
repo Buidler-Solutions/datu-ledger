@@ -16,7 +16,7 @@ inside the container:
 
 ```bash
 docker compose -f deploy/projection/docker-compose.yml exec indexer \
-  datu-indexer --db-url postgres://datu:$PG_PASSWORD@db:5432/datu --status
+  datu-indexer --db-url "$DATU_DB_URL" --status
 ```
 
 For a bare-metal host, use `datu-indexer.service` (a `systemd --user` unit)

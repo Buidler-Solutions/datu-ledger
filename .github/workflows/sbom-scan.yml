@@ -1,0 +1,43 @@
+name: SBOM Gate (Syft + Grype)
+
+# Filesystem SBOM plus vulnerability scan. The SBOM is kept as an artifact;
+# Grype reports at high severity without blocking, because the Rust/Node
+# advisory picture is already a blocking gate in ci.yml (cargo audit +
+# SPDX SBOM with denied licenses).
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  sbom:
+    name: Filesystem SBOM (Syft + Grype)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom-filesystem.json
+          fail-build: false
+          artifact-name: sbom-filesystem
+
+      - name: Scan SBOM for vulnerabilities with Grype
+        id: grype
+        uses: anchore/scan-action@v6
+        with:
+          sbom: sbom-filesystem.json
+          fail-build: false
+          severity-cutoff: high
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.grype.outputs.sarif }}

@@ -74,7 +74,7 @@ def main():
             try:
                 entry_id = publish(args, row["namespace"], row["payload"])
                 conn.execute(
-                    "UPDATE datu_outbox SET state='signed', entry_id=?, updated_at_ms=?,"
+                    "UPDATE datu_outbox SET state='signed', entry_id=?, updated_at=?,"
                     " last_error=NULL WHERE id=?",
                     (entry_id, int(time.time() * 1000), row["id"]),
                 )
@@ -85,7 +85,7 @@ def main():
                 state = "failed" if attempts >= args.max_attempts else "pending"
                 conn.execute(
                     "UPDATE datu_outbox SET state=?, attempts=?, last_error=?,"
-                    " updated_at_ms=? WHERE id=?",
+                    " updated_at=? WHERE id=?",
                     (state, attempts, str(e)[:300], int(time.time() * 1000), row["id"]),
                 )
                 conn.commit()

@@ -1,0 +1,48 @@
+name: Compliance Gate (GESF)
+
+# Runs the committed GESF configuration against the tree: the packs and the
+# governance record live in .ges/ and are versioned with the code, so this
+# gate audits what reviewers approved - it never re-initializes or rewrites
+# project state, and it never commits.
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  compliance:
+    name: GESF compliance audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install GESF
+        run: npm install -g @greenarmor/ges@1.6.9
+
+      - name: Validate configuration
+        run: ges validate
+
+      - name: Compliance audit (fails on findings)
+        run: ges audit --ci
+
+      - name: Compliance score
+        run: ges score
+
+      - name: Upload audit + score
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gesf-audit
+          path: |
+            .ges/last-audit.json
+            .ges/score.json
+          if-no-files-found: ignore

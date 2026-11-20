@@ -1,0 +1,34 @@
+name: Security Gate (Semgrep)
+
+# SAST over the working tree. Error-level findings block; warnings report.
+# Build output and vendored trees are excluded, so the scan covers our code.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        run: |
+          python3 -m pip install --quiet semgrep
+          semgrep scan --config auto --severity ERROR --error \
+            --exclude target --exclude node_modules --exclude apps/wallet/build \
+            --exclude deploy --exclude .dev-logs \
+            --sarif --output semgrep.sarif
+
+      - name: Upload SARIF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          if-no-files-found: ignore

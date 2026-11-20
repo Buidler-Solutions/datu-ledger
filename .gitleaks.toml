@@ -1,0 +1,17 @@
+# Gitleaks configuration: default rules, plus one documented allowlist for
+# the throwaway service-container passwords that briefly existed in CI
+# history (job-local postgres/mysql containers, never real credentials).
+# The current tree carries no credentials; see the SECRETS-001 remediation
+# in the GESF compliance record.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Throwaway CI service-container passwords in history"
+regexTarget = "match"
+regexes = [
+  '''(?i)(postgres|mysql)://(postgres|root):secret@''',
+]
+paths = [
+  '''.github/workflows/ci\.yml''',
+]

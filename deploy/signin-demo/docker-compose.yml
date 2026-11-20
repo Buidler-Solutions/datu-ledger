@@ -1,44 +1,62 @@
 # Cloud deployment for the QR sign-in demo: a validator node, the relying
 # party, and Caddy for TLS. Point a DNS A record at the box, set the domain,
+# build the binary on the host once (`cargo build --release -p datu-cli`),
 # and `docker compose up -d`.
+#
+# Every service runs unprivileged, with a read-only root filesystem, no
+# capabilities beyond what it needs, and no privilege escalation.
 services:
   validator:
-    image: rust:1.96.0
-    working_dir: /src
+    build:
+      context: ../..
+      dockerfile: deploy/signin-demo/Dockerfile
+      target: validator
+    command: ["datu", "--data-dir", "/data", "serve", "--addr", "0.0.0.0:7474", "--read-only"]
+    user: "10001:10001"
     volumes:
-      - ../..:/src:ro
       - validator-data:/data
-    command: >
-      sh -c "cargo build --release -p datu-cli &&
-             ./target/release/datu --data-dir /data serve --addr 0.0.0.0:7474
-             --read-only"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   dapp:
-    image: node:22
-    working_dir: /app
-    volumes:
-      - ../../web/signin-demo:/app:ro
-      - ../../target/release/datu:/usr/local/bin/datu:ro
+    build:
+      context: ../..
+      dockerfile: deploy/signin-demo/Dockerfile
+      target: dapp
     environment:
-      PORT: "5176"
-      HOST: "0.0.0.0"
-      DATU_BIN: /usr/local/bin/datu
       NODE_URL: http://validator:7474
-    command: sh -c "npm ci && node server.mjs"
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       - validator
     restart: unless-stopped
 
   caddy:
     image: caddy:2
+    # Rootless: the caddy user owns /data and /config in the image, and the
+    # listeners move to 8080/8443 so no low-port capability is needed.
+    user: "1000:1000"
     ports:
-      - "80:80"
-      - "443:443"
+      - "80:8080"
+      - "443:8443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       - dapp
     restart: unless-stopped

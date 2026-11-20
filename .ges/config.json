@@ -1,0 +1,60 @@
+{
+  "project_name": "DATU Ledger",
+  "project_type": "blockchain",
+  "frameworks": [
+    "GDPR",
+    "OWASP",
+    "CIS",
+    "NIST"
+  ],
+  "country": "PH",
+  "requirements": {
+    "encryption": {
+      "required": true
+    },
+    "mfa": {
+      "required": true
+    },
+    "audit_logs": {
+      "required": true
+    },
+    "backups": {
+      "required": true
+    },
+    "retention_policy": {
+      "required": true
+    },
+    "vulnerability_scanning": {
+      "required": true
+    },
+    "authentication": {
+      "required": true
+    },
+    "authorization": {
+      "required": true
+    },
+    "secrets_management": {
+      "required": true
+    },
+    "logging": {
+      "required": true
+    },
+    "monitoring": {
+      "required": true
+    },
+    "data_classification": {
+      "required": true
+    },
+    "disaster_recovery": {
+      "required": true
+    },
+    "incident_response": {
+      "required": true
+    },
+    "privacy_controls": {
+      "required": true
+    }
+  },
+  "created_at": "2026-11-20T10:34:56.978Z",
+  "version": "1.6.9"
+}

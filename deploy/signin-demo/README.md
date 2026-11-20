@@ -7,17 +7,18 @@ party (`web/signin-demo`), and Caddy for automatic TLS.
 
 ```bash
 git clone https://github.com/greenarmor/datu-ledger && cd datu-ledger
-cargo build --release -p datu-cli        # once, the compose file mounts the binary
 # point demo.example.com at this box, then:
 cd deploy/signin-demo
 sed -i 's/demo.example.com/your.domain/' Caddyfile
-docker compose up -d
+docker compose up -d --build
 ```
 
-First build of the validator container compiles the workspace inside
-`rust:1.96.0`; if that is too slow for your taste, build the binary on the
-host (as above) and replace the validator service with the same `node:22`
-image pattern the demo uses.
+The build is a two-target Dockerfile: the workspace compiles once in a
+`rust` stage (cargo target and registry are cached as BuildKit mounts), and
+both runtime images take the binary from there. Every service runs
+unprivileged with a read-only root filesystem, `cap_drop: ALL`, and
+`no-new-privileges`; Caddy runs as its own user on ports 8080/8443, mapped
+to 80/443, so TLS needs no low-port capability.
 
 ## What the demo exercises once deployed
 

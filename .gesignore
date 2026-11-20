@@ -1,0 +1,30 @@
+# Build output and vendored trees: not source, far too large to scan.
+target/
+.dart_tool/
+.gradle/
+.next/
+dist/
+coverage/
+*.min.js
+*.spdx.json
+sbom*.json
+*.png
+*.jpg
+*.pdf
+*site/*
+.env
+.env.*
+!.env.example
+
+# Compose files: the GESF compose scanner reads top-level named volumes as
+# services and cannot express "service" vs "volume", so it reports false
+# positives for datu-data/pg-data/caddy-data etc. The real enforcement is
+# deploy/checks/compose-hardening.py (every service: explicit non-root user,
+# read_only rootfs, cap_drop ALL, no-new-privileges), wired into CI.
+deploy/*/docker-compose*.yml
+
+# A plain SQL DDL file cannot satisfy the ORM-shaped column regex the DB
+# scanner uses (it wants `created_at:`/`created_at(`). The schema does carry
+# created_at, updated_at, created_by, updated_by and deleted_at; see the
+# table definition. Recommendation recorded for the upstream rule.
+examples/datu-outbox/schema.sql

@@ -1,0 +1,447 @@
+{
+  "overall": 11,
+  "overall_grade": "F",
+  "frameworks": {
+    "GDPR": {
+      "framework": "GDPR",
+      "score": 16,
+      "grade": "F",
+      "total_controls": 40,
+      "passed_controls": 6,
+      "failed_controls": 0,
+      "warning_controls": 0,
+      "not_applicable": 0,
+      "not_implemented": 34,
+      "severity_breakdown": {
+        "critical": {
+          "total": 26,
+          "passed": 5,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 21
+        },
+        "high": {
+          "total": 12,
+          "passed": 1,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 11
+        },
+        "medium": {
+          "total": 2,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 2
+        },
+        "low": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        }
+      },
+      "critical_failures": 0,
+      "max_possible_score": 352,
+      "evaluated_at": "2026-11-20T11:05:32.824Z"
+    },
+    "OWASP": {
+      "framework": "OWASP",
+      "score": 50,
+      "grade": "D",
+      "total_controls": 6,
+      "passed_controls": 3,
+      "failed_controls": 0,
+      "warning_controls": 0,
+      "not_applicable": 0,
+      "not_implemented": 3,
+      "severity_breakdown": {
+        "critical": {
+          "total": 6,
+          "passed": 3,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 3
+        },
+        "high": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        },
+        "medium": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        },
+        "low": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        }
+      },
+      "critical_failures": 0,
+      "max_possible_score": 60,
+      "evaluated_at": "2026-11-20T11:05:32.825Z"
+    },
+    "CIS": {
+      "framework": "CIS",
+      "score": 0,
+      "grade": "F",
+      "total_controls": 5,
+      "passed_controls": 0,
+      "failed_controls": 0,
+      "warning_controls": 0,
+      "not_applicable": 0,
+      "not_implemented": 5,
+      "severity_breakdown": {
+        "critical": {
+          "total": 3,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 3
+        },
+        "high": {
+          "total": 2,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 2
+        },
+        "medium": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        },
+        "low": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        }
+      },
+      "critical_failures": 0,
+      "max_possible_score": 44,
+      "evaluated_at": "2026-11-20T11:05:32.825Z"
+    },
+    "NIST": {
+      "framework": "NIST",
+      "score": 0,
+      "grade": "F",
+      "total_controls": 23,
+      "passed_controls": 0,
+      "failed_controls": 0,
+      "warning_controls": 0,
+      "not_applicable": 0,
+      "not_implemented": 23,
+      "severity_breakdown": {
+        "critical": {
+          "total": 8,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 8
+        },
+        "high": {
+          "total": 8,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 8
+        },
+        "medium": {
+          "total": 7,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 7
+        },
+        "low": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        }
+      },
+      "critical_failures": 0,
+      "max_possible_score": 164,
+      "evaluated_at": "2026-11-20T11:05:32.825Z"
+    },
+    "PRIVACY-CORE": {
+      "framework": "PRIVACY-CORE",
+      "score": 0,
+      "grade": "F",
+      "total_controls": 40,
+      "passed_controls": 0,
+      "failed_controls": 0,
+      "warning_controls": 0,
+      "not_applicable": 0,
+      "not_implemented": 40,
+      "severity_breakdown": {
+        "critical": {
+          "total": 13,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 13
+        },
+        "high": {
+          "total": 20,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 20
+        },
+        "medium": {
+          "total": 6,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 6
+        },
+        "low": {
+          "total": 1,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 1
+        }
+      },
+      "critical_failures": 0,
+      "max_possible_score": 295,
+      "evaluated_at": "2026-11-20T11:05:32.825Z"
+    },
+    "CIS-DOCKER": {
+      "framework": "CIS-DOCKER",
+      "score": 0,
+      "grade": "F",
+      "total_controls": 10,
+      "passed_controls": 0,
+      "failed_controls": 0,
+      "warning_controls": 0,
+      "not_applicable": 0,
+      "not_implemented": 10,
+      "severity_breakdown": {
+        "critical": {
+          "total": 2,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 2
+        },
+        "high": {
+          "total": 3,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 3
+        },
+        "medium": {
+          "total": 4,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 4
+        },
+        "low": {
+          "total": 1,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 1
+        }
+      },
+      "critical_failures": 0,
+      "max_possible_score": 58,
+      "evaluated_at": "2026-11-20T11:05:32.825Z"
+    },
+    "CIS-K8S": {
+      "framework": "CIS-K8S",
+      "score": 20,
+      "grade": "F",
+      "total_controls": 12,
+      "passed_controls": 2,
+      "failed_controls": 0,
+      "warning_controls": 0,
+      "not_applicable": 0,
+      "not_implemented": 10,
+      "severity_breakdown": {
+        "critical": {
+          "total": 4,
+          "passed": 1,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 3
+        },
+        "high": {
+          "total": 5,
+          "passed": 1,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 4
+        },
+        "medium": {
+          "total": 3,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 3
+        },
+        "low": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        }
+      },
+      "critical_failures": 0,
+      "max_possible_score": 87,
+      "evaluated_at": "2026-11-20T11:05:32.825Z"
+    },
+    "ISO27001": {
+      "framework": "ISO27001",
+      "score": 67,
+      "grade": "C",
+      "total_controls": 10,
+      "passed_controls": 7,
+      "failed_controls": 0,
+      "warning_controls": 0,
+      "not_applicable": 0,
+      "not_implemented": 3,
+      "severity_breakdown": {
+        "critical": {
+          "total": 4,
+          "passed": 2,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 2
+        },
+        "high": {
+          "total": 6,
+          "passed": 5,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 1
+        },
+        "medium": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        },
+        "low": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        }
+      },
+      "critical_failures": 0,
+      "max_possible_score": 82,
+      "evaluated_at": "2026-11-20T11:05:32.825Z"
+    },
+    "ISO27701": {
+      "framework": "ISO27701",
+      "score": 0,
+      "grade": "F",
+      "total_controls": 11,
+      "passed_controls": 0,
+      "failed_controls": 0,
+      "warning_controls": 0,
+      "not_applicable": 0,
+      "not_implemented": 11,
+      "severity_breakdown": {
+        "critical": {
+          "total": 5,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 5
+        },
+        "high": {
+          "total": 6,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 6
+        },
+        "medium": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        },
+        "low": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        }
+      },
+      "critical_failures": 0,
+      "max_possible_score": 92,
+      "evaluated_at": "2026-11-20T11:05:32.825Z"
+    },
+    "DPA-PH": {
+      "framework": "DPA-PH",
+      "score": 0,
+      "grade": "F",
+      "total_controls": 10,
+      "passed_controls": 0,
+      "failed_controls": 0,
+      "warning_controls": 0,
+      "not_applicable": 0,
+      "not_implemented": 10,
+      "severity_breakdown": {
+        "critical": {
+          "total": 4,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 4
+        },
+        "high": {
+          "total": 6,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 6
+        },
+        "medium": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        },
+        "low": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "warning": 0,
+          "not_implemented": 0
+        }
+      },
+      "critical_failures": 0,
+      "max_possible_score": 82,
+      "evaluated_at": "2026-11-20T11:05:32.825Z"
+    }
+  },
+  "evaluated_at": "2026-11-20T11:05:32.825Z"
+}

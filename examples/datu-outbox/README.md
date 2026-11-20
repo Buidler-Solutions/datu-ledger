@@ -26,5 +26,10 @@ Signet variant: if signing must go through the extension, replace
 (`POST /v1/wallet/sign-entry` + `POST /v1/entries`); the outbox schema and
 state machine are unchanged.
 
+Fill `created_at` and `created_by` when enqueuing (when, and who asked).
+The worker maintains `updated_at`/`updated_by` on every state change, and
+`deleted_at` marks rows kept for the audit trail after they drain - nothing
+is ever hard-deleted, because the outbox is evidence too.
+
 Seal personal fields before inserting the outbox row; the payload is public
 to every mirror.

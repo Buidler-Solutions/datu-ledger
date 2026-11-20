@@ -23,6 +23,15 @@ services:
       - datu-data:/data
     ports:
       - "${EXPLORER_PORT:-7474}:7474"
+    # Hardening: read-only rootfs, no capabilities, unprivileged uid (the
+    # image's datu user), and /tmp on tmpfs for transient files.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    user: "10001:10001"
     restart: unless-stopped
 
   indexer:
@@ -34,18 +43,28 @@ services:
       - --data-dir
       - /data/node
       - --db-url
-      - postgres://datu:${PG_PASSWORD:-change-me}@db:5432/datu
+      - "${DATU_DB_URL:?set DATU_DB_URL in .env (see .env.example)}"
       - --namespace
       - ${DATU_NAMESPACES:-gov.*}
       - --verify
       - signatures
       - --every
       - ${INDEX_EVERY:-5}
+    environment:
+      # The password travels in the environment, never in the URL.
+      DATU_DB_PASSWORD: ${PG_PASSWORD:-change-me}
     volumes:
       - datu-data:/data
     depends_on:
       db:
         condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    user: "10001:10001"
     restart: unless-stopped
 
   db:
@@ -54,6 +73,17 @@ services:
       POSTGRES_USER: datu
       POSTGRES_PASSWORD: ${PG_PASSWORD:-change-me}
       POSTGRES_DB: datu
+    # postgres:16-alpine's own postgres uid: the entrypoint runs as it
+    # directly, so no root step and no privilege drop at all. Verified with
+    # a read-only rootfs, tmpfs for /tmp and the socket dir, and no caps.
+    user: "70:70"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - pg-data:/var/lib/postgresql/data
     ports:

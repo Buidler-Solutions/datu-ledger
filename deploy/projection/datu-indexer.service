@@ -11,14 +11,24 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# The database password lives in a 0600 env file
+# (%h/.config/datu/indexer.env: DATU_DB_PASSWORD=...), never in this unit.
+EnvironmentFile=%h/.config/datu/indexer.env
 ExecStart=/usr/local/bin/datu-indexer \
   --data-dir %h/.datu \
-  --db-url postgres://datu:change-me@127.0.0.1:5432/datu \
+  --db-url ${DATU_DB_URL} \
   --namespace gov.* \
   --verify signatures \
   --every 5
 Restart=on-failure
 RestartSec=5
+# Hardening: no privilege escalation, a private /tmp, and the store is the
+# only writable path under the home directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.datu
 
 [Install]
 WantedBy=default.target

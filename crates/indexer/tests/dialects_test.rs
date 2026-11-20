@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 //! Live dialect tests. They run only when the matching DSN is provided:
 //!
-//!   DATU_TEST_PG_URL=postgres://user:pass@localhost/datu_test cargo test -p datu-indexer --features postgres
-//!   DATU_TEST_MYSQL_URL=mysql://user:pass@localhost/datu_test cargo test -p datu-indexer --features mysql
+//!   DATU_TEST_PG_URL=<postgres scheme>://user@localhost/datu_test cargo test -p datu-indexer --features postgres
+//!   DATU_TEST_MYSQL_URL=<mysql scheme>://user@localhost/datu_test cargo test -p datu-indexer --features mysql
 //!
 //! Without the variable they return immediately, so CI without databases and
 //! plain `cargo test` stay green.

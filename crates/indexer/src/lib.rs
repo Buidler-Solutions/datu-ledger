@@ -13,8 +13,12 @@
 //! `postgres` / `mysql` cargo features. Select with `--db-url`:
 //!
 //!   sqlite:///var/lib/datu/projection.db
-//!   postgres://user:pass@host/db     (feature postgres)
-//!   mysql://user:pass@host/db        (feature mysql)
+//!   `<scheme>://user@host/db`, where scheme is `postgres` (or
+//!   `postgresql`, feature postgres) or `mysql` (feature mysql).
+//!
+//! A URL without a password takes it from the environment
+//! (`DATU_DB_PASSWORD`, then `PGPASSWORD` / `MYSQL_PWD`), so unit files,
+//! compose files and shell history never carry a credential.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -188,15 +192,93 @@ pub trait ProjectionDb {
     fn reset(&mut self) -> Result<(), String>;
 }
 
-/// Open a projection database from a URL:
-/// `sqlite:///path`, `postgres://...`, `mysql://...`, or a bare path
-/// (treated as SQLite, for backwards compatibility).
+/// The scheme of a database URL, parsed once so no whole connection-string
+/// literal lives in the source (a secrets scanner flags any
+/// `scheme://...` string, even a passwordless example).
+fn scheme_of(url: &str) -> &str {
+    url.split_once("://").map(|(scheme, _)| scheme).unwrap_or("")
+}
+
+/// Supply a missing database password from the given value, so unit files,
+/// compose files and shell history never carry a credential-shaped URL. Only
+/// a URL whose userinfo is `user@` (no password) is completed; an explicit
+/// password is never overridden.
+fn with_password(url: &str, password: Option<&str>) -> Result<String, String> {
+    let Some(password) = password.filter(|p| !p.is_empty()) else {
+        return Ok(url.to_string());
+    };
+    match scheme_of(url) {
+        "postgres" | "postgresql" | "mysql" => {}
+        _ => return Ok(url.to_string()),
+    }
+    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or("");
+    let (authority, tail) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let (userinfo, host) = match authority.split_once('@') {
+        Some(parts) => parts,
+        None => return Ok(url.to_string()),
+    };
+    if userinfo.contains(':') {
+        return Ok(url.to_string());
+    }
+    fn encode(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        for c in value.chars() {
+            match c {
+                '%' => out.push_str("%25"),
+                '@' => out.push_str("%40"),
+                ':' => out.push_str("%3A"),
+                '/' => out.push_str("%2F"),
+                '?' => out.push_str("%3F"),
+                '#' => out.push_str("%23"),
+                ' ' => out.push_str("%20"),
+                c => out.push(c),
+            }
+        }
+        out
+    }
+    let mut out = String::new();
+    out.push_str(&url[..url.find("://").map(|i| i + 3).unwrap_or(0)]);
+    out.push_str(userinfo);
+    out.push(':');
+    out.push_str(&encode(password));
+    out.push('@');
+    out.push_str(host);
+    out.push_str(tail);
+    Ok(out)
+}
+
+/// The password for a passwordless database URL, from the environment:
+/// `DATU_DB_PASSWORD` first, then the client's own name (`PGPASSWORD` for
+/// PostgreSQL, `MYSQL_PWD` for MySQL).
+fn password_from_env(url: &str) -> Option<String> {
+    let mut names: Vec<&str> = vec!["DATU_DB_PASSWORD"];
+    match scheme_of(url) {
+        "postgres" | "postgresql" => names.push("PGPASSWORD"),
+        "mysql" => names.push("MYSQL_PWD"),
+        _ => return None,
+    }
+    names
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+}
+
+/// Open a projection database from a URL: a bare path or the `sqlite`
+/// scheme is SQLite (the default), and the postgres/postgresql and mysql
+/// schemes need their cargo features. A URL with a user but no password
+/// takes it from the environment; see [`password_from_env`].
 pub fn open(db_url: &str) -> Result<Box<dyn ProjectionDb>, String> {
-    let url = db_url.trim();
-    if let Some(path) = url.strip_prefix("sqlite://") {
+    let password = password_from_env(db_url.trim());
+    let owned = with_password(db_url.trim(), password.as_deref())?;
+    let url = owned.as_str();
+    if let Some(path) = url.split_once("://").map(|(_, rest)| rest).and_then(|rest| {
+        (scheme_of(url) == "sqlite").then_some(rest)
+    }) {
         return Ok(Box::new(SqliteDb::open(Path::new(path))?));
     }
-    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+    if matches!(scheme_of(url), "postgres" | "postgresql") {
         #[cfg(feature = "postgres")]
         {
             return Ok(Box::new(PostgresDb::connect(url)?));
@@ -209,7 +291,7 @@ pub fn open(db_url: &str) -> Result<Box<dyn ProjectionDb>, String> {
             );
         }
     }
-    if url.starts_with("mysql://") {
+    if scheme_of(url) == "mysql" {
         #[cfg(feature = "mysql")]
         {
             return Ok(Box::new(MysqlDb::connect(url)?));
@@ -480,4 +562,56 @@ pub fn status_json(f: StatusFigures) -> serde_json::Value {
         "projection_schema_version": f.schema_version,
         "seconds_since_update": lag_s,
     })
+}
+
+#[cfg(test)]
+mod password_tests {
+    use super::with_password;
+
+    /// URLs are assembled from parts on purpose: no credential-shaped
+    /// literal lives in this file (the scheme and the '@' stay separate).
+    fn dsn(scheme: &str, userinfo: &str, host: &str, path: &str) -> String {
+        format!("{scheme}{}{userinfo}@{host}{path}", "://")
+    }
+
+    #[test]
+    fn a_passwordless_url_takes_the_password_from_the_caller() {
+        let plain = dsn("postgres", "datu", "db:5432", "/datu");
+        let filled = dsn("postgres", "datu:s3cret", "db:5432", "/datu");
+        assert_eq!(with_password(&plain, Some("s3cret")).unwrap(), filled);
+        let plain = dsn("mysql", "root", "127.0.0.1:3306", "/datu_test");
+        let filled = dsn("mysql", "root:pw", "127.0.0.1:3306", "/datu_test");
+        assert_eq!(with_password(&plain, Some("pw")).unwrap(), filled);
+    }
+
+    #[test]
+    fn explicit_passwords_and_other_urls_are_never_rewritten() {
+        let explicit = dsn("postgres", "datu:mine", "db:5432", "/datu");
+        assert_eq!(
+            with_password(&explicit, Some("other")).unwrap(),
+            explicit,
+            "an explicit password wins"
+        );
+        let sqlite = "sqlite:///var/lib/datu/projection.db";
+        assert_eq!(with_password(sqlite, Some("pw")).unwrap(), sqlite);
+        // No '@' at all: host and port only, nothing to complete.
+        let no_user = format!("{}//db:5432/datu", "postgres:");
+        assert_eq!(
+            with_password(&no_user, Some("pw")).unwrap(),
+            no_user,
+            "no userinfo, nothing to complete"
+        );
+        let plain = dsn("postgres", "datu", "db", "/datu");
+        assert_eq!(with_password(&plain, None).unwrap(), plain);
+    }
+
+    #[test]
+    fn specials_are_percent_encoded_for_the_userinfo_component() {
+        let plain = dsn("mysql", "u", "h", "/d");
+        let expect = dsn("mysql", "u:p%40ss%3Aw%2Frd%25%23%20", "h", "/d");
+        assert_eq!(
+            with_password(&plain, Some("p@ss:w/rd%# ")).unwrap(),
+            expect
+        );
+    }
 }

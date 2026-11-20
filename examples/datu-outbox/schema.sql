@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS datu_outbox(
   state TEXT NOT NULL DEFAULT 'pending',   -- pending | signed | failed
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
-  created_at_ms INTEGER NOT NULL,
-  updated_at_ms INTEGER NOT NULL);
+  created_at INTEGER NOT NULL,     -- audit trail: when it entered the outbox
+  updated_at INTEGER NOT NULL,     -- last state change
+  created_by TEXT,                 -- actor who enqueued it (staff id, service)
+  updated_by TEXT,                 -- actor of the last state change
+  deleted_at INTEGER);             -- soft delete: drained rows stay auditable
 CREATE INDEX IF NOT EXISTS idx_outbox_state ON datu_outbox(state, id);

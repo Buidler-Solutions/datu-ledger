@@ -18,7 +18,7 @@ struct Cli {
     /// Not needed for --status.
     #[arg(long)]
     data_dir: Option<PathBuf>,
-    /// Projection database URL: sqlite:///path, postgres://..., mysql://...
+    /// Projection database URL: a sqlite, postgres or mysql scheme, or a bare path
     /// (a bare path is treated as SQLite).
     #[arg(long)]
     db_url: Option<String>,
@@ -70,7 +70,7 @@ fn resolve_db_url(cli: &Cli) -> Result<String, String> {
     if cli.status {
         return Err("--status needs --db-url (or --db)".into());
     }
-    Err("--db-url is required: sqlite:///path, postgres://..., mysql://...".into())
+    Err("--db-url is required: a sqlite, postgres or mysql scheme, or a bare path".into())
 }
 
 fn run(cli: Cli) -> Result<(), String> {

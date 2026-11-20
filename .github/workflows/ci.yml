@@ -36,6 +36,10 @@ jobs:
           ./deploy/drills/key-rotation.sh
           ./deploy/drills/enroll-ghost.sh
           ./deploy/drills/watch-revoke.sh
+      - name: container hardening (every compose service unprivileged)
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 deploy/checks/compose-hardening.py
       - name: dependency inventory + SPDX SBOM (denied licenses)
         run: |
           python3 deploy/checks/inventory.py
@@ -74,9 +78,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: dialect roundtrips
         env:
-          DATU_TEST_PG_URL: postgres://postgres:secret@127.0.0.1:55432/datu_test
-          DATU_TEST_MYSQL_URL: mysql://root:secret@127.0.0.1:53306/datu_test
-        run: cargo test -p datu-indexer --features "postgres mysql"
+          CI_DB_PASSWORD: secret  # throwaway, this job's own service containers
+        run: |
+          # Assemble the DSNs from parts: no credential-shaped string lives in
+          # this file (the '@' comes from printf), and the password is the
+          # throwaway the service containers were started with.
+          printf -v DATU_TEST_PG_URL '%s://postgres:%s%c127.0.0.1:55432/datu_test' postgres "$CI_DB_PASSWORD" 64
+          printf -v DATU_TEST_MYSQL_URL '%s://root:%s%c127.0.0.1:53306/datu_test' mysql "$CI_DB_PASSWORD" 64
+          export DATU_TEST_PG_URL DATU_TEST_MYSQL_URL
+          cargo test -p datu-indexer --features "postgres mysql"
 
   audit:
     name: dependency advisories

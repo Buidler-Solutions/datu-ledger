@@ -4,7 +4,7 @@ The indexer exposes Prometheus metrics when started with `--http`:
 
 ```bash
 datu-indexer --data-dir /var/lib/datu/node \
-  --db-url postgres://datu:secret@db:5432/datu \
+  --db-url "$DATU_DB_URL" \
   --every 5 --http 127.0.0.1:7491
 # /healthz  JSON status
 # /metrics  Prometheus text

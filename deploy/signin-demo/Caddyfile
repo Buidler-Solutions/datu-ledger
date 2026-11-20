@@ -1,4 +1,11 @@
-# Replace demo.example.com with your DNS name. Caddy provisions TLS on its own.
+# Caddy runs rootless in this stack and listens on unprivileged ports; the
+# compose file maps 80/443 to them. Replace demo.example.com with your DNS
+# name; TLS is provisioned automatically.
+{
+	http_port 8080
+	https_port 8443
+}
+
 demo.example.com {
-    reverse_proxy dapp:5176
+	reverse_proxy dapp:5176
 }

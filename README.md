@@ -482,8 +482,8 @@ cargo build --release -p datu-indexer                        # SQLite (default)
 cargo build --release -p datu-indexer --features postgres     # + PostgreSQL
 cargo build --release -p datu-indexer --features mysql        # + MySQL
 
-./target/release/datu-indexer --data-dir /var/lib/datu/node   --db-url postgres://datu:secret@db.internal:5432/datu   --namespace 'gov.*' --every 5
-./target/release/datu-indexer --db-url postgres://datu:secret@db.internal:5432/datu --status
+./target/release/datu-indexer --data-dir /var/lib/datu/node   --db-url $DATU_DB_URL   --namespace 'gov.*' --every 5
+./target/release/datu-indexer --db-url $DATU_DB_URL --status
 ```
 
 Deployment: `deploy/projection/` (compose: node + indexer + PostgreSQL, plus a
