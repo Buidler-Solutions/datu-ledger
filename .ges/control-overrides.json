@@ -198,5 +198,280 @@
     "control_id": "GOVP-006",
     "status": "not-applicable",
     "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "OWASP-ASVS-001",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "OWASP-ASVS-002",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "OWASP-ASVS-003",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "OWASP-ASVS-004",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "OWASP-ASVS-005",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "OWASP-ASVS-006",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-002",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-003",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-004",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-005",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-GV-OC",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-GV-RM",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-GV-RR",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-GV-PO",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-GV-OV",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-GV-SC",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-ID-AM",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-ID-RA",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-ID-IM",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-PR-AA",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-PR-DS",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-PR-PS",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-PR-IR",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-DE-CM",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-DE-AE",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-RS-MA",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-RS-AN",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-RS-CO",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-RS-MI",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-RS-IM",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-RC-RP",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "NIST-RC-CO",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27001-A5",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27001-A6",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27001-A8",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27001-A9",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27001-A10",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27001-A12",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27001-A14",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27001-A16",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27001-A17",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27001-A18",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27701-5.2",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27701-5.3",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27701-5.4",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27701-6.2",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27701-6.4",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27701-6.5",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27701-6.7",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27701-6.9",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27701-7.3",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "ISO27701-8.4",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-001",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "NIST-PR-AT",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "ISO27701-7.5",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
   }
 ]
