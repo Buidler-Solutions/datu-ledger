@@ -2,7 +2,7 @@
 #   target validator - the datu node (serve --read-only)
 #   target dapp      - the relying-party server + the datu verifier binary
 # Build context is the repository root. Every runtime stage is unprivileged.
-FROM rust:1.90-bookworm AS build
+FROM rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS build
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/src/target \
@@ -11,7 +11,7 @@ RUN --mount=type=cache,target=/src/target \
  && mkdir -p /out \
  && cp target/release/datu /out/datu
 
-FROM debian:bookworm-slim AS validator
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS validator
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
@@ -25,12 +25,12 @@ EXPOSE 7474
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD ["datu", "--data-dir", "/data", "status"]
 
-FROM node:22-bookworm-slim AS dapp-deps
+FROM node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS dapp-deps
 WORKDIR /app
 COPY web/signin-demo/package.json web/signin-demo/package-lock.json ./
 RUN npm ci --omit=dev
 
-FROM node:22-bookworm-slim AS dapp
+FROM node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS dapp
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*

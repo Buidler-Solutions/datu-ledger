@@ -32,6 +32,9 @@ services:
     security_opt:
       - no-new-privileges:true
     user: "10001:10001"
+    mem_limit: 512m
+    cpus: "1.0"
+    privileged: false
     restart: unless-stopped
 
   indexer:
@@ -65,10 +68,13 @@ services:
     security_opt:
       - no-new-privileges:true
     user: "10001:10001"
+    mem_limit: 512m
+    cpus: "0.5"
+    privileged: false
     restart: unless-stopped
 
   db:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:1d5b02d3a9941fbd52437db4107f8c52d6297dac553ca1e5c299ebb3756b4857
     environment:
       POSTGRES_USER: datu
       POSTGRES_PASSWORD: ${PG_PASSWORD:-change-me}
@@ -93,6 +99,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    mem_limit: 512m
+    cpus: "1.0"
+    privileged: false
     restart: unless-stopped
 
 volumes:

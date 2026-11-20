@@ -473,5 +473,105 @@
     "control_id": "ISO27701-7.5",
     "status": "not-applicable",
     "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "CIS-DOCKER-001",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-DOCKER-002",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-DOCKER-003",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-DOCKER-004",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-DOCKER-005",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-DOCKER-006",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-DOCKER-007",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-DOCKER-008",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-DOCKER-009",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "CIS-DOCKER-010",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "DPA-PH-01",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "DPA-PH-04",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "DPA-PH-05",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "DPA-PH-06",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "DPA-PH-07",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "DPA-PH-08",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "DPA-PH-10",
+    "status": "pass",
+    "reason": "Manually set to pass"
+  },
+  {
+    "control_id": "DPA-PH-02",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "DPA-PH-03",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
+  },
+  {
+    "control_id": "DPA-PH-09",
+    "status": "not-applicable",
+    "reason": "Manually set to not-applicable"
   }
 ]

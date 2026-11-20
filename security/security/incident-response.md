@@ -41,6 +41,18 @@
 - Update security controls
 - Review and update incident response plan
 
+## Regulator matrix (know yours before you need it)
+
+| Jurisdiction | Authority | Deadline | Trigger |
+|---|---|---|---|
+| Philippines (DPA 2012, IRR) | National Privacy Commission (NPC) | 72 hours from knowledge | Breach involving sensitive personal information, or likely to give rise to identity fraud or harm |
+| EU/EEA (GDPR Art. 33) | Lead supervisory authority | 72 hours from awareness | Breach likely to result in a risk to rights and freedoms |
+| Data subjects (Art. 34 / DPA Sec. 20(f)) | the affected people | without undue delay | High risk to rights and freedoms |
+
+The software's part in this: `datu watch` notifies the affected key when a
+statement about it is revoked, so the people a breach touches can be told
+over the same channel that holds their record.
+
 ## GDPR Breach Notification
 
 - **72 hours**: Notify supervisory authority (Article 33)

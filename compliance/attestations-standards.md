@@ -92,6 +92,36 @@ are translated through that lens below.
 | ISO27701-7.5 PII Processor Obligations | not-applicable | The project is not a processor and signs no DPAs; an operator acting as a processor documents its own instructions and DPAs (ROPA third-party section) | N/A for the software |
 | ISO27701-8.4 Privacy by Design | pass | DPIA, defaults reviewed, sealing-first posture, consent-at-the-door, `PRIVACY.md` | Privacy reviews ride the normal design process; the readiness programme records them |
 
+## CIS Docker Benchmark
+
+| Control | Status | Evidence | DATU reading |
+|---|---|---|---|
+| CIS-DOCKER-001 Run Container as Non-Root User | pass | Both Dockerfiles create and switch to a dedicated uid (`USER datu`, `USER node`); compose services pin the same uid; proven by running the validator image (`uid=10001(datu)`) | Non-root is the only mode shipped |
+| CIS-DOCKER-002 Use Trusted Base Images Only | pass | Official images only (`rust`, `debian`, `node`, `caddy`, `postgres`), each pinned by digest; the compose gate refuses untrusted or unpinned references | Base image bytes cannot change under us |
+| CIS-DOCKER-003 Do Not Use :latest Tag | pass | Every `FROM` and `image:` carries a version tag plus `@sha256:` digest; `deploy/checks/compose-hardening.py` fails on untagged or unpinned images | Pinned twice: tag for humans, digest for the build |
+| CIS-DOCKER-004 Set Memory Limits | pass | `mem_limit` on every compose service (128m-512m per role); the gate requires it | Bounded blast radius per container |
+| CIS-DOCKER-005 Set CPU Limits | pass | `cpus` on every compose service (0.25-1.0); the gate requires it | A runaway indexer cannot starve the node |
+| CIS-DOCKER-006 Read-Only Root Filesystem | pass | `read_only: true` on every compose service, with `tmpfs` only where a process needs scratch space (including postgres's socket dir); the gate requires it | Containers cannot write to their own image |
+| CIS-DOCKER-007 No Privileged Containers | pass | `privileged: false` stated explicitly on every service; the gate fails on `privileged: true` | Proven by configuration and by the gate, not by absence alone |
+| CIS-DOCKER-008 Drop Dangerous Capabilities | pass | `cap_drop: [ALL]` everywhere; the gate requires it | Postgres runs with all capabilities dropped and its own uid (verified) |
+| CIS-DOCKER-009 Use HEALTHCHECK Instruction | pass | `HEALTHCHECK` in both Dockerfiles (datu status for the node/indexer, an HTTP probe for the dapp), plus compose healthchecks for postgres | Liveness is declared, not assumed |
+| CIS-DOCKER-010 Pin Image Digests (SHA256) | pass | `rust`, `debian`, `node`, `caddy` and `postgres` referenced by `@sha256:` in Dockerfiles and compose; the gate requires a digest | Supply-chain pinning is enforced in CI |
+
+## Philippines DPA (RA 10173, IRR)
+
+| Control | Status | Evidence | DATU reading |
+|---|---|---|---|
+| DPA-PH-01 PIC and PIP Designation | pass | `compliance/legal-bases.json` (role split per activity), `PRIVACY.md` (software vs operator), consent ceremonies | The operator is the PIC for what it publishes; the software is a tool, never a PIP, and the register states this |
+| DPA-PH-02 Data Protection Officer (Philippines) | not-applicable | No organisation is run by this repository; the DPO is designated by each PIC | An open-source project cannot appoint an NPC DPO; operators do |
+| DPA-PH-03 NPC Registration | not-applicable | No personal-data processing organisation behind the code; the 1,000-data-subject threshold is an operator question | N/A for the software; a PH operator registers its own systems |
+| DPA-PH-04 Criteria for Lawful Processing | pass | `compliance/legal-bases.json` carries the DPA 2012 counterpart per activity (Sec. 12(a)-(c), 13), validated in CI; consent ceremonies (`crates/core/src/enroll.rs`) | Lawful criteria are article-cited against the code, not asserted |
+| DPA-PH-05 Data Subject Rights (Philippines) | pass | `datu consent` (information/access), revocation (objection/erasure), bundle export (portability), `PRIVACY.md` rights section | Rights are protocol verbs, and the notice says how each one works |
+| DPA-PH-06 Security Measures (NPC Circular 16-03) | pass | Organisational: policies in `security/security/`, incident plan, approvals. Physical/technical: non-root pinned containers, sealed fields, hybrid signatures, access policy (`crates/store/src/policy.rs`), CI audits | The circular's three pillars are the policy set, the hardened runtime and the audited build |
+| DPA-PH-07 Privacy Impact Assessment | pass | `compliance/compliance/privacy-impact-assessment.md`, governance risk assessment, `security/security/threat-model.md` | PIA exists for the design; operators extend it per deployment |
+| DPA-PH-08 NPC Breach Notification | pass | Regulator matrix in `security/security/incident-response.md` (NPC, 72 hours, sensitive personal information or identity-fraud risk), templates, `datu watch` as the subject-facing channel | The procedure names the NPC explicitly; notification itself is the PIC's act |
+| DPA-PH-09 Data Sharing and Outsourcing | not-applicable | The project shares no personal data and outsources nothing; operators execute their own sharing agreements | N/A for the software |
+| DPA-PH-10 Cross-Border Transfers (Philippines) | pass | `PRIVACY.md` global-ledger disclosure, cross-border responsibility per activity in `legal-bases.json`, the comparability duty restated for operators | A public ledger is global by nature; the notice and register say so, and the operator assesses comparability for its deployment |
+
 ## Scope decision: which packs the software attests, and which belong to operators
 
 GESF counts `not-applicable` together with `pass` in the score, so the honest
@@ -107,9 +137,9 @@ software at all". This is the line we drew:
 | ISO 27001 | yes | The information security management controls map to policies, gates and drills in the repository |
 | ISO 27701 | yes (7.5 N/A) | Privacy controls are protocol features; "processor obligations" need a party that is a processor, which the project is not |
 | privacy-core | no | The pack is an organisational privacy programme: DPO appointment, staff training, vendor due diligence and DPAs, SCCs, localisation assessments. Those duties sit with each operator (the controller), not with an open-source repository, and the project has no staff, vendors or processors. Marking them pass or N/A would inflate the score without evidence |
-| CIS-Docker | not yet | The project ships containers, but this pack's controls (host hardening, image scanning policy) describe an operator's runtime, not the build; compose hardening is already enforced by `deploy/checks/compose-hardening.py` |
+| CIS-Docker | yes | The project ships the images and compose files; every control is now enforced in the build or by `deploy/checks/compose-hardening.py` |
 | CIS-Kubernetes | no | There is no Kubernetes deployment in this repository; the pack describes infrastructure this project does not ship |
-| DPA-PH | operator jurisdiction | Philippine DPA duties attach to PH controllers; the software carries the PH counterpart in `compliance/legal-bases.json` and the notice is jurisdiction-neutral. A PH operator attests this pack for its deployment |
+| DPA-PH | yes (3 N/A) | The software-side duties (lawful criteria, rights, security measures, PIA, 72-hour NPC notification, cross-border disclosure) map to registers, ceremonies and runbooks; designation, NPC registration and data-sharing agreements are acts only an operator can perform |
 
 The dashboard will therefore show privacy-core, CIS-Kubernetes and DPA-PH at
 0%: that is a scoping statement, not an unaddressed gap. Operators complete

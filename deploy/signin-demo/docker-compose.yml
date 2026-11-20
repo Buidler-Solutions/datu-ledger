@@ -21,6 +21,9 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    mem_limit: 384m
+    cpus: "0.5"
+    privileged: false
     restart: unless-stopped
 
   dapp:
@@ -39,10 +42,13 @@ services:
       - no-new-privileges:true
     depends_on:
       - validator
+    mem_limit: 256m
+    cpus: "0.5"
+    privileged: false
     restart: unless-stopped
 
   caddy:
-    image: caddy:2
+    image: caddy:2@sha256:4851e54a46b206517c574821bb5cc67f170d2156041e9fbc4c9193b45e84a75b
     # Rootless: the caddy user owns /data and /config in the image, and the
     # listeners move to 8080/8443 so no low-port capability is needed.
     user: "1000:1000"
@@ -59,6 +65,9 @@ services:
       - no-new-privileges:true
     depends_on:
       - dapp
+    mem_limit: 128m
+    cpus: "0.25"
+    privileged: false
     restart: unless-stopped
 
 volumes:

@@ -66,6 +66,23 @@ def check(path: Path) -> list[str]:
             problems.append(
                 f"{path}: service {name} lacks security_opt no-new-privileges:true"
             )
+        if service.get("privileged") is True:
+            problems.append(f"{path}: service {name} is privileged:true")
+        # CIS Docker 004/005: bounded memory and CPU.
+        if not str(service.get("mem_limit", "")).strip():
+            problems.append(f"{path}: service {name} has no mem_limit")
+        if not str(service.get("cpus", "")).strip():
+            problems.append(f"{path}: service {name} has no cpus limit")
+        # CIS Docker 002/003/010: named images must be digest-pinned, never
+        # :latest, so a rebuild cannot silently pick up different bytes.
+        image = str(service.get("image", "")).strip()
+        if image:
+            if image.endswith(":latest") or (":" not in image.split("@")[0].split("/")[-1]):
+                problems.append(f"{path}: service {name} image {image!r} is not tagged")
+            if "@sha256:" not in image:
+                problems.append(
+                    f"{path}: service {name} image {image!r} is not digest-pinned"
+                )
     return problems
 
 
