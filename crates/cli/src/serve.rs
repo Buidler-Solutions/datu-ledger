@@ -1700,7 +1700,9 @@ function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;cons
   // the field drifts after the camera fitted once. Ease the camera out
   // instead of shrinking the ring: satellites stay outside the organisms
   // and inside the frame. Manual zoom still wins (userZoomed).
-  if(!NET.userZoomed){
+  // Only the overview is eased: deep zoom (opening a strand at 5.6) and a
+  // running camera animation must never be dragged back by the peer ring.
+  if(!NET.userZoomed&&!NET.camT&&NET.zoom<=1.1){
    const need=(Math.min(W,H)/2-86)/baseR;
    if(NET.zoom>need)NET.zoom=Math.max(0.28,NET.zoom*0.94+need*0.06);
   }
@@ -1970,7 +1972,7 @@ function wireGraph(){if(NET.wired){wake();return}NET.wired=true;const cv=documen
  cv.onmouseleave=()=>{NET.hover=null;NET.peerHover=null;wake()};
  cv.onclick=ev=>{if(NET.moved>4)return;const n=nodeAt(ev);
   if(n){NET.sel=n;calloutFor(n);spawnBurst(n);wake()}else{NET.sel=null;document.getElementById('callout').style.display='none'}};
- cv.onwheel=ev=>{if(!ev.ctrlKey)return;ev.preventDefault();const r=cv.getBoundingClientRect();
+ cv.onwheel=ev=>{if(!ev.ctrlKey)return;ev.preventDefault();NET.userZoomed=true;const r=cv.getBoundingClientRect();
   const px=(ev.clientX-r.left)*(cv.width/r.width),py=(ev.clientY-r.top)*(cv.height/r.height);
   const z2=zclamp(NET.zoom*Math.exp(-ev.deltaY*.0012));
   NET.pan.x=px-cv.width/2-(px-cv.width/2-NET.pan.x)*z2/NET.zoom;
@@ -1992,7 +1994,7 @@ function wireGraph(){if(NET.wired){wake();return}NET.wired=true;const cv=documen
    else NET.drag={pan:{x:NET.pan.x,y:NET.pan.y,mx:t.clientX,my:t.clientY}}}
   wake()},{passive:false});
  cv.addEventListener('touchmove',ev=>{ev.preventDefault();
-  if(NET.pinch&&ev.touches.length===2){NET.zoom=zclamp(NET.pinch.z*tdist(ev)/NET.pinch.d);zoomCross();drawMesh();return}
+  if(NET.pinch&&ev.touches.length===2){NET.userZoomed=true;NET.zoom=zclamp(NET.pinch.z*tdist(ev)/NET.pinch.d);zoomCross();drawMesh();return}
   if(NET.drag&&ev.touches.length===1){NET.moved++;const t=ev.touches[0];const d=NET.drag;
    if(d.n||d.c||d.p){const p=tpos(t);const w=screenToWorld(p[0],p[1],cv);
     if(d.n){d.x=w[0];d.y=w[1]}
@@ -2088,7 +2090,7 @@ function applyHashView(){
  else if(h==='layers'&&NET.mode!=='layers'){NET.mode='layers';layoutLayers();if(btn)btn.textContent='bubbles view';NET.alpha=.6;NET.sub='bubbles';NET.strand=null;wake()}
  else if(h==='bubbles'&&NET.mode!=='bubbles'){NET.mode='bubbles';buildClusters();if(btn)btn.textContent='mesh view';NET.alpha=.6;NET.sub='bubbles';NET.strand=null;wake()}
 }
-function toggleLayout(){const btn=document.getElementById('laytoggle');
+function toggleLayout(){NET.userZoomed=false;const btn=document.getElementById('laytoggle');
  const next={mesh:'layers',layers:'bubbles',bubbles:'mesh'}[NET.mode];
  if(next==='mesh'){NET.mode='mesh';btn.textContent='layered view';NET.alpha=1}
  else if(next==='layers'){NET.mode='layers';layoutLayers();btn.textContent='bubbles view';NET.alpha=.6}
@@ -2127,6 +2129,7 @@ async function loadEcosystem(){
  const use=NET.nsFilter?entries.filter(e=>e.namespace===NET.nsFilter):entries;
  const meshCapped=buildMesh(use,2500);
  seedSignals();
+ NET.userZoomed=false;
  applyHashView();
  fitView();
  if(NET.mode==='layers')layoutLayers();else if(NET.mode==='bubbles')buildClusters();
