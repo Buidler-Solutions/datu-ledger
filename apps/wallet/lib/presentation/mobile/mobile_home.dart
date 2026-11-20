@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/ledger/ledger_client.dart';
 import '../../core/ledger/identity_chain.dart';
+import '../../core/ledger/node_setting.dart';
 import '../../core/ledger/my_records.dart';
 import '../../providers/bridge_provider.dart';
 import 'mobile_identity.dart';
@@ -23,11 +24,25 @@ class _MobileHomeTabState extends ConsumerState<MobileHomeTab> {
   String? _nodeNote;
   List<String> _chain = const [];
   bool _chainLoaded = false;
+  bool _nodeRestored = false;
+  bool _loadRequested = false;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+    // Restore the saved ledger node BEFORE the first fetch: on a phone the
+    // default is the phone itself, so without this the card would go dark on
+    // every cold start (the identities often arrive after the first frame).
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!_nodeRestored) {
+        _nodeRestored = true;
+        final saved = await NodeSetting.read();
+        if (saved != null && saved != ref.read(nodeUrlProvider)) {
+          ref.read(nodeUrlProvider.notifier).set(saved);
+        }
+      }
+      await _load();
+    });
   }
 
   Map<String, dynamic>? get _identity => identityByName(
@@ -219,6 +234,14 @@ class _MobileHomeTabState extends ConsumerState<MobileHomeTab> {
     final state = ref.watch(bridgeControllerProvider);
     final identity = _identity;
     final nodeStatus = ref.watch(nodeStatusProvider);
+
+    // Identities usually arrive after the first frame; the initial _load ran
+    // without one and returned. Load once when they appear, so the card works
+    // on a cold start without the user hunting for Refresh.
+    if (identity != null && !_loadRequested) {
+      _loadRequested = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+    }
 
     if (state.status == BridgeStatus.error) {
       return ListView(

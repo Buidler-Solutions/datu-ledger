@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/ledger/ledger_client.dart';
+import '../../core/ledger/node_setting.dart';
 import '../../providers/bridge_provider.dart';
 import 'mobile_identity.dart';
 import 'mobile_widgets.dart';
@@ -102,6 +103,7 @@ class _MobileSettingsTabState extends ConsumerState<MobileSettingsTab> {
   Future<void> _checkNode() async {
     final url = _node.text.trim();
     ref.read(nodeUrlProvider.notifier).set(url);
+    await NodeSetting.write(url);
     try {
       final status = await LedgerClient(baseUrl: url).status();
       final mode = status['policy'] is Map ? status['policy']['mode'] : 'node';
