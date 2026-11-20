@@ -196,7 +196,9 @@ pub trait ProjectionDb {
 /// literal lives in the source (a secrets scanner flags any
 /// `scheme://...` string, even a passwordless example).
 fn scheme_of(url: &str) -> &str {
-    url.split_once("://").map(|(scheme, _)| scheme).unwrap_or("")
+    url.split_once("://")
+        .map(|(scheme, _)| scheme)
+        .unwrap_or("")
 }
 
 /// Supply a missing database password from the given value, so unit files,
@@ -268,14 +270,16 @@ fn password_from_env(url: &str) -> Option<String> {
 /// Open a projection database from a URL: a bare path or the `sqlite`
 /// scheme is SQLite (the default), and the postgres/postgresql and mysql
 /// schemes need their cargo features. A URL with a user but no password
-/// takes it from the environment; see [`password_from_env`].
+/// takes it from the environment (see `password_from_env`).
 pub fn open(db_url: &str) -> Result<Box<dyn ProjectionDb>, String> {
     let password = password_from_env(db_url.trim());
     let owned = with_password(db_url.trim(), password.as_deref())?;
     let url = owned.as_str();
-    if let Some(path) = url.split_once("://").map(|(_, rest)| rest).and_then(|rest| {
-        (scheme_of(url) == "sqlite").then_some(rest)
-    }) {
+    if let Some(path) = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| (scheme_of(url) == "sqlite").then_some(rest))
+    {
         return Ok(Box::new(SqliteDb::open(Path::new(path))?));
     }
     if matches!(scheme_of(url), "postgres" | "postgresql") {
@@ -609,9 +613,6 @@ mod password_tests {
     fn specials_are_percent_encoded_for_the_userinfo_component() {
         let plain = dsn("mysql", "u", "h", "/d");
         let expect = dsn("mysql", "u:p%40ss%3Aw%2Frd%25%23%20", "h", "/d");
-        assert_eq!(
-            with_password(&plain, Some("p@ss:w/rd%# ")).unwrap(),
-            expect
-        );
+        assert_eq!(with_password(&plain, Some("p@ss:w/rd%# ")).unwrap(), expect);
     }
 }
