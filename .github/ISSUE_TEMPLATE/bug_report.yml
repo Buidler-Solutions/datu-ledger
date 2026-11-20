@@ -1,0 +1,34 @@
+name: Bug report
+description: Something in DATU does not do what it says
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security issues: do not file them here. Use `SECURITY.md`.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.2.1-rc1, or the commit sha
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [CLI / node, HTTP API or explorer, wallet (Flutter), SDK, deployment (Docker), docs, other]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Steps, expected, actual. Redact keys and personal data.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      render: shell

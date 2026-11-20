@@ -1,0 +1,31 @@
+name: Feature request
+description: Propose a change to the protocol, the tooling or the docs
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can a citizen, registry or operator not do today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The proposal
+      description: What should change, and what does it cost (protocol, privacy, complexity)?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: This does not fit in SECURITY.md (not a vulnerability)
+          required: true
+        - label: I checked that the README and compliance docs do not already answer it
+          required: true

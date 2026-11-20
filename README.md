@@ -1,54 +1,106 @@
-# DATU - Decentralized Accountable Trust Union
+# DATU
+
+### A DAG accountability ledger. Not a blockchain.
 
 [![ci](https://github.com/Buidler-Solutions/datu-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Buidler-Solutions/datu-ledger/actions/workflows/ci.yml)
 [![GESF Compliance](badge.svg)](compliance/attestations-standards.md)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![release](https://img.shields.io/github/v/release/Buidler-Solutions/datu-ledger?include_prereleases&label=release)](https://github.com/Buidler-Solutions/datu-ledger/releases)
+[![rust](https://img.shields.io/badge/rust-1.96-orange.svg)](rust-toolchain.toml)
 
-<details>
-<summary><strong>GESF compliance: 94% (A)</strong> - every pack at 100% except CIS-Kubernetes, which describes infrastructure this repository does not ship; controls are attested with evidence in <code>compliance/</code></summary>
+![DATU: a DAG accountability ledger](docs/assets/hero.png)
 
-<!-- GESF-SCORE-START -->
-| Framework | Score | Grade | Controls |
-|-----------|-------|-------|----------|
-| GDPR | 100% | A | 40/40 passed |
-| OWASP | 100% | A | 6/6 passed |
-| CIS | 100% | A | 5/5 passed |
-| NIST | 100% | A | 23/23 passed |
-| PRIVACY-CORE | 100% | A | 40/40 passed |
-| CIS-DOCKER | 100% | A | 10/10 passed |
-| CIS-K8S | 20% | F | 2/12 passed |
-| ISO27001 | 100% | A | 10/10 passed |
-| ISO27701 | 100% | A | 11/11 passed |
-| DPA-PH | 100% | A | 10/10 passed |
-<!-- GESF-SCORE-END -->
+**DATU** (Decentralized Accountable Trust Union) is for records that must stay
+true: land titles, registries, certifications, consents. Entries link by causal
+references into a directed acyclic graph, every entry is hybrid-signed with
+Ed25519 and ML-DSA-65, anyone can run a mirror, and only attested writers may
+publish into official namespaces. There is no token, no mining, and no global
+consensus to argue with.
 
-Last evaluated 2026-11-20. Audit findings: 0. Registers:
-[GDPR](compliance/attestations.md),
-[standards](compliance/attestations-standards.md),
-[privacy-core](compliance/attestations-privacy-core.md),
-[legal bases](compliance/legal-bases.json).
-</details>
+<table>
+<tr>
+<td width="33%" valign="top">
 
-**Privacy:** the ledger is public and append-only. Read the
-[privacy notice](PRIVACY.md) and the
-[legal-basis register](compliance/legal-bases.json) before publishing
-personal data; `datu consent` lists everything a key has signed.
+**Immutable, provably**<br/>
+Entry ID is the BLAKE3 hash of the canonical bytes; SQLite triggers refuse
+`UPDATE` and `DELETE`. Rewriting a record breaks its ID, both signatures and
+every later link.
 
-**DATU** - **D**ecentralized **A**ccountable **T**rust **U**nion - is a tokenless,
-quantum-resistant accountability ledger: a distributed system for
-**accountability and transparency** where:
+</td>
+<td width="33%" valign="top">
 
-- **A DAG-type ledger, not a blockchain** - entries link by causal references
-  forming a directed acyclic graph; no blocks, no global consensus, no miners
-- **Anyone can run a node** - a single static binary, runs on a laptop, Raspberry Pi, or VPS
-- **No token, no mining, no staking** - nothing to buy, nothing to speculate on
-- **Not internet-dependent** - nodes sync by any channel: LAN, USB stick, Bluetooth, or internet when available
-- **Immutable** - records cannot be edited or deleted, ever, provably
-- **Quantum-resistant signatures** - every record is hybrid-signed: Ed25519 + ML-DSA-65 (FIPS
-  204); sealed *fields* use X25519 today (classical) - a hybrid ML-KEM sealing migration is on
-  the roadmap
-- **Open to run, gated to write** - anyone runs an observer node freely; official
-  namespaces (`gov.*`) admit only attested validators, and the people a record
-  is about must sign it themselves
+**Quantum-resistant**<br/>
+Every entry carries Ed25519 + ML-DSA-65 (FIPS 204) signatures. Sealed fields
+use X25519 today; hybrid ML-KEM sealing is on the roadmap.
+
+</td>
+<td width="33%" valign="top">
+
+**Runs anywhere, offline**<br/>
+One static binary on a laptop, a Pi or a VPS. Nodes sync over LAN, USB,
+Bluetooth or the internet; the ledger works when the network does not.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Gated to write**<br/>
+Observers run free; `gov.*` namespaces admit only attested validators, and the
+people a record is about must sign it themselves.
+
+</td>
+<td valign="top">
+
+**Accountable identities**<br/>
+Attestations tie keys to names and roles. Enrollment needs the citizen's own
+signature, recovery needs a guardian quorum, and revocation is a statement
+nobody can hide.
+
+</td>
+<td valign="top">
+
+**Compliance built in**<br/>
+GESF 94% (A): GDPR, OWASP ASVS, CIS, NIST CSF, ISO 27001/27701 and PH DPA
+attested against code, with a privacy notice and a legal-basis register that
+ship in the repo.
+
+</td>
+</tr>
+</table>
+
+## Quickstart
+
+```bash
+cargo build --release -p datu-cli     # one static binary, no services
+./target/release/datu init            # fresh identity in .datu/
+./target/release/datu publish --ns general --payload '{"hello":"dag"}'
+./target/release/datu verify          # every signature, chain and checkpoint
+./target/release/datu serve           # explorer + HTTP API on :7474
+```
+
+Open <http://127.0.0.1:7474> for the live DAG, or keep working in the terminal:
+
+```bash
+datu log --limit 5                    # recent entries
+datu attest create --subject <key> --claims '{"role":"clerk"}' --label "Acme"
+datu enroll open --subject <key> --claims '{"role":"bidder"}' --out offer.json
+datu watch --subject <key> --once     # revocations, exit 2 if the key is revoked
+```
+
+## What it looks like
+
+| The explorer | The wallet |
+|---|---|
+| ![Explorer: the ledger as a neural bubble field](docs/assets/explorer.png) | ![Wallet: who vouches for this key](docs/assets/wallet.png) |
+| The DAG drawn as it is: generation rings, causal edges, witness coverage on click | A phone wallet that reads its own identity chain: who attests the key, with which claims, and whether anything was revoked |
+
+## Privacy in one line
+
+The ledger is public and append-only: read the [privacy notice](PRIVACY.md) and
+the [legal-basis register](compliance/legal-bases.json) before publishing
+personal data, seal fields that are personal, and use `datu consent` to see
+everything a key has signed.
 
 ## Guarantees
 
@@ -1145,6 +1197,16 @@ Shipped since the last revision of this list: cosigner-aware admission and
 per-namespace role rules, ledger-carried revocation (`identity.revoke`, both
 attestation-level and key-level), deferred delivery with custody recovery,
 and witness coverage proofs with local verification in the UIs.
+
+## Community
+
+| | |
+|---|---|
+| **Security** | Report privately via GitHub's vulnerability reporting; see [SECURITY.md](SECURITY.md) |
+| **Contributing** | Gates, style and recipes in [CONTRIBUTING.md](CONTRIBUTING.md) |
+| **Conduct** | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) |
+| **Maintainers** | [MAINTAINERS.md](MAINTAINERS.md) |
+| **Compliance** | [attestation registers](compliance/attestations-standards.md), [legal bases](compliance/legal-bases.json), [privacy notice](PRIVACY.md) |
 
 ## License
 
