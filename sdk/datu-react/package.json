@@ -1,6 +1,6 @@
 {
   "name": "@greenarmor/datu-react",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "React hooks for @greenarmor/datu-client: SignetAuth sign-in, identity list, party signing and coverage checks",
   "type": "module",
   "sideEffects": false,
@@ -33,7 +33,7 @@
     "react": ">=18"
   },
   "dependencies": {
-    "@greenarmor/datu-client": "^0.1.0"
+    "@greenarmor/datu-client": "^0.2.0"
   },
   "devDependencies": {
     "jsdom": "^24.0.0",
