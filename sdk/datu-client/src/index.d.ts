@@ -206,6 +206,50 @@ export declare function challengeIsLive(challenge: AuthChallenge, nowMs?: number
 export declare function verifyEd25519(pubkeyHex: Hex, message: Uint8Array | string, signatureHex: Hex): Promise<'ok' | 'invalid' | 'unavailable'>;
 export declare function verifyAssertion(assertion: AuthAssertion, challenge: AuthChallenge): Promise<VerifyResult>;
 
+export interface IdentityVoucher {
+  by: string;
+  label: string | null;
+  claims: Record<string, unknown>;
+  cosigners: number;
+  enroll: string | null;
+}
+export interface AttestationRequirement {
+  roots?: string[];
+  roles?: string[];
+  claims?: Record<string, string>;
+  minCosigners?: number;
+}
+export declare function fetchIdentityChain(
+  nodeUrl: string,
+  pubkey: Hex,
+  opts?: { timeoutMs?: number; fetchImpl?: typeof fetch },
+): Promise<{
+  key: string;
+  attestations: Array<{
+    id: string;
+    by: string;
+    label: string | null;
+    claims: Record<string, unknown>;
+    cosigners: string[];
+    enroll: string | null;
+    revoked: boolean;
+    revoked_by: unknown;
+  }>;
+  revoked_by_key: unknown;
+  counts: { attestations: number; distinct_cosigners: number; revoked: number };
+  verified: boolean;
+  note: string;
+}>;
+export declare function requireAttestation(
+  chain: unknown,
+  options?: AttestationRequirement,
+): { ok: boolean; reason: string | null; vouchers: IdentityVoucher[] };
+export declare function checkAttestation(
+  nodeUrl: string,
+  pubkey: Hex,
+  options?: AttestationRequirement & { timeoutMs?: number; fetchImpl?: typeof fetch },
+): Promise<{ ok: boolean; reason: string | null; vouchers: IdentityVoucher[] }>;
+
 export declare const PROVIDER_DOMAIN: 'datu-provider-v1';
 export declare function providerProofBytes(proof: {
   nonce: string;

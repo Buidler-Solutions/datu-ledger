@@ -12,6 +12,7 @@ import http from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import QRCode from 'qrcode';
+import { fetchIdentityChain, requireAttestation } from '../../sdk/datu-client/src/index.js';
 
 const PORT = Number(process.env.PORT || 5176);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -19,6 +20,25 @@ const DATU = process.env.DATU_BIN || new URL('../../target/release/datu', import
 const NODE_URL = process.env.NODE_URL || 'http://127.0.0.1:7474';
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const MAX_OPEN = 256;
+
+// Optional attestation requirement: this relying party only signs in keys
+// its own trust roots vouch for. Shape matches the SDK's
+// requireAttestation(): {"roots":[...], "roles":[...], "claims":{...},
+// "minCosigners":n}. Absent = any key (the demo default).
+const REQUIREMENT = (() => {
+  const raw = process.env.REQUIRE_ATTESTATION;
+  if (!raw) return null;
+  let spec;
+  try {
+    spec = JSON.parse(raw);
+  } catch (e) {
+    throw new Error('REQUIRE_ATTESTATION must be JSON: ' + String(e));
+  }
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+    throw new Error('REQUIRE_ATTESTATION must be a JSON object');
+  }
+  return spec;
+})();
 
 const challenges = new Map(); // nonce -> { challenge, createdAt, usedAt }
 
@@ -81,29 +101,14 @@ function run(args, timeoutMs = 15000) {
 
 // Ask the running node for attestations naming this key. Demo-scale: scan
 // recent identity.attest entries and confirm the payload mentions the key.
-async function attestationsFor(pubkey) {
+// The trust-graph view for a signing key, straight from the node's
+// /v1/identity endpoint (the same JSON the explorer and wallet render).
+async function identityFor(pubkey) {
   try {
-    const res = await fetch(`${NODE_URL}/v1/entries?limit=500`);
-    if (!res.ok) return { reachable: false, claims: [] };
-    const { entries } = await res.json();
-    const candidates = entries.filter((e) => e.namespace === 'identity.attest' || e.namespace === 'identity.revoke');
-    const found = [];
-    for (const entry of candidates.slice(-50)) {
-      const full = await fetch(`${NODE_URL}/v1/entry/${entry.id}`).then((r) => r.json());
-      // The node API ships payloads as base64; the CLI's `get` shows text.
-      const text = typeof full.payload === 'string'
-        ? full.payload
-        : Buffer.from(full.payload_base64 || '', 'base64').toString('utf8');
-      if (!text.includes(pubkey)) continue;
-      let claims = null;
-      try {
-        claims = JSON.parse(text);
-      } catch {}
-      found.push({ namespace: full.namespace, by: full.author, entry: full.id, claims });
-    }
-    return { reachable: true, claims: found };
+    const chain = await fetchIdentityChain(NODE_URL, pubkey);
+    return { reachable: true, chain };
   } catch {
-    return { reachable: false, claims: [] };
+    return { reachable: false, chain: null };
   }
 }
 
@@ -252,17 +257,21 @@ function pageCallback(req) {
            });
            const data = await res.json();
            if (!data.ok) return show('err', 'refused', '<p class="lede">' + (data.error || 'verification failed') + '</p>');
-           const claims = (data.attestations || []).map((a) =>
-             '<tr><td class="mono">' + a.namespace + '</td><td class="mono">' + a.by.slice(0, 12) + '…</td><td class="mono">' +
-             JSON.stringify(a.claims || {}) + '</td></tr>').join('');
+           const vouchers = (data.vouchers || []).map((v) =>
+             '<tr><td class="mono">' + v.by.slice(0, 12) + '…</td><td class="mono">' +
+             JSON.stringify(v.claims || {}) + '</td><td class="mono">' +
+             (v.cosigners ? v.cosigners + ' cosigner(s)' : 'no cosigners') +
+             (v.enroll ? ' · via enrollment ' + v.enroll.slice(0, 8) + '…' : '') + '</td></tr>').join('');
            const attestationBlock = data.node_reachable
-             ? (claims
-                 ? '<h3 style="margin:16px 0 0;font-size:.9rem">Attested claims</h3><table><thead><tr><th>namespace</th><th>attestor</th><th>claims</th></tr></thead><tbody>' + claims + '</tbody></table>'
+             ? (vouchers
+                 ? '<h3 style="margin:16px 0 0;font-size:.9rem">Who vouches for this key</h3><table><thead><tr><th>attestor</th><th>claims</th><th>weight</th></tr></thead><tbody>' + vouchers + '</tbody></table>' +
+                   '<p class="meta">' + (data.note || 'Attestations are signed statements, not a verdict.') + '</p>'
                  : '<p class="lede" style="margin-top:14px">No attestation on the node for this key yet. Signed in, unattested.</p>')
              : '<p class="lede" style="margin-top:14px">Ledger node unreachable, so no attestation lookup. Signature itself is verified.</p>';
            show('ok', 'signed in',
              '<h2 style="font-size:1.05rem;margin:14px 0 6px" class="mono">' + data.pubkey.slice(0, 16) + '…' + data.pubkey.slice(-8) + '</h2>' +
-             '<p class="lede">Verified ' + data.domain + ' assertion for ' + data.rp_id + ' by the relying-party verifier.</p>' +
+             '<p class="lede">Verified ' + data.domain + ' assertion for ' + data.rp_id + ' by the relying-party verifier' +
+             (data.required ? '; attestation requirement met' : '') + '.</p>' +
              attestationBlock +
              '<p class="meta">This browser session would now hold a cookie or JWT issued to this key; the demo stops at the verified identity.</p>');
          } catch (e) {
@@ -300,14 +309,36 @@ async function verifyAssertion(assertion) {
   ]);
   if (out.code !== 0) return { ok: false, error: out.err || out.out || 'signature did not verify' };
   entry.usedAt = Date.now();
-  const attest = await attestationsFor(pubkey);
+  const identity = await identityFor(pubkey);
+  if (REQUIREMENT) {
+    if (!identity.reachable) {
+      return { ok: false, error: `ledger node ${NODE_URL} unreachable: cannot check the attestation requirement` };
+    }
+    const verdict = requireAttestation(identity.chain, REQUIREMENT);
+    if (!verdict.ok) {
+      return { ok: false, error: 'attestation requirement not met: ' + verdict.reason };
+    }
+    const out = {
+      ok: true,
+      domain: 'datu-auth-v1',
+      rp_id: c.rp_id,
+      pubkey,
+      node_reachable: true,
+      required: REQUIREMENT,
+      vouchers: verdict.vouchers,
+      note: identity.chain.note,
+    };
+    entry.verified = out;
+    return out;
+  }
   const verdict = {
     ok: true,
     domain: 'datu-auth-v1',
     rp_id: c.rp_id,
     pubkey,
-    node_reachable: attest.reachable,
-    attestations: attest.claims,
+    node_reachable: identity.reachable,
+    vouchers: identity.chain ? requireAttestation(identity.chain).vouchers : [],
+    note: identity.chain ? identity.chain.note : null,
   };
   // Recorded so the QR page can show the result live, without the phone
   // having to come back to that tab.

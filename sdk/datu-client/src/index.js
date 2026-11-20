@@ -30,6 +30,7 @@ import {
 } from './provider.js';
 import { DatuError, ErrorCode, mapError } from './errors.js';
 import { beginPhoneSignIn, finishPhoneSignIn, resumePhoneSignIn } from './phone.js';
+import { checkAttestation, fetchIdentityChain, requireAttestation } from './identity.js';
 
 export {
   AUTH_DOMAIN,
@@ -52,6 +53,9 @@ export {
   beginPhoneSignIn,
   finishPhoneSignIn,
   resumePhoneSignIn,
+  checkAttestation,
+  fetchIdentityChain,
+  requireAttestation,
 };
 
 const require = (value, message) => {

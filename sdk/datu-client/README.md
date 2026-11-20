@@ -56,7 +56,33 @@ datu signet auth-verify --rp-id app.example.com --origin https://app.example.com
   --pubkey <user key> --signature <from assertion>
 ```
 
-Wire standard: `specs/signetauth.md`.
+Wire standard: `specs/signetauth.md`.Wire standard: `specs/signetauth.md`.
+
+## Require attestation (who vouches for this key)
+
+A signature proves the key signed; it does not prove the key is anyone in
+particular. Gate the login on the ledger's trust graph:
+
+```js
+import { checkAttestation } from '@greenarmor/datu-client';
+
+const verdict = await checkAttestation('http://127.0.0.1:7474', assertion.pubkey, {
+  roots: ['<attestor-key-hex>'],   // only these roots count
+  roles: ['clerk'],                // claims.role must match
+  minCosigners: 1,                 // distinct cosigner weight required
+});
+if (!verdict.ok) throw new Error(verdict.reason);  // names why, never a bare "verified"
+console.log(verdict.vouchers);     // [{ by, label, claims, cosigners, enroll }]
+```
+
+Or split it: `fetchIdentityChain(nodeUrl, pubkey)` returns the raw
+`/v1/identity` JSON and `requireAttestation(chain, opts)` is the pure policy
+function (sync, testable). A revoked attestation never vouches; a key
+revoked directly vouches for nothing. Transport problems throw a typed
+`DatuError`, policy failures return `{ ok: false, reason }` - the caller
+must tell "unreachable" from "unattested". The reference relying party
+(`web/signin-demo`) shows the full pattern, with `REQUIRE_ATTESTATION` as
+the env-driven version.
 
 ## Log in with a phone (no extension, no bridge)
 
