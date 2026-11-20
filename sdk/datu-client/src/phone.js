@@ -14,6 +14,10 @@ import { buildSignInLink, randomNonceHex, readAssertionFragment, verifyAssertion
 
 const CHALLENGE_PREFIX = 'datu.phone.';
 const LATEST_KEY = 'datu.phone.latest';
+// Tombstone for spent nonces: deleting the stored challenge is not enough,
+// because beginPhoneSignIn can re-store the same nonce; a tombstone makes
+// single use hold even then.
+const SPENT_PREFIX = 'datu.phone.spent.';
 
 function defaultStorage() {
   try {
@@ -122,6 +126,9 @@ export async function finishPhoneSignIn({
   if (!challenge || !assertion) return { ok: false, reason: 'missing challenge or assertion' };
   if (!looksLikeNonce(challenge.nonce)) return { ok: false, reason: 'invalid challenge nonce' };
   if (nowMs > challenge.expires_at_ms) return { ok: false, reason: 'challenge expired' };
+  if (storage.getItem(SPENT_PREFIX + challenge.nonce)) {
+    return { ok: false, reason: 'nonce already used: a challenge signs in exactly once' };
+  }
   const stored = storage.getItem(CHALLENGE_PREFIX + challenge.nonce);
   if (!stored) return { ok: false, reason: 'unknown or already used challenge' };
 
@@ -130,6 +137,7 @@ export async function finishPhoneSignIn({
     return { ok: false, reason: verdict.ok === null ? 'no local Ed25519 verifier' : verdict.reason };
   }
   if (burn) {
+    storage.setItem(SPENT_PREFIX + challenge.nonce, String(nowMs));
     storage.removeItem(CHALLENGE_PREFIX + challenge.nonce);
     if (storage.getItem(LATEST_KEY) === challenge.nonce) storage.removeItem(LATEST_KEY);
   }

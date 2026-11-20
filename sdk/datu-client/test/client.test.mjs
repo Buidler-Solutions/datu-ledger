@@ -405,6 +405,7 @@ test('phone sign-in completes once and only once', async () => {
   });
   const reused = await again.accept(assertion);
   assert.equal(reused.ok, false);
+  assert.match(reused.reason, /exactly once/);
 });
 
 test('finishPhoneSignIn refuses expiry, mismatch and unknown nonces', async () => {
