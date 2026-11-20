@@ -1312,7 +1312,7 @@ function hideEco(){document.getElementById('ecosphere').style.display='none';doc
 // ── ecosphere: every entry a node, every prev/ref a link in the mesh ─────
 const GENESIS_ID='37616bce5bfb8b773f7c99a9e52bcd7aa43294301ab074a908fbc9a334315d63';
 const REDUCED_MOTION=(typeof matchMedia==='function')&&matchMedia('(prefers-reduced-motion: reduce)').matches;
-let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'mesh',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null,neural:true,sprites:new Map(),pulses:[],ripples:[],lastT:0,lastAmbient:0,peers:[],showPeers:true,selfKey:null};
+let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'mesh',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null,neural:true,sprites:new Map(),pulses:[],ripples:[],lastT:0,lastAmbient:0,peers:[],showPeers:true,selfKey:null,peerViews:null,peerSig:null,peerHover:null};
 function fitCanvas(){const cv=document.getElementById('graph');if(!cv)return;
  // portrait phones get a taller canvas so the mesh has room; landscape and
  // desktop keep the wide hero
@@ -1534,6 +1534,23 @@ function zoomCross(){
 // ── neural layer: glowing neurons, curved synapses, traveling signals ────
 // A sprite cache keeps per-frame cost flat: one 64px radial gradient per
 // hue bucket, scaled per node, instead of a gradient object per node.
+// Deterministic per-peer personality: phase, speed and home angle from the
+// address itself, so the field looks the same on every visit.
+function ensurePeerViews(){
+ const sig=NET.peers.map(p=>p.addr).sort().join('|');
+ if(NET.peerSig===sig&&NET.peerViews)return;
+ NET.peerSig=sig;
+ NET.peerViews=NET.peers.map((p,i)=>{
+  let hsh=0;for(const ch of String(p.addr))hsh=(hsh*31+ch.charCodeAt(0))%100003;
+  return {
+   addr:p.addr,
+   last:p.last_success_ms||0,
+   home:(i/Math.max(1,NET.peers.length))*Math.PI*2-Math.PI/2+0.42,
+   ph:(hsh%628)/100,
+   spd:0.75+((hsh>>3)%60)/100,
+   ox:0,oy:0,vx:0,vy:0,   // manual displacement, springs back to the orbit
+  }});
+}
 function glowSprite(h){
  const key=Math.round(h/12)*12%360;
  if(NET.sprites.has(key))return NET.sprites.get(key);
@@ -1667,40 +1684,116 @@ function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;cons
    ctx.beginPath();ctx.arc(sxp,syp,r2,0,7);ctx.fill()}}
  ctx.globalAlpha=1;
  const neuralNodes=NET.neural&&NET.mode==='bubbles'&&!strandMode;
- // peers: the validators and mirrors this node actually talks to, drawn
- // as satellites around the core. The ecosphere shows RECORDS (bubbles are
- // authors); this layer answers the other question: who is feeding me, and
- // when did they last answer? Teal = fresh, amber = stale, grey = never.
+ // peers: the validators and mirrors this node talks to. Each satellite
+ // drifts on its own slow, smooth compass (sum of sines, no jitter), and is
+ // wired to the bubbles it actually delivered records from: the link means
+ // "these records arrived from this peer", read from this node's local
+ // first_seen notes. Peers that delivered nothing known keep a faint tether
+ // to the bubbles whose provenance is unknown, never a false certainty.
  if(NET.showPeers&&NET.peers.length){
-  const sorted=[...NET.peers].sort((x,y)=>String(x.addr).localeCompare(String(y.addr)));
-  // outside the whole field, not just the biggest bubble: satellites must
-  // never sit on top of the organisms they feed
+  ensurePeerViews();
   let baseR=120;
   if(NET.mode==='bubbles'&&NET.clusters){
    let ext=0;for(const c of NET.clusters)ext=Math.max(ext,Math.hypot(c.cx,c.cy)+c.R);
    baseR=ext+90}
   else{baseR=Math.max(...NET.nodes.map(n=>Math.hypot(n.x,n.y)),120)+90}
+  // the field drifts after the camera fitted once. Ease the camera out
+  // instead of shrinking the ring: satellites stay outside the organisms
+  // and inside the frame. Manual zoom still wins (userZoomed).
+  if(!NET.userZoomed){
+   const need=(Math.min(W,H)/2-86)/baseR;
+   if(NET.zoom>need)NET.zoom=Math.max(0.28,NET.zoom*0.94+need*0.06);
+  }
+
+  // provenance map: peer -> the bubbles it fed, plus which bubbles remain
+  // unknown (rows older than the provenance column)
+  const norm=a=>String(a||'').replace(/^[a-z]+:\/\//i,'').replace(/\/+$/,'').toLowerCase();
+  const fed=new Map();
+  if(NET.mode==='bubbles'&&NET.clusters){
+   NET.clusters.forEach((c,ci)=>{
+    for(const n of c.nodes){if(!n.fs)continue;
+     const k=norm(n.fs);
+     if(!fed.has(k))fed.set(k,new Set());
+     fed.get(k).add(ci)}})}
 
   const nowMs=Date.now();
-  ctx.font=(9/NET.zoom)+'px ui-monospace,Menlo,monospace';
-  sorted.forEach((p,i)=>{
-   // start just off vertical so no label lands under the namespace legend
-   const ang=(i/Math.max(1,sorted.length))*Math.PI*2-Math.PI/2+0.42;
-   const px=Math.cos(ang)*baseR,py=Math.sin(ang)*baseR;
-   const age=nowMs-(p.last_success_ms||0);
-   const fresh=p.last_success_ms&&age<90000;
-   const stale=p.last_success_ms&&!fresh;
+  const t=now;
+  NET.peerViews.forEach((v,idx)=>{
+   // slow, smooth wander: two sines at incommensurate rates per peer
+   const ang=v.home
+     +0.20*Math.sin(t*0.000115*v.spd+v.ph)
+     +0.07*Math.sin(t*0.000067*v.spd+v.ph*2.3);
+   const rad=baseR*(0.94+0.06*Math.sin(t*0.00009*v.spd+v.ph*1.7));
+   // dragged offset springs home: pull toward zero, damped, so a released
+   // peer drifts back into its own orbit instead of snapping
+   v.vx-=v.ox*0.035;v.vy-=v.oy*0.035;v.vx*=0.86;v.vy*=0.86;
+   v.ox+=v.vx;v.oy+=v.vy;
+   const bx=Math.cos(ang)*rad, by=Math.sin(ang)*rad;
+   const px=bx+v.ox, py=by+v.oy;
+   v.bx=bx;v.by=by;v.x=px;v.y=py;v.ang=ang;
+   const hovered=NET.peerHover===v;
+   const age=nowMs-(v.last||0);
+   const fresh=v.last&&age<90000;
+   const stale=v.last&&!fresh;
    const col=fresh?'#4cd6c8':(stale?'#e3b341':'#5f6f85');
-   // tether to the core, faint and dashed so it never reads as a record link
-   ctx.setLineDash([3/NET.zoom,6/NET.zoom]);
-   ctx.strokeStyle='rgba(120,150,190,.18)';ctx.lineWidth=.7/NET.zoom;
-   ctx.beginPath();ctx.moveTo(Math.cos(ang)*(baseR*.32),Math.sin(ang)*(baseR*.32));ctx.lineTo(px,py);ctx.stroke();
-   ctx.setLineDash([]);
+
+   // broken lines to every bubble: a peer is a syncing source for this
+   // node's whole view. Weight carries the evidence - a bubble whose
+   // records actually arrived from this peer (local first_seen) is drawn
+   // strong in the peer's colour; the rest stay faint and neutral, reading
+   // as "syncing, origin unconfirmed" rather than a claim.
+   const targets=fed.get(norm(v.addr))||new Set();
+   ctx.setLineDash([3/NET.zoom,5/NET.zoom]);
+   ctx.lineDashOffset=-(t/45+v.ph*10)/NET.zoom;
+   if(NET.mode==='bubbles'&&NET.clusters){
+    NET.clusters.forEach((c,ci)=>{
+     const confirmed=targets.has(ci);
+     const mx=(px+c.cx)/2,my=(py+c.cy)/2;
+     const dx=c.cx-px,dy=c.cy-py,len=Math.hypot(dx,dy)||1;
+     const bow=((v.ph%2)-1)*len*0.12;
+     const cx2=mx-dy/len*bow, cy2=my+dx/len*bow;
+     if(confirmed){
+      ctx.strokeStyle=col;ctx.globalAlpha=hovered?.7:.45;ctx.lineWidth=(hovered?1.4:.9)/NET.zoom;
+     }else{
+      // same peer colour, lower weight: the peer is syncing this bubble's
+      // records; which of them it delivered first is not (yet) confirmed
+      ctx.strokeStyle=col;ctx.globalAlpha=hovered?.34:.17;ctx.lineWidth=(hovered?1:.7)/NET.zoom;
+     }
+     ctx.beginPath();ctx.moveTo(px,py);ctx.quadraticCurveTo(cx2,cy2,c.cx,c.cy);ctx.stroke();
+    });
+   }else{
+    // mesh/layers: one whisper toward the core keeps an empty peer placed
+    ctx.strokeStyle='rgba(120,150,190,'+(fresh?.16:.10)+')';ctx.lineWidth=.6/NET.zoom;
+    ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(0,0);ctx.stroke();
+   }
+   ctx.setLineDash([]);ctx.globalAlpha=1;
    // the peer itself: a small ring, not a neuron - nodes are not records
-   ctx.strokeStyle=col;ctx.lineWidth=1.2/NET.zoom;
-   ctx.beginPath();ctx.arc(px,py,4.5/NET.zoom,0,7);ctx.stroke();
+   ctx.strokeStyle=col;ctx.lineWidth=(hovered?1.8:1.2)/NET.zoom;
+   ctx.beginPath();ctx.arc(px,py,(hovered?6:4.5)/NET.zoom,0,7);ctx.stroke();
    ctx.fillStyle=col;ctx.globalAlpha=.85;
    ctx.beginPath();ctx.arc(px,py,1.6/NET.zoom,0,7);ctx.fill();ctx.globalAlpha=1;
+   // its name, always: anchored toward the field so it cannot leave the
+   // frame, brighter and more detailed under the pointer
+   const label=String(v.addr).replace(/^[a-z]+:\/\//i,'');
+   // labels point away from the field: bubbles already own the inside
+   const side=px>=0?1:-1;
+   ctx.font=(hovered?10.5:9)/NET.zoom+'px ui-monospace,Menlo,monospace';
+   ctx.textAlign=side>0?'left':'right';
+   const lx=px+side*(9/NET.zoom);
+   if(hovered){
+    const ageTxt=v.last?((Math.round((nowMs-v.last)/1000))+'s ago'):'never synced';
+    ctx.fillStyle='rgba(5,8,13,.72)';
+    const tw=ctx.measureText(label+'  '+ageTxt).width+8/NET.zoom;
+    ctx.fillRect(px>0?lx-tw:lx, py-7/NET.zoom, tw, 13/NET.zoom);
+    ctx.fillStyle='#e8eef7';ctx.fillText(label+'  '+ageTxt,lx,py+3.5/NET.zoom);
+   }else{
+    const tw=ctx.measureText(label).width+6/NET.zoom;
+    ctx.fillStyle='rgba(5,8,13,.55)';
+    ctx.fillRect(side>0?lx:lx-tw,py-6.5/NET.zoom,tw,11.5/NET.zoom);
+    ctx.fillStyle=col;ctx.globalAlpha=.9;
+    ctx.fillText(label,lx,py+3/NET.zoom);ctx.globalAlpha=1;
+   }
+   ctx.textAlign='left';
   });
  }
  for(const n of NET.nodes){if(strandMode&&n.c!==NET.strand)continue;
@@ -1802,6 +1895,16 @@ function nodeAt(ev){const cv=document.getElementById('graph');const r=cv.getBoun
  for(const n of NET.nodes){if(NET.sub==='strand'&&NET.strand&&n.c!==NET.strand)continue;
   const[sx,sy]=worldToScreen(n,cv);
   const d=Math.hypot(sx-px,sy-py);if(d<bd){bd=d;best=n}}return best}
+// A peer satellite is grabbable and hoverable like a bubble.
+function peerAt(ev){const cv=document.getElementById('graph');
+ if(!NET.showPeers||!NET.peerViews||!NET.peerViews.length)return null;
+ const r=cv.getBoundingClientRect();
+ const px=(ev.clientX-r.left)*(cv.width/r.width),py=(ev.clientY-r.top)*(cv.height/r.height);
+ let best=null,bd=Math.max(10,16/Math.sqrt(NET.zoom));
+ for(const v of NET.peerViews){
+  const[sx,sy]=worldToScreen({x:v.x,y:v.y},cv);
+  const d=Math.hypot(sx-px,sy-py);if(d<bd){bd=d;best=v}}
+ return best}
 // The bubble itself is grabbable: dragging one pulls it out of the field,
 // and its generation-ring spring carries it slowly home on release.
 function bubbleAt(ev){const cv=document.getElementById('graph');
@@ -1823,12 +1926,14 @@ function calloutFor(p){const co=document.getElementById('callout');
   `<div style="margin-top:.4rem"><a href="#" onclick="show('${p.id}');return false">open full record →</a></div>`;
  co.onclick=e=>{if(e.target===co){co.style.display='none';NET.sel=null}}}
 function wireGraph(){if(NET.wired){wake();return}NET.wired=true;const cv=document.getElementById('graph');
- cv.onmousedown=ev=>{NET.moved=0;const n=nodeAt(ev);
-  if(n){NET.drag={n,x:n.x,y:n.y};NET.alpha=Math.max(NET.alpha,.35)}
-  else{const b=bubbleAt(ev);
+ cv.onmousedown=ev=>{NET.moved=0;const pp=peerAt(ev);
+  if(pp){NET.drag={p:pp}}
+  else{const n=nodeAt(ev);
+   if(n){NET.drag={n,x:n.x,y:n.y};NET.alpha=Math.max(NET.alpha,.35)}
+   else{const b=bubbleAt(ev);
    if(b)NET.drag={c:b};
-   else NET.drag={pan:{x:NET.pan.x,y:NET.pan.y,mx:ev.clientX,my:ev.clientY}}}
-  cv.style.cursor=NET.drag.n||NET.drag.c?'grabbing':'move';wake()};
+   else NET.drag={pan:{x:NET.pan.x,y:NET.pan.y,mx:ev.clientX,my:ev.clientY}}}}
+  cv.style.cursor=NET.drag.n||NET.drag.c||NET.drag.p?'grabbing':'move';wake()};
  window.addEventListener('mouseup',()=>{if(NET.drag){const d=NET.drag;NET.drag=null;
   if(d.c){d.c.vx=0;d.c.vy=0} // elastic: the ring spring takes it home
   cv.style.cursor='grab'}});
@@ -1836,13 +1941,16 @@ function wireGraph(){if(NET.wired){wake();return}NET.wired=true;const cv=documen
    const r=cv.getBoundingClientRect();
    const px=(ev.clientX-r.left)*(cv.width/r.width),py=(ev.clientY-r.top)*(cv.height/r.height);
    if(d.n){const w=screenToWorld(px,py,cv);d.x=w[0];d.y=w[1]}
+   else if(d.p){const w=screenToWorld(px,py,cv);
+    d.p.ox=w[0]-d.p.bx;d.p.oy=w[1]-d.p.by;d.p.vx=0;d.p.vy=0}
    else if(d.c){const w=screenToWorld(px,py,cv);
     const dx=w[0]-d.c.cx,dy=w[1]-d.c.cy;d.c.cx=w[0];d.c.cy=w[1];d.c.vx=0;d.c.vy=0;
     for(const n of d.c.nodes){n.x+=dx;n.y+=dy}}
    else{NET.pan.x=d.pan.x+(ev.clientX-d.pan.mx);NET.pan.y=d.pan.y+(ev.clientY-d.pan.my)}
    wake();return}
-  NET.hover=nodeAt(ev);cv.style.cursor=NET.hover?'pointer':'grab'};
- cv.onmouseleave=()=>{NET.hover=null};
+  NET.hover=nodeAt(ev);NET.peerHover=peerAt(ev);
+  cv.style.cursor=(NET.hover||NET.peerHover)?'pointer':'grab';wake()};
+ cv.onmouseleave=()=>{NET.hover=null;NET.peerHover=null;wake()};
  cv.onclick=ev=>{if(NET.moved>4)return;const n=nodeAt(ev);
   if(n){NET.sel=n;calloutFor(n);spawnBurst(n);wake()}else{NET.sel=null;document.getElementById('callout').style.display='none'}};
  cv.onwheel=ev=>{if(!ev.ctrlKey)return;ev.preventDefault();const r=cv.getBoundingClientRect();
@@ -1859,7 +1967,9 @@ function wireGraph(){if(NET.wired){wake();return}NET.wired=true;const cv=documen
  cv.addEventListener('touchstart',ev=>{ev.preventDefault();
   if(ev.touches.length===2){NET.drag=null;NET.pinch={d:tdist(ev),z:NET.zoom};return}
   const t=ev.touches[0];NET.moved=0;NET.tapN=nodeAt(t);
-  if(NET.tapN){NET.drag={n:NET.tapN,x:NET.tapN.x,y:NET.tapN.y};NET.alpha=Math.max(NET.alpha,.35)}
+  const tp=peerAt(t);
+  if(tp){NET.drag={p:tp}}
+  else if(NET.tapN){NET.drag={n:NET.tapN,x:NET.tapN.x,y:NET.tapN.y};NET.alpha=Math.max(NET.alpha,.35)}
   else{const b=bubbleAt(t);
    if(b)NET.drag={c:b};
    else NET.drag={pan:{x:NET.pan.x,y:NET.pan.y,mx:t.clientX,my:t.clientY}}}
@@ -1867,8 +1977,9 @@ function wireGraph(){if(NET.wired){wake();return}NET.wired=true;const cv=documen
  cv.addEventListener('touchmove',ev=>{ev.preventDefault();
   if(NET.pinch&&ev.touches.length===2){NET.zoom=zclamp(NET.pinch.z*tdist(ev)/NET.pinch.d);zoomCross();drawMesh();return}
   if(NET.drag&&ev.touches.length===1){NET.moved++;const t=ev.touches[0];const d=NET.drag;
-   if(d.n||d.c){const p=tpos(t);const w=screenToWorld(p[0],p[1],cv);
+   if(d.n||d.c||d.p){const p=tpos(t);const w=screenToWorld(p[0],p[1],cv);
     if(d.n){d.x=w[0];d.y=w[1]}
+    else if(d.p){d.p.ox=w[0]-d.p.bx;d.p.oy=w[1]-d.p.by;d.p.vx=0;d.p.vy=0}
     else{const dx=w[0]-d.c.cx,dy=w[1]-d.c.cy;
      d.c.cx=w[0];d.c.cy=w[1];d.c.vx=0;d.c.vy=0;
      for(const n of d.c.nodes){n.x+=dx;n.y+=dy}}}
@@ -1988,6 +2099,7 @@ async function loadEcosystem(){
   offset+=page}
  const [ps,st]=await Promise.all([j('/v1/peers'),j('/v1/status')]);
  NET.peers=(ps&&ps.peers)||[];
+ NET.peerSig=null; // rebuild views so ages and addresses follow the refresh
  NET.selfKey=st&&st.identity?st.identity:null;
  NET.entriesAll=entries;
  const sel=document.getElementById('nsFilter');
