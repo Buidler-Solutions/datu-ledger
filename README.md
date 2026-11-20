@@ -1,6 +1,6 @@
 # DATU - Decentralized Accountable Trust Union
 
-[![ci](https://github.com/greenarmor/datu-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/greenarmor/datu-ledger/actions/workflows/ci.yml)
+[![ci](https://github.com/Buidler-Solutions/datu-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Buidler-Solutions/datu-ledger/actions/workflows/ci.yml)
 [![GESF Compliance](badge.svg)](compliance/attestations-standards.md)
 
 <details>

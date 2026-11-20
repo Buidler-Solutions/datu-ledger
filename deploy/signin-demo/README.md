@@ -6,7 +6,7 @@ party (`web/signin-demo`), and Caddy for automatic TLS.
 ## On a fresh VPS
 
 ```bash
-git clone https://github.com/greenarmor/datu-ledger && cd datu-ledger
+git clone https://github.com/Buidler-Solutions/datu-ledger && cd datu-ledger
 # point demo.example.com at this box, then:
 cd deploy/signin-demo
 sed -i 's/demo.example.com/your.domain/' Caddyfile

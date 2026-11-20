@@ -120,7 +120,7 @@ def main():
         "dataLicense": "CC0-1.0",
         "SPDXID": "SPDXRef-DOCUMENT",
         "name": f"{doc_name}-sbom",
-        "documentNamespace": f"https://github.com/greenarmor/datu-ledger/spdx/{doc_name}",
+        "documentNamespace": f"https://github.com/Buidler-Solutions/datu-ledger/spdx/{doc_name}",
         "creationInfo": {
             "created": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat(),
             "creators": ["Tool: datu-sbom-generator"],

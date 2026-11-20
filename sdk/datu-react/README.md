@@ -1,6 +1,6 @@
 # @greenarmor/datu-react
 
-React hooks for [DATU](https://github.com/greenarmor/datu-ledger) over
+React hooks for [DATU](https://github.com/Buidler-Solutions/datu-ledger) over
 `@greenarmor/datu-client`: a provider that owns the Signet connection,
 plus hooks for SignetAuth sign-in, identity listing, party signing and
 coverage checks. Build-free plain JS (no JSX step), React 18 and 19.

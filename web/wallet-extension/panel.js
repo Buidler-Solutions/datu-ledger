@@ -220,8 +220,8 @@ async function autoPair() {
 }
 
 // ---- connection state: auto-detect the local Signet, explain how to get one ----
-const REPO_URL = 'https://github.com/greenarmor/datu-ledger';
-const RELEASES_URL = 'https://github.com/greenarmor/datu-ledger/releases';
+const REPO_URL = 'https://github.com/Buidler-Solutions/datu-ledger';
+const RELEASES_URL = 'https://github.com/Buidler-Solutions/datu-ledger/releases';
 
 function setConnState(kind, detail = '') {
   const text = $('connText');

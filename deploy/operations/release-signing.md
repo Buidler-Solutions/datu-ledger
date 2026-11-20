@@ -26,7 +26,7 @@ grep "datu-v0.2.0-x86_64-apple-darwin.tar.gz" SHA256SUMS | shasum -a 256 --check
 cosign verify-blob \
   --signature SHA256SUMS.sig \
   --certificate SHA256SUMS.pem \
-  --certificate-identity-regexp "^https://github.com/greenarmor/datu-ledger/" \
+  --certificate-identity-regexp "^https://github.com/Buidler-Solutions/datu-ledger/" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   SHA256SUMS
 ```
