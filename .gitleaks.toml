@@ -1,17 +1,31 @@
-# Gitleaks configuration: default rules, plus one documented allowlist for
-# the throwaway service-container passwords that briefly existed in CI
-# history (job-local postgres/mysql containers, never real credentials).
-# The current tree carries no credentials; see the SECRETS-001 remediation
-# in the GESF compliance record.
+# Gitleaks configuration: the default rule set, with two documented
+# allowlist groups. The one historical entry covers throwaway service
+# container passwords that briefly lived in CI; the rest are values that
+# look like secrets to the generic-api-key rule but are not:
+#   - public keys and canonical signing test vectors, which must stay
+#     byte-identical across languages (Rust, JS, Python) to verify signatures
+#   - code identifiers whose names contain "signature" or "derived"
 [extend]
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "Throwaway CI service-container passwords in history"
 regexTarget = "match"
+regexes = ['''(?i)(postgres|mysql)://(postgres|root):secret@''']
+paths = ['''.github/workflows/ci\.yml''']
+
+[[allowlists]]
+description = "Public demo key used as a test constant (not a secret: it verifies, it cannot sign)"
+paths = ['''sdk/datu-client/test/identity\.test\.mjs''']
+
+[[allowlists]]
+description = "Canonical signing vector: deterministic test key shared across Rust, JS and Python verifiers"
+paths = ['''crates/core/tests/fixtures/canonical_vectors\.json''']
+
+[[allowlists]]
+description = "Code identifiers matched by the generic-api-key heuristic"
+regexTarget = "match"
 regexes = [
-  '''(?i)(postgres|mysql)://(postgres|root):secret@''',
-]
-paths = [
-  '''.github/workflows/ci\.yml''',
+  '''\bsignatureB64\b''',
+  '''\bBLAKE3-derived\b''',
 ]
