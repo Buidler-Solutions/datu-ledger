@@ -1762,8 +1762,28 @@ function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;cons
      ctx.beginPath();ctx.moveTo(px,py);ctx.quadraticCurveTo(cx2,cy2,c.cx,c.cy);ctx.stroke();
     });
    }else{
-    // mesh/layers: one whisper toward the core keeps an empty peer placed
-    ctx.strokeStyle='rgba(120,150,190,'+(fresh?.16:.10)+')';ctx.lineWidth=.6/NET.zoom;
+    // mesh and layered views have no bubbles, so the syncing web is drawn
+    // peer to peer: every satellite links to every other one, the same
+    // broken dashes as the bubble links, because they are syncing the same
+    // ledger with each other and with this node. O(n^2) with n small; the
+    // guard keeps an absurd peer table from melting the frame.
+    const peers=NET.peerViews;
+    if(peers.length<=24){
+     peers.forEach(other=>{
+      if(other===v)return;
+      const oi=peers.indexOf(other);if(oi<idx)return; // one line per pair
+      const freshPair=fresh||(other.last&&nowMs-other.last<90000);
+      // bow each pair differently so 15 lines between 6 nodes stay legible
+      const dx=other.x-px,dy=other.y-py,len=Math.hypot(dx,dy)||1;
+      const bow=(((v.ph+other.ph)%2)-1)*len*0.10;
+      const mx=(px+other.x)/2-dy/len*bow, my=(py+other.y)/2+dx/len*bow;
+      ctx.strokeStyle=freshPair?'#4cd6c8':'rgba(120,150,190,1)';
+      ctx.globalAlpha=hovered?.38:.20;ctx.lineWidth=(hovered?1.1:.75)/NET.zoom;
+      ctx.beginPath();ctx.moveTo(px,py);ctx.quadraticCurveTo(mx,my,other.x,other.y);ctx.stroke();
+     });
+    }
+    // and the tether to the core, same language
+    ctx.globalAlpha=hovered?.32:.15;
     ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(0,0);ctx.stroke();
    }
    ctx.setLineDash([]);ctx.globalAlpha=1;
