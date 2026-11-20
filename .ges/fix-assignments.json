@@ -15,11 +15,17 @@
     "assignee_role": "Security Engineer",
     "assigned_at": "2026-11-20T11:42:00.512Z",
     "assigned_by": "greenarmor",
-    "status": "assigned",
+    "status": "fixed",
     "notes": "",
-    "resolution": null,
+    "resolution": {
+      "resolved_at": "2026-11-20T12:06:26.320Z",
+      "resolved_by": "greenarmor",
+      "resolved_by_role": "Security Engineer",
+      "method": "manual",
+      "resolution_notes": "Attested by the maintainer after the evidence landed: legal-basis register (compliance/legal-bases.json + CI gate), privacy notice (PRIVACY.md), consent mechanism (datu consent + compliance/consent-management.md). Control set to pass by the human reviewer."
+    },
     "created_at": "2026-11-20T11:42:00.512Z",
-    "updated_at": "2026-11-20T11:42:00.512Z"
+    "updated_at": "2026-11-20T12:06:26.320Z"
   },
   {
     "id": "fa-1795175032227-2",
@@ -37,10 +43,16 @@
     "assignee_role": "Security Engineer",
     "assigned_at": "2026-11-20T11:43:52.227Z",
     "assigned_by": "greenarmor",
-    "status": "assigned",
+    "status": "fixed",
     "notes": "",
-    "resolution": null,
+    "resolution": {
+      "resolved_at": "2026-11-20T12:04:45.976Z",
+      "resolved_by": "greenarmor",
+      "resolved_by_role": "Tech Lead",
+      "method": "manual",
+      "resolution_notes": ""
+    },
     "created_at": "2026-11-20T11:43:52.227Z",
-    "updated_at": "2026-11-20T11:43:52.227Z"
+    "updated_at": "2026-11-20T12:04:45.976Z"
   }
 ]
