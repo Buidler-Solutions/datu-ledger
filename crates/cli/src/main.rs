@@ -442,6 +442,53 @@ enum EnrollCmd {
         #[arg(long)]
         min_cosigners: Option<usize>,
     },
+    /// Open a guardian recovery: the NEW key announces that the old one is
+    /// lost and asks guardians to vouch. Signed by the new key (proof of
+    /// possession); nothing is published until a registry approves
+    Recover {
+        /// The lost key (hex) being replaced
+        #[arg(long)]
+        lost: String,
+        /// Claims for the replacement attestation
+        #[arg(long)]
+        claims: String,
+        /// Optional human-readable label
+        #[arg(long)]
+        label: Option<String>,
+        /// Where to write the recovery request
+        #[arg(long)]
+        out: PathBuf,
+        /// Signet wallet identity to sign with (default: this node)
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+    /// Co-sign a recovery request as a guardian (one signature each; the
+    /// quorum is counted by distinct guardian keys at approval)
+    GuardianSign {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Signet wallet identity to sign with (default: this node)
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+    /// Approve a recovery: verify the citizen and guardian signatures, then
+    /// attest the new key and revoke the lost one (one act, one audit trail)
+    RecoverApprove {
+        #[arg(long)]
+        input: PathBuf,
+        /// Distinct guardian signatures required
+        #[arg(long, default_value_t = 1)]
+        min_guardians: usize,
+        /// Keep the lost key unrevoked (the default revokes it)
+        #[arg(long)]
+        no_revoke_lost: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2904,6 +2951,268 @@ fn cmd_enroll_approve(
     Ok(())
 }
 
+/// `enroll recover`: the citizen, holding the NEW key, opens a guardian
+/// recovery for a lost one. Nothing is published: guardians co-sign, then a
+/// registry approves. Signing with the new key is the anti-ghost rule of
+/// enrollment applied to recovery.
+#[allow(clippy::too_many_arguments)]
+fn cmd_enroll_recover(
+    data_dir: &Path,
+    lost: String,
+    claims: String,
+    label: Option<String>,
+    out: PathBuf,
+    name: Option<String>,
+    passphrase: Option<String>,
+) -> Result<(), String> {
+    parse_id(&lost)
+        .map_err(|_| "lost key must be a 32-byte Ed25519 public key (hex)".to_string())?;
+    let claims: serde_json::Value = serde_json::from_str(&claims)
+        .map_err(|e| format!("--claims must be a JSON object: {e}"))?;
+    if !claims.is_object() {
+        return Err("--claims must be a JSON object".into());
+    }
+    let (subject, mut document, signed_with) = if let Some(name) = &name {
+        let pass = get_passphrase(passphrase.clone())?;
+        let wallet = datu_wallet::Wallet::open(data_dir);
+        let identity = wallet.load(name, &pass)?;
+        let key = identity.public.ed_public.clone();
+        let doc = enroll::build_recovery(&key, &lost, label.as_deref(), claims);
+        (key, doc, format!("wallet identity {name}"))
+    } else {
+        let node = load_node_reader(data_dir)?;
+        let doc = enroll::build_recovery(&node.identity, &lost, label.as_deref(), claims);
+        (node.identity.clone(), doc, "this node".to_string())
+    };
+    if let Some(name) = &name {
+        let pass = get_passphrase(passphrase.clone())?;
+        let wallet = datu_wallet::Wallet::open(data_dir);
+        let identity = wallet.load(name, &pass)?;
+        s(enroll::sign_append(
+            &mut document,
+            enroll::ROLE_CITIZEN,
+            &identity.ed,
+            Some(&identity.pq),
+        ))?;
+    } else {
+        let node = load_node_reader(data_dir)?;
+        s(enroll::sign_append(
+            &mut document,
+            enroll::ROLE_CITIZEN,
+            &node.key,
+            Some(&node.pq_key),
+        ))?;
+    }
+    let json = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
+    std::fs::write(&out, &json).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    println!("recovery request written: {}", out.display());
+    println!("  new key: {subject} ({signed_with})");
+    println!("  lost:    {lost}");
+    println!(
+        "  next: each guardian runs: datu enroll guardian-sign --input {} --out <file>",
+        out.display()
+    );
+    Ok(())
+}
+
+/// `enroll guardian-sign`: a guardian co-signs the recovery request. Distinct
+/// guardian keys form the quorum; signing twice as the same guardian counts
+/// once.
+fn cmd_guardian_sign(
+    data_dir: &Path,
+    input: PathBuf,
+    out: PathBuf,
+    name: Option<String>,
+    passphrase: Option<String>,
+) -> Result<(), String> {
+    let mut document: SignedDocument = serde_json::from_slice(
+        &std::fs::read(&input).map_err(|e| format!("cannot read {}: {e}", input.display()))?,
+    )
+    .map_err(|e| format!("{} is not a signed document: {e}", input.display()))?;
+    let doc = enroll::parse_recovery(&document)?;
+    if !document.has_verified_role(enroll::ROLE_CITIZEN) {
+        return Err(format!(
+            "no verified '{}' signature: the holder of the new key must open the recovery first",
+            enroll::ROLE_CITIZEN
+        ));
+    }
+    let (guardian_key, signed_with) = if let Some(name) = &name {
+        let pass = get_passphrase(passphrase.clone())?;
+        let wallet = datu_wallet::Wallet::open(data_dir);
+        let identity = wallet.load(name, &pass)?;
+        s(enroll::sign_append(
+            &mut document,
+            enroll::ROLE_GUARDIAN,
+            &identity.ed,
+            Some(&identity.pq),
+        ))?;
+        (
+            identity.public.ed_public.clone(),
+            format!("wallet identity {name}"),
+        )
+    } else {
+        let node = load_node_reader(data_dir)?;
+        s(enroll::sign_append(
+            &mut document,
+            enroll::ROLE_GUARDIAN,
+            &node.key,
+            Some(&node.pq_key),
+        ))?;
+        (node.identity.clone(), "this node".to_string())
+    };
+    let json = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
+    std::fs::write(&out, &json).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    let guardians = document
+        .parties
+        .iter()
+        .filter(|p| p.role == enroll::ROLE_GUARDIAN)
+        .count();
+    println!(
+        "recovery co-signed as guardian {} ({signed_with})",
+        short(&guardian_key)
+    );
+    println!(
+        "  guardians so far in this file: {guardians} (new key {})",
+        short(&doc.subject)
+    );
+    Ok(())
+}
+
+/// `enroll recover-approve`: verify the recovery (citizen = new key,
+/// distinct guardian quorum), publish the `identity.recover` record and the
+/// replacement attestation, and revoke the lost key in the same act unless
+/// `--no-revoke-lost` says otherwise. Recovery and ejection are one event:
+/// leaving the lost key attested would leave whoever holds it admitted.
+fn cmd_recover_approve(
+    node: &Node,
+    input: PathBuf,
+    min_guardians: usize,
+    no_revoke_lost: bool,
+) -> Result<(), String> {
+    let document: SignedDocument = serde_json::from_slice(
+        &std::fs::read(&input).map_err(|e| format!("cannot read {}: {e}", input.display()))?,
+    )
+    .map_err(|e| format!("{} is not a signed document: {e}", input.display()))?;
+    let (doc, guardians) = enroll::verify_recovery(&document, min_guardians)?;
+
+    // The recovery record: the ceremony evidence, both roles, all guardians.
+    let payload = document.payload_bytes()?;
+    let latest = s(node.store.latest(&node.identity))?;
+    let (seq, prev) = match &latest {
+        Some(e) => (e.body.seq + 1, Some(s(e.id())?)),
+        None => (0, None),
+    };
+    let body = EntryBody {
+        version: datu_core::ENTRY_VERSION,
+        author: node.identity.clone(),
+        author_pq: String::new(),
+        pq_alg: String::new(),
+        namespace: enroll::NS_RECOVER.to_string(),
+        seq,
+        prev,
+        refs: vec![],
+        timestamp_ms: now_ms(),
+        payload,
+    };
+    let record = s(Entry::sign(body, &node.key, &node.pq_key))?;
+    let record_id = s(record.id())?;
+    if !s(node.store.insert_entry(&record))? {
+        return Err("recovery record unexpectedly already present".into());
+    }
+
+    // The replacement attestation, bound to the record, naming the recovery.
+    let mut claims = doc.claims.clone();
+    if let Some(map) = claims.as_object_mut() {
+        map.insert(
+            "recovered_from".into(),
+            serde_json::Value::String(doc.lost.clone()),
+        );
+    }
+    let attest_doc = AttestationDoc {
+        subject: doc.subject.clone(),
+        label: doc.label.clone(),
+        claims,
+    };
+    let latest = s(node.store.latest(&node.identity))?;
+    let (seq, prev) = match &latest {
+        Some(e) => (e.body.seq + 1, Some(s(e.id())?)),
+        None => (0, None),
+    };
+    let body = EntryBody {
+        version: datu_core::ENTRY_VERSION,
+        author: node.identity.clone(),
+        author_pq: String::new(),
+        pq_alg: String::new(),
+        namespace: attest::NS_ATTEST.to_string(),
+        seq,
+        prev,
+        refs: vec![record_id],
+        timestamp_ms: now_ms(),
+        payload: attest_doc.payload_bytes()?,
+    };
+    let attest_entry = s(Entry::sign(body, &node.key, &node.pq_key))?;
+    let attest_id = s(attest_entry.id())?;
+    if !s(node.store.insert_entry(&attest_entry))? {
+        return Err("attestation unexpectedly already present".into());
+    }
+
+    println!("recovery {} published", hex::encode(record_id));
+    println!("attestation {} published", hex::encode(attest_id));
+    println!(
+        "  new key {} attested, {} guardian(s): {}",
+        short(&doc.subject),
+        guardians.len(),
+        guardians
+            .iter()
+            .map(|g| short(g))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    if no_revoke_lost {
+        println!(
+            "  lost key {} left attested (--no-revoke-lost): whoever holds it is still admitted",
+            short(&doc.lost)
+        );
+        return Ok(());
+    }
+    // The lost key is ejected by the same act: append-only, a revoke
+    // statement, never an edit.
+    let revoke = attest::RevokeDoc {
+        attestation: None,
+        subject: Some(doc.lost.clone()),
+        reason: Some(format!("key loss: recovered to {}", short(&doc.subject))),
+    };
+    let latest = s(node.store.latest(&node.identity))?;
+    let (seq, prev) = match &latest {
+        Some(e) => (e.body.seq + 1, Some(s(e.id())?)),
+        None => (0, None),
+    };
+    let body = EntryBody {
+        version: datu_core::ENTRY_VERSION,
+        author: node.identity.clone(),
+        author_pq: String::new(),
+        pq_alg: String::new(),
+        namespace: attest::NS_REVOKE.to_string(),
+        seq,
+        prev,
+        refs: vec![],
+        timestamp_ms: now_ms(),
+        payload: revoke.payload_bytes()?,
+    };
+    let revoke_entry = s(Entry::sign(body, &node.key, &node.pq_key))?;
+    let revoke_id = s(revoke_entry.id())?;
+    if !s(node.store.insert_entry(&revoke_entry))? {
+        return Err("revocation unexpectedly already present".into());
+    }
+    println!(
+        "  lost key {} revoked ({})",
+        short(&doc.lost),
+        hex::encode(revoke_id)
+    );
+    Ok(())
+}
+
 // ---- identity watch ----
 
 /// "YYYY-MM-DD HH:MM:SSZ" from epoch milliseconds, UTC, no chrono dependency
@@ -4739,6 +5048,44 @@ fn run(cli: Cli) -> Result<(), String> {
                 input,
                 min_cosigners,
             } => cmd_enroll_approve(&load_node(&cli.data_dir)?, input, *min_cosigners),
+            EnrollCmd::Recover {
+                lost,
+                claims,
+                label,
+                out,
+                name,
+                passphrase,
+            } => cmd_enroll_recover(
+                &cli.data_dir,
+                lost.clone(),
+                claims.clone(),
+                label.clone(),
+                out.clone(),
+                name.clone(),
+                passphrase.clone(),
+            ),
+            EnrollCmd::GuardianSign {
+                input,
+                out,
+                name,
+                passphrase,
+            } => cmd_guardian_sign(
+                &cli.data_dir,
+                input.clone(),
+                out.clone(),
+                name.clone(),
+                passphrase.clone(),
+            ),
+            EnrollCmd::RecoverApprove {
+                input,
+                min_guardians,
+                no_revoke_lost,
+            } => cmd_recover_approve(
+                &load_node(&cli.data_dir)?,
+                input.clone(),
+                *min_guardians,
+                *no_revoke_lost,
+            ),
         },
         Commands::Watch {
             subject,
@@ -5522,6 +5869,149 @@ mod tests {
             "the terminal event must be unmistakable"
         );
         assert_eq!(watch_event_json(&revoked)["event"], "key_revoked");
+    }
+
+    /// Guardian recovery: quorum enforced, the new key attested with its
+    /// provenance, and the lost key revoked in the same act.
+    #[test]
+    fn guardian_recovery_attests_and_ejects() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(guardian_recovery_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn guardian_recovery_body() {
+        let reg = tempfile::tempdir().unwrap();
+        let new = tempfile::tempdir().unwrap();
+        let lost = tempfile::tempdir().unwrap();
+        let g1 = tempfile::tempdir().unwrap();
+        let g2 = tempfile::tempdir().unwrap();
+        for d in [reg.path(), new.path(), lost.path(), g1.path(), g2.path()] {
+            run(cli(d, Commands::Init)).unwrap();
+        }
+        let lost_key = load_node(lost.path()).unwrap().identity;
+
+        let request = reg.path().join("recover.json");
+        run(cli(
+            new.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::Recover {
+                    lost: lost_key.clone(),
+                    claims: r#"{"role":"bidder","legal_name":"Acme Ltd"}"#.into(),
+                    label: Some("Acme Ltd".into()),
+                    out: request.clone(),
+                    name: None,
+                    passphrase: None,
+                },
+            },
+        ))
+        .unwrap();
+
+        // Guardians cannot sign before the citizen opened the request.
+        let crude = reg.path().join("crude.json");
+        let document = serde_json::to_string_pretty(&datu_core::enroll::build_recovery(
+            &load_node(new.path()).unwrap().identity,
+            &lost_key,
+            None,
+            serde_json::json!({"role":"bidder"}),
+        ))
+        .unwrap();
+        std::fs::write(&crude, document).unwrap();
+        let err = run(cli(
+            g1.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::GuardianSign {
+                    input: crude,
+                    out: reg.path().join("crude-out.json"),
+                    name: None,
+                    passphrase: None,
+                },
+            },
+        ))
+        .unwrap_err();
+        assert!(err.contains("must open the recovery first"), "{err}");
+
+        let signed1 = g1.path().join("signed1.json");
+        run(cli(
+            g1.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::GuardianSign {
+                    input: request.clone(),
+                    out: signed1.clone(),
+                    name: None,
+                    passphrase: None,
+                },
+            },
+        ))
+        .unwrap();
+
+        // One guardian is not a quorum of two.
+        let err = run(cli(
+            reg.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::RecoverApprove {
+                    input: signed1.clone(),
+                    min_guardians: 2,
+                    no_revoke_lost: false,
+                },
+            },
+        ))
+        .unwrap_err();
+        assert!(err.contains("needs 2"), "{err}");
+
+        let signed2 = g2.path().join("signed2.json");
+        run(cli(
+            g2.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::GuardianSign {
+                    input: signed1,
+                    out: signed2.clone(),
+                    name: None,
+                    passphrase: None,
+                },
+            },
+        ))
+        .unwrap();
+
+        run(cli(
+            reg.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::RecoverApprove {
+                    input: signed2,
+                    min_guardians: 2,
+                    no_revoke_lost: false,
+                },
+            },
+        ))
+        .unwrap();
+
+        let node = load_node_reader(reg.path()).unwrap();
+        let entries = node.store.all_entries().unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.body.namespace == datu_core::enroll::NS_RECOVER),
+            "recovery record published"
+        );
+        let attest = entries
+            .iter()
+            .find(|e| e.body.namespace == "identity.attest")
+            .and_then(|e| attest::parse_attestation(e).map(|d| (e, d)))
+            .expect("replacement attestation published");
+        assert_eq!(
+            attest.1.claims["recovered_from"], lost_key,
+            "the attestation names the key it replaces"
+        );
+        let revoke = entries
+            .iter()
+            .find(|e| e.body.namespace == "identity.revoke")
+            .and_then(attest::parse_revoke)
+            .expect("the lost key is revoked in the same act");
+        assert_eq!(revoke.subject.as_deref(), Some(lost_key.as_str()));
+        assert!(revoke.reason.unwrap_or_default().contains("key loss"));
     }
 
     /// The two-signature enrollment ceremony end to end, and every ghost

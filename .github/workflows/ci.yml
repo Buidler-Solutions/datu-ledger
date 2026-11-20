@@ -27,7 +27,7 @@ jobs:
         run: cargo test --workspace --release
       - name: release binaries for drills
         run: cargo build --release -p datu-cli -p datu-indexer
-      - name: drills (backup/restore, crash recovery, bounded soak, fork, key rotation, ghost enrollment)
+      - name: drills (backup/restore, crash recovery, bounded soak, fork, key rotation, identity ceremonies)
         run: |
           ./deploy/drills/backup-restore.sh
           ./deploy/drills/crash-recovery.sh

@@ -88,4 +88,33 @@ grep -q "verified" "$Work/parties.log" \
   || { echo "FAIL: party signatures did not verify"; cat "$Work/parties.log"; exit 1; }
 echo "registrar + subject signatures verified on the published record"
 
-say "PASS: ghost enrollments never complete; honest two-signature enrollment publishes"
+say "guardian recovery: the NEW key asks, guardians vouch, the registry acts"
+for n in c2 g1 g2 lost; do "$Datu" --data-dir "$Work/$n" init >/dev/null; done
+L_KEY=$(key_of "$Work/lost")
+C2_KEY=$(key_of "$Work/c2")
+"$Datu" --data-dir "$Work/r" attest create --subject "$L_KEY"   --claims '{"role":"bidder"}' --label "Acme Ltd" >/dev/null
+"$Datu" --data-dir "$Work/c2" enroll recover --lost "$L_KEY"   --claims '{"role":"bidder","legal_name":"Acme Ltd"}' --label "Acme Ltd"   --out "$Work/recover.json" >/dev/null
+grep -q '"kind": "identity.recovery"' "$Work/recover.json"   || { echo "FAIL: recovery request has the wrong kind"; exit 1; }
+echo "request opened by the new key $C2_KEY for lost key $L_KEY"
+
+if "$Datu" --data-dir "$Work/r" enroll recover-approve --input "$Work/recover.json"   --min-guardians 2 >"$Work/nog.log" 2>&1; then
+  echo "FAIL: recovery approved with no guardian signatures"; exit 1
+fi
+grep -q "needs 2" "$Work/nog.log" || { echo "FAIL: refusal must name the quorum:"; cat "$Work/nog.log"; exit 1; }
+echo "refused without guardians: $(tail -1 "$Work/nog.log")"
+
+"$Datu" --data-dir "$Work/g1" enroll guardian-sign --input "$Work/recover.json"   --out "$Work/recover-g1.json" >/dev/null
+if "$Datu" --data-dir "$Work/r" enroll recover-approve --input "$Work/recover-g1.json"   --min-guardians 2 >"$Work/one.log" 2>&1; then
+  echo "FAIL: recovery approved below quorum"; exit 1
+fi
+grep -q "found 1" "$Work/one.log" || { echo "FAIL: refusal must count guardians:"; cat "$Work/one.log"; exit 1; }
+echo "refused below quorum: $(tail -1 "$Work/one.log")"
+
+"$Datu" --data-dir "$Work/g2" enroll guardian-sign --input "$Work/recover-g1.json"   --out "$Work/recover-g2.json" >/dev/null
+"$Datu" --data-dir "$Work/r" enroll recover-approve --input "$Work/recover-g2.json"   --min-guardians 2 >"$Work/approved.log"
+grep -q "revoked" "$Work/approved.log"   || { echo "FAIL: the lost key must be revoked in the same act"; cat "$Work/approved.log"; exit 1; }
+"$Datu" --data-dir "$Work/r" attest status --subject "$C2_KEY" >"$Work/c2.log"
+grep -q "recovered_from" "$Work/c2.log"   || { echo "FAIL: the replacement attestation must name its origin"; cat "$Work/c2.log"; exit 1; }
+echo "approved: new key attested with recovered_from, lost key revoked"
+
+say "PASS: ghost enrollments never complete; honest two-signature enrollment publishes; guardian recovery attests and ejects"
