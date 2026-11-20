@@ -1,11 +1,21 @@
 # Caddy runs rootless in this stack and listens on unprivileged ports; the
 # compose file maps 80/443 to them. Replace demo.example.com with your DNS
 # name; TLS is provisioned automatically.
+#
+# Transport hardening: TLS 1.2 minimum (1.3 preferred) and HSTS, because the
+# GDPR/OWASP controls on encryption in transit are satisfied here, at the
+# edge, and that must be visible in the deployment, not assumed.
 {
 	http_port 8080
 	https_port 8443
 }
 
 demo.example.com {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	header X-Content-Type-Options "nosniff"
+	header X-Frame-Options "DENY"
 	reverse_proxy dapp:5176
 }

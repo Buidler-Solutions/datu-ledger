@@ -1297,6 +1297,22 @@ fn read_request(stream: &TcpStream) -> Option<(String, String, Vec<u8>)> {
     Some((method, path, body))
 }
 
+/// Hardening headers for every response. HTML pages run our own inline
+/// explorer script, so the policy allows inline script and style but nothing
+/// external, no framing, no base rewriting, no form posts. JSON gets the
+/// strictest policy: it is data, not a document.
+fn security_headers(content_type: &str) -> String {
+    let mut headers = String::from(
+        "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n",
+    );
+    headers.push_str(if content_type.contains("text/html") {
+        "Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n"
+    } else {
+        "Content-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\n"
+    });
+    headers
+}
+
 fn respond(
     stream: &mut TcpStream,
     status: &str,
@@ -1304,7 +1320,8 @@ fn respond(
     body: &str,
 ) -> Result<(), String> {
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{}Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        security_headers(content_type),
         body.len()
     );
     stream
@@ -1331,7 +1348,8 @@ fn respond_json_retry(
 ) -> Result<(), String> {
     let body = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nRetry-After: {retry_after_s}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\n{}Access-Control-Allow-Origin: *\r\nRetry-After: {retry_after_s}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        security_headers("application/json"),
         body.len()
     );
     stream
@@ -2838,6 +2856,24 @@ mod request_limit_tests {
     use super::*;
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
+
+    /// Every response carries the hardening headers; HTML allows the inline
+    /// explorer script, JSON (data, not a document) does not.
+    #[test]
+    fn responses_carry_hardening_headers() {
+        let json = security_headers("application/json; charset=utf-8");
+        assert!(json.contains("X-Content-Type-Options: nosniff"), "{json}");
+        assert!(json.contains("Referrer-Policy: no-referrer"), "{json}");
+        assert!(json.contains("X-Frame-Options: DENY"), "{json}");
+        assert!(json.contains("frame-ancestors 'none'"), "{json}");
+        assert!(
+            !json.contains("script-src"),
+            "JSON must not allow scripts: {json}"
+        );
+        let html = security_headers("text/html; charset=utf-8");
+        assert!(html.contains("script-src 'unsafe-inline'"), "{html}");
+        assert!(html.contains("base-uri 'none'"), "{html}");
+    }
 
     /// Send `raw` from a client and parse it as one request on the server
     /// side. Returns what read_request made of it.
