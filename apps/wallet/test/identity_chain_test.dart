@@ -28,6 +28,32 @@ void main() {
     expect(lines.first, contains('cosigned by 1'));
   });
 
+  test('an attestation born from an enrollment names the ceremony', () {
+    final lines = describeIdentityChain(chain(attestations: [
+      {
+        'by': 'd53ad911aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'claims': {'role': 'bidder'},
+        'cosigners': const [],
+        'enroll': 'a4805edf00000000000000000000000000000000000000000000000000ff0e9c',
+        'revoked': false,
+      }
+    ]));
+    expect(lines.single, contains('via enrollment a4805edf...0e9c'));
+  });
+
+  test('a plain attestation carries no enrollment note', () {
+    final lines = describeIdentityChain(chain(attestations: [
+      {
+        'by': 'd53ad911aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'claims': {'role': 'bidder'},
+        'cosigners': const [],
+        'enroll': null,
+        'revoked': false,
+      }
+    ]));
+    expect(lines.single, isNot(contains('enrollment')));
+  });
+
   test('revocation stays attached to the attestation that was killed', () {
     final lines = describeIdentityChain(chain(attestations: [
       {

@@ -1106,6 +1106,21 @@ fn identity_chain_json(store: &Store, key: &str) -> Result<serde_json::Value, St
         for c in &cosigners {
             all_cosigners.insert(c.clone());
         }
+        // An attestation born from a two-signature enrollment cites the
+        // ceremony record; report the link so readers can see the subject
+        // consented with the enrolled key.
+        let enroll: serde_json::Value = entry
+            .body
+            .refs
+            .iter()
+            .find_map(|r| {
+                entries
+                    .iter()
+                    .find(|e| e.id().map(|x| x == *r).unwrap_or(false))
+                    .and_then(|e| datu_core::enroll::parse_enrollment(e).map(|_| hex::encode(*r)))
+            })
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null);
         let revoked = revoked_attestations.get(&id_hex).cloned();
         attestations.push(serde_json::json!({
             "id": id_hex,
@@ -1114,6 +1129,7 @@ fn identity_chain_json(store: &Store, key: &str) -> Result<serde_json::Value, St
             "claims": doc.claims,
             "timestamp_ms": entry.body.timestamp_ms,
             "cosigners": cosigners,
+            "enroll": enroll,
             // A revocation is a statement, not an edit: the attestation stays,
             // flagged, and the revoker is named.
             "revoked": revoked.is_some(),
@@ -2344,7 +2360,8 @@ async function show(id){let e=await j('/v1/entry/'+id);if(e.error)e=await j('/v1
    for(const a of ch.attestations){
     const claims=Object.entries(a.claims||{}).map(kv=>kv[0]+'='+JSON.stringify(kv[1])).join(', ');
     const cs=a.cosigners&&a.cosigners.length?(' | cosigned by '+a.cosigners.length+': '+a.cosigners.map(short).join(', ')):'';
-    facts.push('  attested by '+short(a.by)+(a.label?(' as '+a.label):'')+' - '+(claims||'(no claims)')+cs);
+    const en=a.enroll?(' | via enrollment '+short(a.enroll)):'';
+    facts.push('  attested by '+short(a.by)+(a.label?(' as '+a.label):'')+' - '+(claims||'(no claims)')+cs+en);
     if(a.revoked&&a.revoked_by) facts.push('    REVOKED by '+short(a.revoked_by.by)+(a.revoked_by.reason?(' - '+a.revoked_by.reason):''));
    }
    if(ch.revoked_by_key&&ch.revoked_by_key.by)
@@ -3171,5 +3188,69 @@ mod identity_chain_tests {
         );
         let chain = identity_chain_json(&store, &nobody).unwrap();
         assert_eq!(chain["counts"]["attestations"], 0);
+    }
+
+    /// An attestation born from a two-signature enrollment cites the
+    /// ceremony record; the chain names it, so readers can see the subject
+    /// consented with the enrolled key. An attestation citing nothing
+    /// reports no ceremony.
+    #[test]
+    fn chain_reports_the_enrollment_ceremony_link() {
+        let store = Store::open_in_memory().unwrap();
+        let subject_sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+        let subject = hex::encode(subject_sk.verifying_key().as_bytes());
+        let registrar_sk = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let mut doc = datu_core::enroll::build_doc(
+            &subject,
+            Some("Acme Ltd"),
+            serde_json::json!({"role":"bidder"}),
+        );
+        doc.sign(datu_core::enroll::ROLE_REGISTRAR, &registrar_sk, None)
+            .unwrap();
+        doc.sign(datu_core::enroll::ROLE_SUBJECT, &subject_sk, None)
+            .unwrap();
+        let enroll = entry_with(
+            3,
+            0,
+            datu_core::enroll::NS_ENROLL,
+            serde_json::to_value(&doc).unwrap(),
+            vec![],
+            None,
+        );
+        let enroll_id = enroll.id().unwrap();
+        store.insert_entry(&enroll).unwrap();
+        let attest = entry_with(
+            3,
+            1,
+            datu_core::attest::NS_ATTEST,
+            serde_json::to_value(AttestationDoc {
+                subject: subject.clone(),
+                label: Some("Acme Ltd".into()),
+                claims: serde_json::json!({"role":"bidder"}),
+            })
+            .unwrap(),
+            vec![enroll_id],
+            Some(enroll_id),
+        );
+        store.insert_entry(&attest).unwrap();
+        let chain = identity_chain_json(&store, &subject).unwrap();
+        assert_eq!(chain["attestations"][0]["enroll"], hex::encode(enroll_id));
+
+        let plain = entry_with(
+            3,
+            2,
+            datu_core::attest::NS_ATTEST,
+            serde_json::to_value(AttestationDoc {
+                subject: subject.clone(),
+                label: None,
+                claims: serde_json::json!({"role":"bidder"}),
+            })
+            .unwrap(),
+            vec![],
+            Some(attest.id().unwrap()),
+        );
+        store.insert_entry(&plain).unwrap();
+        let chain = identity_chain_json(&store, &subject).unwrap();
+        assert!(chain["attestations"][1]["enroll"].is_null());
     }
 }

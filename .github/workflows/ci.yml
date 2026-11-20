@@ -27,13 +27,14 @@ jobs:
         run: cargo test --workspace --release
       - name: release binaries for drills
         run: cargo build --release -p datu-cli -p datu-indexer
-      - name: drills (backup/restore, crash recovery, bounded soak, fork, key rotation)
+      - name: drills (backup/restore, crash recovery, bounded soak, fork, key rotation, ghost enrollment)
         run: |
           ./deploy/drills/backup-restore.sh
           ./deploy/drills/crash-recovery.sh
           ./deploy/drills/soak.sh 100
           ./deploy/drills/fork-drill.sh
           ./deploy/drills/key-rotation.sh
+          ./deploy/drills/enroll-ghost.sh
       - name: dependency inventory + SPDX SBOM (denied licenses)
         run: |
           python3 deploy/checks/inventory.py

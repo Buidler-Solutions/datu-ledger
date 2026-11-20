@@ -4,6 +4,7 @@ pub mod auth_webauthn;
 pub mod bloom;
 pub mod checkpoint;
 pub mod contract;
+pub mod enroll;
 pub mod entry;
 pub mod error;
 pub mod feed;

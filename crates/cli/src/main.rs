@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use datu_core::attest::{self, AttestationDoc, CosignDoc};
 use datu_core::checkpoint::CoverageProof;
 use datu_core::contract::{self, ContractSpec};
+use datu_core::enroll;
 use datu_core::fork::{self, ForkEvidence};
 use datu_core::merkle::merkle_root;
 use datu_core::parties::SignedDocument;
@@ -108,6 +109,13 @@ enum Commands {
     Attest {
         #[command(subcommand)]
         cmd: AttestCmd,
+    },
+    /// Two-signature enrollment: registry opens, citizen accepts with the
+    /// key being enrolled, registry approves - no key ever leaves the
+    /// citizen device
+    Enroll {
+        #[command(subcommand)]
+        cmd: EnrollCmd,
     },
     /// Writer policy: gate validators' namespaces; observers stay free
     Policy {
@@ -370,6 +378,54 @@ enum AttestCmd {
 }
 
 #[derive(Subcommand)]
+enum EnrollCmd {
+    /// Open an enrollment: build the document (subject, label, claims) and
+    /// sign it as registrar - this node is the registry. Writes the offer
+    /// file to hand to the citizen; nothing is published yet
+    Open {
+        /// Subject: the citizen's Ed25519 public key (hex) - from their
+        /// `datu keys` or `wallet show`. Born on their device, never here
+        #[arg(long)]
+        subject: String,
+        /// Free-form claims as JSON, e.g. '{"legal_name":"Acme Ltd","role":"bidder"}'
+        #[arg(long)]
+        claims: String,
+        /// Optional human-readable subject label, e.g. "Acme Ltd"
+        #[arg(long)]
+        label: Option<String>,
+        /// Where to write the offer file the citizen accepts
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Accept an enrollment offer as the subject. Signs with this node's
+    /// identity, or a Signet wallet identity (--name). Refuses unless the
+    /// signing key IS the enrolled key: a ghost enrollment never completes
+    Accept {
+        #[arg(long)]
+        input: PathBuf,
+        /// Where to write the accepted file to hand back to the registry
+        #[arg(long)]
+        out: PathBuf,
+        /// Signet wallet identity to accept with (default: this node)
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+    /// Approve a completed ceremony (both signatures verified): publishes
+    /// the `identity.enroll` record and the `identity.attest` entry bound
+    /// to it. Only the registry that opened may approve
+    Approve {
+        #[arg(long)]
+        input: PathBuf,
+        /// Quorum bar to report: policies with min_cosigners count distinct
+        /// cosigners before an attestation admits a writer
+        #[arg(long)]
+        min_cosigners: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
 enum PolicyCmd {
     /// Write this node's writer policy (gated namespaces, trust roots)
     Init {
@@ -379,7 +435,7 @@ enum PolicyCmd {
         /// Explicitly admitted writer key (repeatable)
         #[arg(long = "writer", value_delimiter = ',')]
         writers: Vec<String>,
-        /// Gated namespace pattern, e.g. 'gov.*' (repeatable; default gov.* + identity.attest + identity.revoke)
+        /// Gated namespace pattern, e.g. 'gov.*' (repeatable; default gov.* + identity.attest/enroll/revoke; cosign stays open - any member may add weight)
         #[arg(long = "ns", value_delimiter = ',')]
         gated: Vec<String>,
         /// Cosigners required on an attestation for admission (0 = attestor alone suffices)
@@ -2638,6 +2694,197 @@ fn cmd_attest_status(
     Ok(())
 }
 
+// ---- two-signature enrollment ----
+
+/// `enroll open`: the registry builds the enrollment document and signs it
+/// as registrar. Nothing is published - the offer file travels to the
+/// citizen (any channel), who must accept with the enrolled key itself
+/// before the registry may publish anything. The registry never sees a
+/// private key: keys are born on the citizen device.
+fn cmd_enroll_open(
+    node: &Node,
+    subject: String,
+    claims: String,
+    label: Option<String>,
+    out: &Path,
+) -> Result<(), String> {
+    parse_id(&subject)
+        .map_err(|_| "subject must be a 32-byte Ed25519 public key (hex)".to_string())?;
+    let claims: serde_json::Value = serde_json::from_str(&claims)
+        .map_err(|e| format!("--claims must be a JSON object: {e}"))?;
+    if !claims.is_object() {
+        return Err("--claims must be a JSON object".into());
+    }
+    let mut document = enroll::build_doc(&subject, label.as_deref(), claims);
+    s(document.sign(enroll::ROLE_REGISTRAR, &node.key, Some(&node.pq_key)))?;
+    let json = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
+    std::fs::write(out, &json).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    println!("enrollment offer written: {}", out.display());
+    println!("  registrar: {}", node.identity);
+    println!(
+        "  subject:   {}{}",
+        short(&subject),
+        label
+            .as_deref()
+            .map(|l| format!(" ({l})"))
+            .unwrap_or_default()
+    );
+    println!("  hand the file to the citizen; they run: datu enroll accept --input {} --out accepted.json", out.display());
+    Ok(())
+}
+
+/// `enroll accept`: the citizen consents with the key being enrolled.
+/// This is the anti-ghost step: the signature only verifies against the
+/// subject key, so a key the citizen does not control cannot complete the
+/// ceremony - the registry cannot enroll anyone who never took part.
+fn cmd_enroll_accept(
+    data_dir: &Path,
+    input: &Path,
+    out: &Path,
+    name: Option<String>,
+    passphrase: Option<String>,
+) -> Result<(), String> {
+    let mut document: SignedDocument = serde_json::from_slice(
+        &std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?,
+    )
+    .map_err(|e| format!("{} is not a signed document: {e}", input.display()))?;
+    let doc = enroll::parse_doc(&document)?;
+    if !document.has_verified_role(enroll::ROLE_REGISTRAR) {
+        return Err(format!(
+            "no verified '{}' signature on the offer - enrollments are opened by a registry",
+            enroll::ROLE_REGISTRAR
+        ));
+    }
+    let (signer_key, signed_with) = if let Some(name) = &name {
+        let pass = get_passphrase(passphrase.clone())?;
+        let wallet = datu_wallet::Wallet::open(data_dir);
+        let identity = wallet.load(name, &pass)?;
+        let key = identity.public.ed_public.clone();
+        s(identity.sign_document(&mut document, enroll::ROLE_SUBJECT))?;
+        (key, format!("wallet identity {name}"))
+    } else {
+        // Consent is not a ledger write: a citizen node signs its offer even
+        // when its own governance is broken (the reader-open path).
+        let node = load_node_reader(data_dir)?;
+        s(document.sign(enroll::ROLE_SUBJECT, &node.key, Some(&node.pq_key)))?;
+        (node.identity.clone(), "this node".to_string())
+    };
+    if signer_key != doc.subject {
+        return Err(format!(
+            "signed with {signer_key} but the enrolled subject is {}: keys are born on the citizen device - a ghost enrollment (consenting for someone else) never completes",
+            doc.subject
+        ));
+    }
+    let json = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
+    std::fs::write(out, &json).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    println!("enrollment accepted: {}", out.display());
+    println!("  subject signature by {signed_with} (Ed25519 + ML-DSA-65)");
+    println!(
+        "  hand the file back to the registry; they run: datu enroll approve --input {}",
+        out.display()
+    );
+    Ok(())
+}
+
+/// `enroll approve`: verify the full ceremony (registrar + subject
+/// signatures, subject key = enrolled key, registrar = this node), then
+/// publish the `identity.enroll` record (the ceremony evidence) and the
+/// `identity.attest` entry causally bound to it. Quorum is reported, never
+/// faked: policies with `min_cosigners` admit the subject only once enough
+/// distinct roots have cosigned.
+fn cmd_enroll_approve(
+    node: &Node,
+    input: &Path,
+    min_cosigners: Option<usize>,
+) -> Result<(), String> {
+    let document: SignedDocument = serde_json::from_slice(
+        &std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?,
+    )
+    .map_err(|e| format!("{} is not a signed document: {e}", input.display()))?;
+    let doc = enroll::verify_ceremony(&document, Some(&node.identity))?;
+
+    // Ceremony record first: the evidence, with both party signatures.
+    let enroll_payload = document.payload_bytes()?;
+    let latest = s(node.store.latest(&node.identity))?;
+    let (seq, prev) = match &latest {
+        Some(e) => (e.body.seq + 1, Some(s(e.id())?)),
+        None => (0, None),
+    };
+    let enroll_body = EntryBody {
+        version: datu_core::ENTRY_VERSION,
+        author: node.identity.clone(),
+        author_pq: String::new(),
+        pq_alg: String::new(),
+        namespace: enroll::NS_ENROLL.to_string(),
+        seq,
+        prev,
+        refs: vec![],
+        timestamp_ms: now_ms(),
+        payload: enroll_payload,
+    };
+    let enroll_entry = s(Entry::sign(enroll_body, &node.key, &node.pq_key))?;
+    let enroll_id = s(enroll_entry.id())?;
+    if !s(node.store.insert_entry(&enroll_entry))? {
+        return Err("enrollment record unexpectedly already present".into());
+    }
+
+    // Then the attestation the ceremony authorizes, causally bound to it.
+    let attest_doc = AttestationDoc {
+        subject: doc.subject.clone(),
+        label: doc.label.clone(),
+        claims: doc.claims.clone(),
+    };
+    let attest_payload = attest_doc.payload_bytes()?;
+    let latest = s(node.store.latest(&node.identity))?;
+    let (seq, prev) = match &latest {
+        Some(e) => (e.body.seq + 1, Some(s(e.id())?)),
+        None => (0, None),
+    };
+    let attest_body = EntryBody {
+        version: datu_core::ENTRY_VERSION,
+        author: node.identity.clone(),
+        author_pq: String::new(),
+        pq_alg: String::new(),
+        namespace: attest::NS_ATTEST.to_string(),
+        seq,
+        prev,
+        refs: vec![enroll_id],
+        timestamp_ms: now_ms(),
+        payload: attest_payload,
+    };
+    let attest_entry = s(Entry::sign(attest_body, &node.key, &node.pq_key))?;
+    let attest_id = s(attest_entry.id())?;
+    if !s(node.store.insert_entry(&attest_entry))? {
+        return Err("attestation unexpectedly already present".into());
+    }
+
+    println!("enrollment {} published", hex::encode(enroll_id));
+    println!("attestation {} published", hex::encode(attest_id));
+    println!(
+        "  ceremony verified: registrar + subject signatures, subject {}{}",
+        short(&doc.subject),
+        doc.label
+            .as_deref()
+            .map(|l| format!(" ({l})"))
+            .unwrap_or_default()
+    );
+    let entries = s(node.store.all_entries())?;
+    let have = attest::cosigners_for(entries.iter(), &attest_id).len();
+    match min_cosigners {
+        Some(need) if need > 0 => {
+            println!("  quorum: {have}/{need} distinct cosigners on this node");
+            if have < need {
+                println!("  writer admission under a min_cosigners policy stays closed until {need} cosigner(s) have added weight: datu attest cosign --id {}", hex::encode(attest_id));
+            }
+        }
+        _ => println!(
+            "  others can add weight: datu attest cosign --id {}",
+            hex::encode(attest_id)
+        ),
+    }
+    Ok(())
+}
+
 // ---- bloom-filter sync ----
 
 /// Minimal std-only HTTP POST of a JSON body; returns the parsed JSON
@@ -3031,6 +3278,7 @@ fn cmd_policy_init(
         vec![
             "gov.*".to_string(),
             "identity.attest".to_string(),
+            "identity.enroll".to_string(),
             "identity.revoke".to_string(),
         ]
     } else {
@@ -4218,6 +4466,33 @@ fn run(cli: Cli) -> Result<(), String> {
                 id.clone(),
             ),
         },
+        Commands::Enroll { cmd } => match cmd {
+            // Opening and approving publish entries (write authority);
+            // accepting is a consent act that must work even when the
+            // citizen node's own governance is broken.
+            EnrollCmd::Open {
+                subject,
+                claims,
+                label,
+                out,
+            } => cmd_enroll_open(
+                &load_node(&cli.data_dir)?,
+                subject.clone(),
+                claims.clone(),
+                label.clone(),
+                out,
+            ),
+            EnrollCmd::Accept {
+                input,
+                out,
+                name,
+                passphrase,
+            } => cmd_enroll_accept(&cli.data_dir, input, out, name.clone(), passphrase.clone()),
+            EnrollCmd::Approve {
+                input,
+                min_cosigners,
+            } => cmd_enroll_approve(&load_node(&cli.data_dir)?, input, *min_cosigners),
+        },
         Commands::Policy { cmd } => match cmd {
             PolicyCmd::Init {
                 attestors,
@@ -4952,5 +5227,160 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.contains("does not parse"), "typo caught early: {err}");
+    }
+
+    /// The two-signature enrollment ceremony end to end, and every ghost
+    /// path that must never complete. `run` holds one frame per subcommand
+    /// arm; the default 2 MiB test stack is not enough for dispatch.
+    #[test]
+    fn enrollment_ceremony_publishes_and_ghosts_never_complete() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(enrollment_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn enrollment_body() {
+        let reg = tempfile::tempdir().unwrap();
+        let cit = tempfile::tempdir().unwrap();
+        let ghost = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        run(cli(reg.path(), Commands::Init)).unwrap();
+        run(cli(cit.path(), Commands::Init)).unwrap();
+        run(cli(ghost.path(), Commands::Init)).unwrap();
+        run(cli(other.path(), Commands::Init)).unwrap();
+        let subject = load_node(cit.path()).unwrap().identity;
+
+        let offer = reg.path().join("offer.json");
+        run(cli(
+            reg.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::Open {
+                    subject: subject.clone(),
+                    claims: r#"{"legal_name":"Acme Ltd","role":"bidder"}"#.into(),
+                    label: Some("Acme Ltd".into()),
+                    out: offer.clone(),
+                },
+            },
+        ))
+        .unwrap();
+
+        // A different node cannot accept: its key is not the enrolled key.
+        let ghost_accepted = ghost.path().join("accepted.json");
+        let err = run(cli(
+            ghost.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::Accept {
+                    input: offer.clone(),
+                    out: ghost_accepted.clone(),
+                    name: None,
+                    passphrase: None,
+                },
+            },
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("ghost"),
+            "a third party accepting for the subject must be named a ghost: {err}"
+        );
+
+        // The registry cannot approve its own offer: no subject consent.
+        let err = run(cli(
+            reg.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::Approve {
+                    input: offer.clone(),
+                    min_cosigners: None,
+                },
+            },
+        ))
+        .unwrap_err();
+        assert!(err.contains("subject"), "missing consent must fail: {err}");
+
+        // The citizen accepts; the ceremony file carries both signatures.
+        let accepted = cit.path().join("accepted.json");
+        run(cli(
+            cit.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::Accept {
+                    input: offer.clone(),
+                    out: accepted.clone(),
+                    name: None,
+                    passphrase: None,
+                },
+            },
+        ))
+        .unwrap();
+
+        // Tampering with the claims after consent breaks the signatures.
+        let tampered = reg.path().join("tampered.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&accepted).unwrap()).unwrap();
+        doc["doc"]["claims"]["role"] = "owner".into();
+        std::fs::write(&tampered, doc.to_string()).unwrap();
+        let err = run(cli(
+            reg.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::Approve {
+                    input: tampered,
+                    min_cosigners: None,
+                },
+            },
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("verification failed"),
+            "tampered claims must fail verification: {err}"
+        );
+
+        // Only the registry that opened may approve.
+        let err = run(cli(
+            other.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::Approve {
+                    input: accepted.clone(),
+                    min_cosigners: None,
+                },
+            },
+        ))
+        .unwrap_err();
+        assert!(err.contains("registrar"), "wrong approver must fail: {err}");
+
+        // The honest path publishes the ceremony record + attestation.
+        run(cli(
+            reg.path(),
+            Commands::Enroll {
+                cmd: EnrollCmd::Approve {
+                    input: accepted,
+                    min_cosigners: Some(2),
+                },
+            },
+        ))
+        .unwrap();
+        let node = load_node_reader(reg.path()).unwrap();
+        let entries = node.store.all_entries().unwrap();
+        let enroll_entry = entries
+            .iter()
+            .find(|e| e.body.namespace == datu_core::enroll::NS_ENROLL)
+            .expect("identity.enroll record published");
+        let (document, enroll_doc) = datu_core::enroll::parse_enrollment(enroll_entry).unwrap();
+        assert_eq!(enroll_doc.subject, subject);
+        assert!(document.has_verified_role(datu_core::enroll::ROLE_SUBJECT));
+        assert!(document.has_verified_role(datu_core::enroll::ROLE_REGISTRAR));
+        let attest_entry = entries
+            .iter()
+            .find(|e| e.body.namespace == "identity.attest")
+            .expect("attestation published");
+        let enroll_id = enroll_entry.id().unwrap();
+        assert_eq!(
+            attest_entry.body.refs,
+            vec![enroll_id],
+            "the attestation must cite the ceremony record"
+        );
+        let attest_doc = attest::parse_attestation(attest_entry).unwrap();
+        assert_eq!(attest_doc.claims["role"], "bidder");
+        assert_eq!(attest_doc.label.as_deref(), Some("Acme Ltd"));
     }
 }
