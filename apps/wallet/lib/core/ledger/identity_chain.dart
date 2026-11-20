@@ -25,7 +25,11 @@ List<String> describeIdentityChain(Map<String, dynamic> chain) {
     final enroll = a['enroll'] is String
         ? ' | via enrollment ${_short(a['enroll'] as String)}'
         : '';
-    lines.add('attested by ${_short(a['by'] as String?)} - $claims$cosigned$enroll');
+    final recovery = a['recovery'] is String
+        ? ' | via recovery ${_short(a['recovery'] as String)}'
+        : '';
+    lines.add(
+        'attested by ${_short(a['by'] as String?)} - $claims$cosigned$enroll$recovery');
     final revoked = a['revoked_by'];
     if (a['revoked'] == true && revoked is Map && revoked['by'] != null) {
       final reason = revoked['reason'];

@@ -41,6 +41,22 @@ void main() {
     expect(lines.single, contains('via enrollment a4805edf...0e9c'));
   });
 
+  test('an attestation from a guardian recovery names the record', () {
+    final lines = describeIdentityChain(chain(attestations: [
+      {
+        'by': 'd53ad911aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'claims': {'role': 'bidder', 'recovered_from': 'ff'},
+        'cosigners': const [],
+        'enroll': null,
+        'recovery':
+            '320bd09100000000000000000000000000000000000000000000000000000000',
+        'revoked': false,
+      }
+    ]));
+    expect(lines.single, contains('via recovery 320bd091...0000'));
+    expect(lines.single, isNot(contains('enrollment')));
+  });
+
   test('a plain attestation carries no enrollment note', () {
     final lines = describeIdentityChain(chain(attestations: [
       {

@@ -1106,21 +1106,25 @@ fn identity_chain_json(store: &Store, key: &str) -> Result<serde_json::Value, St
         for c in &cosigners {
             all_cosigners.insert(c.clone());
         }
-        // An attestation born from a two-signature enrollment cites the
-        // ceremony record; report the link so readers can see the subject
-        // consented with the enrolled key.
-        let enroll: serde_json::Value = entry
-            .body
-            .refs
-            .iter()
-            .find_map(|r| {
-                entries
-                    .iter()
-                    .find(|e| e.id().map(|x| x == *r).unwrap_or(false))
-                    .and_then(|e| datu_core::enroll::parse_enrollment(e).map(|_| hex::encode(*r)))
-            })
-            .map(serde_json::Value::String)
-            .unwrap_or(serde_json::Value::Null);
+        // An attestation born from a ceremony cites its record: a
+        // two-signature enrollment (the subject consented with this key) or
+        // a guardian recovery (this key replaced a lost one). Report both so
+        // readers see where the attestation came from.
+        let mut enroll: serde_json::Value = serde_json::Value::Null;
+        let mut recovery: serde_json::Value = serde_json::Value::Null;
+        for r in &entry.body.refs {
+            let Some(referenced) = entries
+                .iter()
+                .find(|e| e.id().map(|x| x == *r).unwrap_or(false))
+            else {
+                continue;
+            };
+            if datu_core::enroll::parse_enrollment(referenced).is_some() {
+                enroll = serde_json::Value::String(hex::encode(*r));
+            } else if datu_core::enroll::parse_recovery_entry(referenced).is_some() {
+                recovery = serde_json::Value::String(hex::encode(*r));
+            }
+        }
         let revoked = revoked_attestations.get(&id_hex).cloned();
         attestations.push(serde_json::json!({
             "id": id_hex,
@@ -1130,6 +1134,7 @@ fn identity_chain_json(store: &Store, key: &str) -> Result<serde_json::Value, St
             "timestamp_ms": entry.body.timestamp_ms,
             "cosigners": cosigners,
             "enroll": enroll,
+            "recovery": recovery,
             // A revocation is a statement, not an edit: the attestation stays,
             // flagged, and the revoker is named.
             "revoked": revoked.is_some(),
@@ -2361,7 +2366,8 @@ async function show(id){let e=await j('/v1/entry/'+id);if(e.error)e=await j('/v1
     const claims=Object.entries(a.claims||{}).map(kv=>kv[0]+'='+JSON.stringify(kv[1])).join(', ');
     const cs=a.cosigners&&a.cosigners.length?(' | cosigned by '+a.cosigners.length+': '+a.cosigners.map(short).join(', ')):'';
     const en=a.enroll?(' | via enrollment '+short(a.enroll)):'';
-    facts.push('  attested by '+short(a.by)+(a.label?(' as '+a.label):'')+' - '+(claims||'(no claims)')+cs+en);
+    const rec=a.recovery?(' | via recovery '+short(a.recovery)):'';
+    facts.push('  attested by '+short(a.by)+(a.label?(' as '+a.label):'')+' - '+(claims||'(no claims)')+cs+en+rec);
     if(a.revoked&&a.revoked_by) facts.push('    REVOKED by '+short(a.revoked_by.by)+(a.revoked_by.reason?(' - '+a.revoked_by.reason):''));
    }
    if(ch.revoked_by_key&&ch.revoked_by_key.by)
@@ -3190,12 +3196,12 @@ mod identity_chain_tests {
         assert_eq!(chain["counts"]["attestations"], 0);
     }
 
-    /// An attestation born from a two-signature enrollment cites the
-    /// ceremony record; the chain names it, so readers can see the subject
-    /// consented with the enrolled key. An attestation citing nothing
-    /// reports no ceremony.
+    /// An attestation born from a ceremony cites its record: enrollment (the
+    /// subject consented) or guardian recovery (the key replaced a lost
+    /// one). The chain names it; an attestation citing nothing reports no
+    /// ceremony.
     #[test]
-    fn chain_reports_the_enrollment_ceremony_link() {
+    fn chain_reports_the_ceremony_links() {
         let store = Store::open_in_memory().unwrap();
         let subject_sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
         let subject = hex::encode(subject_sk.verifying_key().as_bytes());
@@ -3236,9 +3242,57 @@ mod identity_chain_tests {
         let chain = identity_chain_json(&store, &subject).unwrap();
         assert_eq!(chain["attestations"][0]["enroll"], hex::encode(enroll_id));
 
-        let plain = entry_with(
+        // A recovery record cited by an attestation reports as such, and the
+        // two ceremony kinds do not get confused.
+        let mut rec = datu_core::enroll::build_recovery(
+            &subject,
+            &hex::encode([1u8; 32]),
+            Some("Acme Ltd"),
+            serde_json::json!({"role":"bidder"}),
+        );
+        rec.sign(datu_core::enroll::ROLE_CITIZEN, &subject_sk, None)
+            .unwrap();
+        datu_core::enroll::sign_append(
+            &mut rec,
+            datu_core::enroll::ROLE_GUARDIAN,
+            &registrar_sk,
+            None,
+        )
+        .unwrap();
+        let recovery = entry_with(
             3,
             2,
+            datu_core::enroll::NS_RECOVER,
+            serde_json::to_value(&rec).unwrap(),
+            vec![],
+            Some(attest.id().unwrap()),
+        );
+        let recovery_id = recovery.id().unwrap();
+        store.insert_entry(&recovery).unwrap();
+        let recovered = entry_with(
+            3,
+            3,
+            datu_core::attest::NS_ATTEST,
+            serde_json::to_value(AttestationDoc {
+                subject: subject.clone(),
+                label: Some("Acme Ltd".into()),
+                claims: serde_json::json!({"role":"bidder"}),
+            })
+            .unwrap(),
+            vec![recovery_id],
+            Some(recovery_id),
+        );
+        store.insert_entry(&recovered).unwrap();
+        let chain = identity_chain_json(&store, &subject).unwrap();
+        assert_eq!(
+            chain["attestations"][1]["recovery"],
+            hex::encode(recovery_id)
+        );
+        assert!(chain["attestations"][1]["enroll"].is_null());
+
+        let plain = entry_with(
+            3,
+            4,
             datu_core::attest::NS_ATTEST,
             serde_json::to_value(AttestationDoc {
                 subject: subject.clone(),
@@ -3247,10 +3301,11 @@ mod identity_chain_tests {
             })
             .unwrap(),
             vec![],
-            Some(attest.id().unwrap()),
+            Some(recovered.id().unwrap()),
         );
         store.insert_entry(&plain).unwrap();
         let chain = identity_chain_json(&store, &subject).unwrap();
-        assert!(chain["attestations"][1]["enroll"].is_null());
+        assert!(chain["attestations"][2]["enroll"].is_null());
+        assert!(chain["attestations"][2]["recovery"].is_null());
     }
 }
