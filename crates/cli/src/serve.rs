@@ -759,6 +759,21 @@ fn handle_inner(
                 }),
             )
         }
+        // Identity chain for a key: every attestation naming it, who cosigned,
+        // what was revoked and by whom. This is the JSON the explorer, the
+        // wallet and any dApp render; the wording lives in one place.
+        ("GET", e) if e.starts_with("/v1/identity/") => {
+            let key = &e["/v1/identity/".len()..];
+            if key.len() != 64 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+                return respond_json(
+                    stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error": "key must be 64 hex characters"}),
+                );
+            }
+            let chain = identity_chain_json(&store, key).map_err(|e| e.to_string())?;
+            respond_json(stream, "200 OK", &chain)
+        }
         ("GET", "/v1/conflicts") => {
             let count = store.conflicts_count().map_err(|e| e.to_string())?;
             // Resolution records (design §A/C): entries in gov.dispute.*
@@ -1034,6 +1049,94 @@ fn payload_preview(entry: &Entry) -> String {
         .chars()
         .take(120)
         .collect()
+}
+
+/// The identity chain for a key, as one JSON document every client renders.
+///
+/// Plain ledger facts only: attestations naming the key (author = attestor),
+/// their cosignatures (distinct authors), and revocations, matched the way the
+/// verifier matches them - by attestation id, or by subject key for the
+/// direct ejection path. Trust policy (which roots count, how many cosigners
+/// are enough) stays with the reader; this endpoint invents no verdicts, it
+/// just lays out what is signed.
+fn identity_chain_json(store: &Store, key: &str) -> Result<serde_json::Value, String> {
+    use datu_core::attest::{attestations_for, cosigners_for, parse_revoke, NS_ATTEST};
+    let entries = store.all_entries().map_err(|e| e.to_string())?;
+
+    // revocations, split by what they name
+    let mut revoked_attestations: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+    let mut revoked_key: Option<serde_json::Value> = None;
+    let mut revocations: Vec<serde_json::Value> = Vec::new();
+    for entry in &entries {
+        let Some(rev) = parse_revoke(entry) else {
+            continue;
+        };
+        let names_this_key = rev.subject.as_deref() == Some(key);
+        let names_att = rev.attestation.clone();
+        if !names_this_key && names_att.is_none() {
+            continue;
+        }
+        let json = serde_json::json!({
+            "by": entry.body.author,
+            "attestation": rev.attestation,
+            "subject": rev.subject,
+            "reason": rev.reason,
+            "timestamp_ms": entry.body.timestamp_ms,
+        });
+        if names_this_key {
+            revoked_key = Some(json.clone());
+        }
+        if let Some(att) = &names_att {
+            revoked_attestations.insert(att.clone(), json.clone());
+        }
+        revocations.push(json);
+    }
+
+    // attestations naming the key, oldest first, with their distinct cosigners
+    let mut attestations: Vec<serde_json::Value> = Vec::new();
+    let mut all_cosigners: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (entry, doc) in attestations_for(entries.iter(), key) {
+        let id = entry.id().map_err(|e| e.to_string())?;
+        let id_hex = hex::encode(id);
+        let cosigners: Vec<String> = cosigners_for(entries.iter(), &id)
+            .into_iter()
+            .map(|(e, _)| e.body.author.clone())
+            .collect();
+        for c in &cosigners {
+            all_cosigners.insert(c.clone());
+        }
+        let revoked = revoked_attestations.get(&id_hex).cloned();
+        attestations.push(serde_json::json!({
+            "id": id_hex,
+            "by": entry.body.author,
+            "label": doc.label,
+            "claims": doc.claims,
+            "timestamp_ms": entry.body.timestamp_ms,
+            "cosigners": cosigners,
+            // A revocation is a statement, not an edit: the attestation stays,
+            // flagged, and the revoker is named.
+            "revoked": revoked.is_some(),
+            "revoked_by": revoked.clone(),
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "key": key,
+        "attestations": attestations,
+        "revocations": revocations,
+        "revoked_by_key": revoked_key,
+        "counts": {
+            "attestations": attestations.len(),
+            "distinct_cosigners": all_cosigners.len(),
+            "revoked": attestations.iter().filter(|a| a["revoked"] == true).count(),
+        },
+        // Every entry here was signature-verified by this store; the chain is
+        // evidence, and the reader's policy decides its weight.
+        "verified": true,
+        "namespace": NS_ATTEST,
+        "note": "Attestations are signed statements, not a verdict. Which roots count is your policy."
+    }))
 }
 
 fn entry_summary_json(store: &Store, entry: &Entry) -> Result<serde_json::Value, String> {
@@ -2230,7 +2333,25 @@ async function show(id){let e=await j('/v1/entry/'+id);if(e.error)e=await j('/v1
    (o.reasons||[]).forEach(r=>facts.push('  reason: '+r));
   }
  }catch(_){}
- if(facts.length) d.textContent+='\n\n'+facts.join('\n');
+ // Identity chain for the author: who vouches, with what claims, cosigned by
+ // whom, revoked or not. Plain ledger statements; the reader's policy decides
+ // their weight, so the card never prints a bare "verified".
+ try{
+  const ch=await j('/v1/identity/'+e.author);
+  if(ch&&ch.attestations){
+   facts.push('identity: '+short(e.author)+(ch.counts.revoked?' - revoked':''));
+   if(!ch.attestations.length&&!ch.revoked_by_key) facts.push('  no attestation on this ledger; signed in, unattested');
+   for(const a of ch.attestations){
+    const claims=Object.entries(a.claims||{}).map(kv=>kv[0]+'='+JSON.stringify(kv[1])).join(', ');
+    const cs=a.cosigners&&a.cosigners.length?(' | cosigned by '+a.cosigners.length+': '+a.cosigners.map(short).join(', ')):'';
+    facts.push('  attested by '+short(a.by)+(a.label?(' as '+a.label):'')+' - '+(claims||'(no claims)')+cs);
+    if(a.revoked&&a.revoked_by) facts.push('    REVOKED by '+short(a.revoked_by.by)+(a.revoked_by.reason?(' - '+a.revoked_by.reason):''));
+   }
+   if(ch.revoked_by_key&&ch.revoked_by_key.by)
+    facts.push('  key revoked directly by '+short(ch.revoked_by_key.by)+(ch.revoked_by_key.reason?(' - '+ch.revoked_by_key.reason):''));
+  }
+ }catch(_){}
+ if(facts.length) d.textContent+=String.fromCharCode(10,10)+facts.join(String.fromCharCode(10));
  document.getElementById('modal').classList.add('open')}
 function closeModal(){document.getElementById('modal').classList.remove('open')}
 window.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
@@ -2914,5 +3035,141 @@ mod request_limit_tests {
             "server wedged after fuzz rounds: {}",
             raw.split("\r\n").next().unwrap_or("")
         );
+    }
+}
+
+#[cfg(test)]
+mod identity_chain_tests {
+    use super::*;
+    use datu_core::attest::{AttestationDoc, CosignDoc, RevokeDoc};
+    use datu_core::{Entry, EntryBody};
+
+    fn entry_with(
+        key_seed: u8,
+        seq: u64,
+        namespace: &str,
+        payload: serde_json::Value,
+        refs: Vec<[u8; 32]>,
+        prev: Option<[u8; 32]>,
+    ) -> Entry {
+        let ed = ed25519_dalek::SigningKey::from_bytes(&[key_seed; 32]);
+        let pq = datu_core::pq::keypair().unwrap().1;
+        let body = EntryBody {
+            version: datu_core::ENTRY_VERSION,
+            author: String::new(),
+            author_pq: String::new(),
+            pq_alg: String::new(),
+            namespace: namespace.into(),
+            seq,
+            prev,
+            refs,
+            timestamp_ms: 1,
+            payload: serde_json::to_vec(&payload).unwrap(),
+        };
+        Entry::sign(body, &ed, &pq).unwrap()
+    }
+
+    #[test]
+    fn chain_reports_attestation_cosignature_and_revocation() {
+        let store = Store::open_in_memory().unwrap();
+        // Subject key we will attest; author keys 3 and 4 are the root and a cosigner.
+        let subject = hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[5u8; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        let att = entry_with(
+            3,
+            0,
+            datu_core::attest::NS_ATTEST,
+            serde_json::to_value(AttestationDoc {
+                subject: subject.clone(),
+                label: Some("Acme Registry".into()),
+                claims: serde_json::json!({"role":"clerk","legal_name":"Acme Ltd"}),
+            })
+            .unwrap(),
+            vec![],
+            None,
+        );
+        let att_id = att.id().unwrap();
+        store.insert_entry(&att).unwrap();
+        let cosign = entry_with(
+            4,
+            0,
+            datu_core::attest::NS_COSIGN,
+            serde_json::to_value(CosignDoc {
+                attestation: hex::encode(att_id),
+            })
+            .unwrap(),
+            vec![att_id],
+            None,
+        );
+        store.insert_entry(&cosign).unwrap();
+
+        let chain = identity_chain_json(&store, &subject).unwrap();
+        assert_eq!(chain["counts"]["attestations"], 1);
+        assert_eq!(chain["counts"]["distinct_cosigners"], 1);
+        assert_eq!(chain["attestations"][0]["label"], "Acme Registry");
+        assert_eq!(chain["attestations"][0]["revoked"], false);
+        assert_eq!(
+            chain["attestations"][0]["cosigners"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(chain["note"].as_str().unwrap().contains("not a verdict"));
+
+        // revoke the attestation by id: the attestation stays, flagged, with
+        // the revoker named
+        let rev = entry_with(
+            3,
+            1,
+            datu_core::attest::NS_REVOKE,
+            serde_json::to_value(RevokeDoc {
+                attestation: Some(hex::encode(att_id)),
+                subject: None,
+                reason: Some("left the registry".into()),
+            })
+            .unwrap(),
+            vec![],
+            Some(att_id),
+        );
+        let rev_id = rev.id().unwrap();
+        store.insert_entry(&rev).unwrap();
+        let chain = identity_chain_json(&store, &subject).unwrap();
+        assert_eq!(chain["counts"]["revoked"], 1);
+        assert_eq!(chain["attestations"][0]["revoked"], true);
+        assert_eq!(
+            chain["attestations"][0]["revoked_by"]["reason"],
+            "left the registry"
+        );
+
+        // key-level ejection: a revoke naming the subject directly
+        let keyrev = entry_with(
+            3,
+            2,
+            datu_core::attest::NS_REVOKE,
+            serde_json::to_value(RevokeDoc {
+                attestation: None,
+                subject: Some(subject.clone()),
+                reason: Some("key compromised".into()),
+            })
+            .unwrap(),
+            vec![],
+            Some(rev_id),
+        );
+        store.insert_entry(&keyrev).unwrap();
+        let chain = identity_chain_json(&store, &subject).unwrap();
+        assert_eq!(chain["revoked_by_key"]["reason"], "key compromised");
+
+        // an unattested key is an empty chain, not an error
+        let nobody = hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[9u8; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        let chain = identity_chain_json(&store, &nobody).unwrap();
+        assert_eq!(chain["counts"]["attestations"], 0);
     }
 }

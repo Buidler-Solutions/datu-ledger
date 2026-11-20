@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/ledger/ledger_client.dart';
+import '../../core/ledger/identity_chain.dart';
 import '../../core/ledger/my_records.dart';
 import '../../providers/bridge_provider.dart';
 import 'mobile_identity.dart';
@@ -20,6 +21,8 @@ class _MobileHomeTabState extends ConsumerState<MobileHomeTab> {
   final _records = <Map<String, dynamic>>[];
   bool _busy = false;
   String? _nodeNote;
+  List<String> _chain = const [];
+  bool _chainLoaded = false;
 
   @override
   void initState() {
@@ -46,6 +49,19 @@ class _MobileHomeTabState extends ConsumerState<MobileHomeTab> {
       setState(() => _nodeNote = null);
 
       final ed = identity['ed_public'] as String? ?? '';
+      // Who vouches for this key, from the ledger itself. The wording comes
+      // from identity_chain.dart, the same rules the explorer prints.
+      try {
+        final chain = await client.identityChain(ed);
+        if (mounted) {
+          setState(() {
+            _chain = describeIdentityChain(chain);
+            _chainLoaded = true;
+          });
+        }
+      } catch (_) {
+        if (mounted) setState(() => _chainLoaded = false);
+      }
       final list = await client.entries(limit: 100);
       final mine = <Map<String, dynamic>>[];
       for (final item in list) {
@@ -271,6 +287,44 @@ class _MobileHomeTabState extends ConsumerState<MobileHomeTab> {
                 ],
               ),
             ),
+          if (identity != null) ...[
+            const SizedBox(height: 12),
+            SectionCard(
+              title: 'Who vouches for this key',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_chain.isEmpty)
+                    Text(
+                      _chainLoaded
+                          ? 'No attestation on this ledger names this key yet. Signed in, unattested.'
+                          : 'Connect your node to read attestations (Settings -> Ledger node).',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    )
+                  else
+                    for (final line in _chain)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Text(
+                          line,
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                fontFamily: 'monospace',
+                                color: line.startsWith('REVOKED') ||
+                                        line.startsWith('key revoked')
+                                    ? Theme.of(context).colorScheme.error
+                                    : null,
+                              ),
+                        ),
+                      ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Attestations are signed statements, not a verdict: which roots count is your policy.',
+                    style: Theme.of(context).textTheme.labelSmall,
+                  ),
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
           Row(
             children: [

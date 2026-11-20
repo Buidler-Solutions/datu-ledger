@@ -23,6 +23,13 @@ class LedgerClient {
       (await _dio.get('$base/v1/status').then((r) => r.data as Map))
           .cast<String, dynamic>();
 
+  /// Identity chain for a key: attestations naming it, their cosigners,
+  /// revocations. Plain ledger statements; the wallet renders who vouches,
+  /// never a bare "verified".
+  Future<Map<String, dynamic>> identityChain(String key) async =>
+      (await _dio.get('$base/v1/identity/$key').then((r) => r.data as Map))
+          .cast<String, dynamic>();
+
   /// Recent entries. `author`/`ns` optional filters.
   Future<List<Map<String, dynamic>>> entries({
     String? ns,
