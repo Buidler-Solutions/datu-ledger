@@ -1800,18 +1800,15 @@ function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;cons
    ctx.font=(hovered?10.5:9)/NET.zoom+'px ui-monospace,Menlo,monospace';
    ctx.textAlign=side>0?'left':'right';
    const lx=px+side*(9/NET.zoom);
+   // the name appears only under the pointer (mesh AND bubble views: this
+   // layer is shared); the bottom-left HUD still names everyone at a glance
    if(hovered){
     const ageTxt=v.last?((Math.round((nowMs-v.last)/1000))+'s ago'):'never synced';
-    ctx.fillStyle='rgba(5,8,13,.72)';
-    const tw=ctx.measureText(label+'  '+ageTxt).width+8/NET.zoom;
-    ctx.fillRect(px>0?lx-tw:lx, py-7/NET.zoom, tw, 13/NET.zoom);
-    ctx.fillStyle='#e8eef7';ctx.fillText(label+'  '+ageTxt,lx,py+3.5/NET.zoom);
-   }else{
-    const tw=ctx.measureText(label).width+6/NET.zoom;
-    ctx.fillStyle='rgba(5,8,13,.55)';
-    ctx.fillRect(side>0?lx:lx-tw,py-6.5/NET.zoom,tw,11.5/NET.zoom);
-    ctx.fillStyle=col;ctx.globalAlpha=.9;
-    ctx.fillText(label,lx,py+3/NET.zoom);ctx.globalAlpha=1;
+    const text=label+'  '+ageTxt;
+    const tw=ctx.measureText(text).width+8/NET.zoom;
+    ctx.fillStyle='rgba(5,8,13,.78)';
+    ctx.fillRect(side>0?lx:lx-tw,py-7.5/NET.zoom,tw,14/NET.zoom);
+    ctx.fillStyle='#e8eef7';ctx.fillText(text,lx,py+3.5/NET.zoom);
    }
    ctx.textAlign='left';
   });
