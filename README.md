@@ -1,6 +1,32 @@
 # DATU - Decentralized Accountable Trust Union
 
 [![ci](https://github.com/greenarmor/datu-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/greenarmor/datu-ledger/actions/workflows/ci.yml)
+[![GESF Compliance](badge.svg)](compliance/attestations-standards.md)
+
+<details>
+<summary><strong>GESF compliance: 94% (A)</strong> - every pack at 100% except CIS-Kubernetes, which describes infrastructure this repository does not ship; controls are attested with evidence in <code>compliance/</code></summary>
+
+<!-- GESF-SCORE-START -->
+| Framework | Score | Grade | Controls |
+|-----------|-------|-------|----------|
+| GDPR | 100% | A | 40/40 passed |
+| OWASP | 100% | A | 6/6 passed |
+| CIS | 100% | A | 5/5 passed |
+| NIST | 100% | A | 23/23 passed |
+| PRIVACY-CORE | 100% | A | 40/40 passed |
+| CIS-DOCKER | 100% | A | 10/10 passed |
+| CIS-K8S | 20% | F | 2/12 passed |
+| ISO27001 | 100% | A | 10/10 passed |
+| ISO27701 | 100% | A | 11/11 passed |
+| DPA-PH | 100% | A | 10/10 passed |
+<!-- GESF-SCORE-END -->
+
+Last evaluated 2026-11-20. Audit findings: 0. Registers:
+[GDPR](compliance/attestations.md),
+[standards](compliance/attestations-standards.md),
+[privacy-core](compliance/attestations-privacy-core.md),
+[legal bases](compliance/legal-bases.json).
+</details>
 
 **Privacy:** the ledger is public and append-only. Read the
 [privacy notice](PRIVACY.md) and the
