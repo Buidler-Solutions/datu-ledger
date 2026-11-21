@@ -1,6 +1,8 @@
 # DATU
 
-### A DAG accountability ledger. Not a blockchain.
+### Decentralized Accountable Trust Union
+
+**Powered by AS-DAG. Built on the Evidence-Centric Ledger model.**
 
 [![ci](https://github.com/Buidler-Solutions/datu-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Buidler-Solutions/datu-ledger/actions/workflows/ci.yml)
 [![GESF Compliance](badge.svg)](compliance/attestations-standards.md)
@@ -8,14 +10,39 @@
 [![release](https://img.shields.io/github/v/release/Buidler-Solutions/datu-ledger?include_prereleases&label=release)](https://github.com/Buidler-Solutions/datu-ledger/releases)
 [![rust](https://img.shields.io/badge/rust-1.96-orange.svg)](rust-toolchain.toml)
 
-![DATU: a DAG accountability ledger](docs/assets/hero.png)
+![DATU: an offline-first accountability protocol on AS-DAG](docs/assets/hero-asdag.png)
 
-**DATU** (Decentralized Accountable Trust Union) is for records that must stay
-true: land titles, registries, certifications, consents. Entries link by causal
-references into a directed acyclic graph, every entry is hybrid-signed with
-Ed25519 and ML-DSA-65, anyone can run a mirror, and only attested writers may
-publish into official namespaces. There is no token, no mining, and no global
-consensus to argue with.
+DATU is an offline-first, distributed accountability protocol built around an
+**Authorship-Strand Directed Acyclic Graph (AS-DAG)** architecture.
+
+Its underlying **Evidence-Centric Ledger (ECL)** model organizes independently
+authored, cryptographically signed transaction histories into a causally
+connected graph. Rather than requiring every participant to agree on one
+globally ordered transaction history, DATU preserves authorship, transaction
+continuity, causal relationships, and independently verifiable evidence. Every
+entry is hybrid-signed with Ed25519 and ML-DSA-65; anyone can run a mirror, and
+only attested writers may publish into official namespaces.
+
+Its fundamental principles are:
+
+- **Independent authorship:** every participant maintains its own signed
+  transaction strand.
+- **Causal integrity:** cross-author references establish verifiable
+  relationships between records.
+- **Evidence preservation:** historical records and contradictions remain
+  independently verifiable.
+- **Detectable equivocation:** conflicting signed histories produce evidence
+  rather than silent overwrites.
+- **Offline-first operation:** participants can continue recording and
+  verifying locally without continuous internet connectivity.
+- **Distributed accountability:** trust is established through cryptographic
+  evidence, independent witnesses, and verifiable checkpoints.
+
+**DATU is not designed around speculative assets or mandatory global transaction
+ordering. It is designed around verifiable authorship, evidence preservation,
+and distributed accountability.**
+
+> ### Trust is not imposed by consensus. It is established through verifiable evidence.
 
 <table>
 <tr>
