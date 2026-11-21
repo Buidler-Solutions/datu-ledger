@@ -417,6 +417,12 @@ fn handle_inner(
                     Some(entry) => {
                         let mut json = entry_full_json(&entry)?;
                         if let Some(obj) = json.as_object_mut() {
+                            // Party consent, with every signature re-verified
+                            // for this single entry.
+                            obj.insert(
+                                "parties".into(),
+                                parties_json(&entry, true).unwrap_or(serde_json::Value::Null),
+                            );
                             // This node's own note about where it first saw
                             // the entry. Not signed, not synced, not a
                             // ledger fact - labelled accordingly in the UI.
@@ -1160,6 +1166,38 @@ fn identity_chain_json(store: &Store, key: &str) -> Result<serde_json::Value, St
     }))
 }
 
+/// Party signatures carried inside a party-signed payload, if any.
+///
+/// `verified` is `Some(true/false)` when this call actually checked every
+/// signature, and `None` when it did not (list views stay cheap; the entry
+/// detail verifies). A listed party with `verified: false` is declared
+/// evidence a reader must not trust - which is exactly why the flag exists.
+fn parties_json(entry: &Entry, verify: bool) -> Option<serde_json::Value> {
+    let document = datu_core::parties::SignedDocument::from_payload(&entry.body.payload)?;
+    let checked = if verify { document.verify().ok() } else { None };
+    let parties: Vec<serde_json::Value> = document
+        .parties
+        .iter()
+        .map(|p| {
+            let ok = checked.as_ref().map(|roles| {
+                roles
+                    .iter()
+                    .any(|(role, key)| role == &p.role && key == &p.key)
+            });
+            serde_json::json!({
+                "role": p.role,
+                "key": p.key,
+                "verified": ok,
+            })
+        })
+        .collect();
+    Some(serde_json::json!({
+        "kind": document.kind,
+        "verified": checked.is_some(),
+        "parties": parties,
+    }))
+}
+
 fn entry_summary_json(store: &Store, entry: &Entry) -> Result<serde_json::Value, String> {
     let ns_seq = store
         .namespace_seq(&entry.body.author, &entry.body.namespace, entry.body.seq)
@@ -1174,6 +1212,10 @@ fn entry_summary_json(store: &Store, entry: &Entry) -> Result<serde_json::Value,
         "timestamp_ms": entry.body.timestamp_ms,
         "refs": entry.body.refs.iter().map(hex::encode).collect::<Vec<_>>(),
         "payload_preview": payload_preview(entry),
+        // Party signatures, when the payload is a party-signed document:
+        // declared here so the mesh can draw consent edges, verified in the
+        // entry detail (see `parties_json`).
+        "parties": parties_json(entry, false).unwrap_or(serde_json::Value::Null),
         // This node's own note: where it first saw the record. Never signed
         // and never served to peers - a local observation, not a ledger fact.
         "first_seen": entry
@@ -1454,7 +1496,7 @@ function hideEco(){document.getElementById('ecosphere').style.display='none';doc
 // ── ecosphere: every entry a node, every prev/ref a link in the mesh ─────
 const GENESIS_ID='37616bce5bfb8b773f7c99a9e52bcd7aa43294301ab074a908fbc9a334315d63';
 const REDUCED_MOTION=(typeof matchMedia==='function')&&matchMedia('(prefers-reduced-motion: reduce)').matches;
-let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'mesh',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null,neural:true,sprites:new Map(),pulses:[],ripples:[],lastT:0,lastAmbient:0,peers:[],showPeers:true,selfKey:null,peerViews:null,peerSig:null,peerHover:null};
+let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'mesh',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null,neural:true,sprites:new Map(),pulses:[],ripples:[],lastT:0,lastAmbient:0,peers:[],showPeers:true,consents:[],selfKey:null,peerViews:null,peerSig:null,peerHover:null};
 function fitCanvas(){const cv=document.getElementById('graph');if(!cv)return;
  // portrait phones get a taller canvas so the mesh has room; landscape and
  // desktop keep the wide hero
@@ -1479,6 +1521,21 @@ function buildMesh(entries,cap){
  for(const n of NET.nodes){let j=0;for(let i=0;i<8;i++)j=(j*33+(parseInt(n.id.substr(i*2,2),16)||0))%9973;
   const a=(n.h/360)*Math.PI*2+(j%64-32)*.02, r=110+(j%150);
   n.x=Math.cos(a)*r;n.y=Math.sin(a)*r}
+ // consent edges: a party-signed entry names other signers in its payload.
+ // Those signers are NOT authors of this entry - they never merged into it -
+ // so they stay in their own bubbles; the mesh only draws a dashed edge to
+ // the signer's own strand when that strand is in view. A signer with no
+ // entries has no bubble and appears only in the entry's facts, never as a
+ // phantom node.
+ NET.consents=[];
+ const latestByAuthor=new Map();
+ for(const n of NET.nodes){const prev=latestByAuthor.get(n.author);
+  if(!prev||n.seq>prev.seq)latestByAuthor.set(n.author,n)}
+ for(const e of use){const n=NET.byId.get(e.id);if(!n)continue;
+  const doc=e.parties&&e.parties.parties;if(!doc)continue;
+  for(const party of doc){if(!party||!party.key||party.key===e.author)continue;
+   const signer=latestByAuthor.get(party.key);if(!signer||signer===n)continue;
+   NET.consents.push({a:n,b:signer,role:party.role||''})}}
  const root=NET.byId.get(GENESIS_ID);if(root){root.x=0;root.y=0}
  NET.alpha=1;return entries.length>use.length}
 function simStep(){
@@ -1806,6 +1863,15 @@ function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;cons
   }else{
   ctx.strokeStyle=hot?'#58a6ff':((NET.mode==='bubbles'&&l.a.c&&l.b.c&&l.a.c!==l.b.c)?'#58a6ff3d':(NET.mode==='bubbles'?'#58a6ff4a':'#58a6ff26'));ctx.lineWidth=(hot?1.6:.8)/NET.zoom;
   ctx.beginPath();ctx.moveTo(l.a.x,l.a.y);ctx.lineTo(l.b.x,l.b.y);ctx.stroke()}
+ if(!strandMode&&NET.consents&&NET.consents.length){
+  // consent: dashed teal, no arrowhead (a signature is not a citation)
+  ctx.setLineDash([3/NET.zoom,5/NET.zoom]);
+  for(const c of NET.consents){
+   ctx.globalAlpha=(NET.focusNs&&c.a.ns!==NET.focusNs&&c.b.ns!==NET.focusNs)?.06:.28;
+   ctx.strokeStyle='#46d68c';
+   ctx.lineWidth=.7/NET.zoom;
+   ctx.beginPath();ctx.moveTo(c.a.x,c.a.y);ctx.lineTo(c.b.x,c.b.y);ctx.stroke()}
+  ctx.setLineDash([]);ctx.globalAlpha=1}
   // subtle arrowhead at the cited end: a child (a) points at its parent (b)
   const adx=l.b.x-l.a.x,ady=l.b.y-l.a.y,alen=Math.hypot(adx,ady)||1;
   if(alen*NET.zoom>16){const rb=(l.b.root?10:3+Math.min(l.b.deg,6)*.6)+4;
@@ -2392,6 +2458,18 @@ async function show(id){let e=await j('/v1/entry/'+id);if(e.error)e=await j('/v1
     facts.push('  key revoked directly by '+short(ch.revoked_by_key.by)+(ch.revoked_by_key.reason?(' - '+ch.revoked_by_key.reason):''));
   }
  }catch(_){}
+ // party consent: who else signed this exact document, and did it verify.
+ // A party is never rendered as an author: authorship is the strand.
+ try{
+  const full2=await j('/v1/entry/'+id);
+  const p=full2&&full2.parties;
+  if(p&&p.parties&&p.parties.length){
+   facts.push('consent: '+p.kind);
+   for(const a of p.parties){
+    const verdict=a.verified===true?'verified':(a.verified===false?'DOES NOT VERIFY':'declared, not checked');
+    facts.push('  '+a.role+' '+short(a.key)+' - '+verdict)}
+  }
+ }catch(_){}
  if(facts.length) d.textContent+=String.fromCharCode(10,10)+facts.join(String.fromCharCode(10));
  document.getElementById('modal').classList.add('open')}
 function closeModal(){document.getElementById('modal').classList.remove('open')}
@@ -2668,6 +2746,10 @@ mod tests {
         // Attestations view marks revoked statements.
         assert!(EXPLORER_HTML.contains("loadAttestations"));
         assert!(EXPLORER_HTML.contains("identity.attest"));
+        assert!(
+            EXPLORER_HTML.contains("NET.consents") && EXPLORER_HTML.contains("consent: "),
+            "the mesh draws party-consent edges and the detail names them"
+        );
     }
 
     /// The coverage-proof endpoint serves the same offline-verifiable
@@ -2856,6 +2938,58 @@ mod request_limit_tests {
     use super::*;
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
+
+    /// Party consent is exposed for the explorer: listed for the mesh (not
+    /// verified), verified in the entry detail, and a tampered document
+    /// reports parties whose signatures do not verify rather than vanishing.
+    #[test]
+    fn parties_json_lists_and_verifies_party_signatures() {
+        use datu_core::entry::EntryBody;
+        use datu_core::parties::SignedDocument;
+        let registrar = ed25519_dalek::SigningKey::from_bytes(&[31u8; 32]);
+        let holder = ed25519_dalek::SigningKey::from_bytes(&[32u8; 32]);
+        let mut doc = SignedDocument::new("gov.test", serde_json::json!({"parcel":"A-1"}));
+        doc.sign("registrar", &registrar, None).unwrap();
+        doc.sign("holder", &holder, None).unwrap();
+        let pq = datu_core::pq::keypair().unwrap().1;
+        let body = EntryBody {
+            version: datu_core::ENTRY_VERSION,
+            author: String::new(),
+            author_pq: String::new(),
+            pq_alg: String::new(),
+            namespace: "gov.test".into(),
+            seq: 0,
+            prev: None,
+            refs: vec![],
+            timestamp_ms: 1,
+            payload: doc.payload_bytes().unwrap(),
+        };
+        let entry = Entry::sign(body, &registrar, &pq).unwrap();
+
+        let declared = parties_json(&entry, false).unwrap();
+        assert_eq!(
+            declared["verified"], false,
+            "list view declares, does not verify"
+        );
+        assert_eq!(declared["parties"].as_array().unwrap().len(), 2);
+        assert!(declared["parties"][0]["verified"].is_null());
+
+        let checked = parties_json(&entry, true).unwrap();
+        assert_eq!(checked["verified"], true);
+        assert_eq!(checked["parties"][1]["role"], "holder");
+        assert_eq!(checked["parties"][1]["verified"], true);
+
+        // Tampering keeps the declared parties but marks them unverified.
+        let mut tampered = entry.clone();
+        tampered.body.payload = serde_json::to_vec(&serde_json::json!({
+            "v": 1, "kind": "gov.test", "doc": {"parcel": "B-2"},
+            "parties": doc.parties,
+        }))
+        .unwrap();
+        let bad = parties_json(&tampered, true).unwrap();
+        assert_eq!(bad["verified"], false);
+        assert_eq!(bad["parties"].as_array().unwrap().len(), 2);
+    }
 
     /// Every response carries the hardening headers; HTML allows the inline
     /// explorer script, JSON (data, not a document) does not.
