@@ -1476,7 +1476,7 @@ const EXPLORER_HTML: &str = r##"<!doctype html>
  <div id="ecostats" class="muted" style="margin:.6rem 0 0;font-size:.78rem"></div>
 </div>
 <div class="bar"><input id="q" placeholder="entry id (64 hex) or author (64 hex)"><button onclick="search()">load</button>
-<button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button> <button onclick="loadAttestations()">attestations</button> <button onclick="loadConflicts()">disputes</button> <button onclick="loadEcosystem();window.scrollTo({top:0,behavior:'smooth'})">ecosphere</button> <button id="neuralbtn" onclick="toggleNeural()">signals: on</button> <button id="peersbtn" onclick="togglePeers()">peers: on</button></div>
+<button onclick="loadEntries()">recent</button> <button onclick="loadWitnesses()">witnesses</button> <button onclick="loadAttestations()">attestations</button> <button onclick="loadConflicts()">disputes</button> <button onclick="loadEcosystem();window.scrollTo({top:0,behavior:'smooth'})">ecosphere</button> <button id="neuralbtn" onclick="toggleNeural()">signals: on</button> <button id="peersbtn" onclick="togglePeers()">peers: on</button> <button id="citizenbtn" onclick="toggleCitizens()">citizens: off</button></div>
 <div id="disputes"></div>
 <div id="governance"></div>
 <div class="tablewrap"><table id="rows"><tr><th>id</th><th>author</th><th>namespace</th><th>seq</th><th>payload</th></tr></table></div>
@@ -1496,7 +1496,7 @@ function hideEco(){document.getElementById('ecosphere').style.display='none';doc
 // ── ecosphere: every entry a node, every prev/ref a link in the mesh ─────
 const GENESIS_ID='37616bce5bfb8b773f7c99a9e52bcd7aa43294301ab074a908fbc9a334315d63';
 const REDUCED_MOTION=(typeof matchMedia==='function')&&matchMedia('(prefers-reduced-motion: reduce)').matches;
-let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'mesh',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null,neural:true,sprites:new Map(),pulses:[],ripples:[],lastT:0,lastAmbient:0,peers:[],showPeers:true,consents:[],selfKey:null,peerViews:null,peerSig:null,peerHover:null};
+let NET={nodes:[],byId:new Map(),links:[],clusters:[],alpha:0,mode:'mesh',pan:{x:0,y:0},zoom:1,drag:null,pinch:null,tapN:null,hover:null,sel:null,moved:0,wired:false,focusNs:null,pinNs:null,raf:0,sub:'bubbles',strand:null,camT:null,neural:true,sprites:new Map(),pulses:[],ripples:[],lastT:0,lastAmbient:0,peers:[],showPeers:true,consents:[],signersBy:new Map(),hollow:[],citizenView:false,selfKey:null,peerViews:null,peerSig:null,peerHover:null};
 function fitCanvas(){const cv=document.getElementById('graph');if(!cv)return;
  // portrait phones get a taller canvas so the mesh has room; landscape and
  // desktop keep the wide hero
@@ -1536,6 +1536,23 @@ function buildMesh(entries,cap){
   for(const party of doc){if(!party||!party.key||party.key===e.author)continue;
    const signer=latestByAuthor.get(party.key);if(!signer||signer===n)continue;
    NET.consents.push({a:n,b:signer,role:party.role||''})}}
+ // citizens: every key that signed as a party. A signer who also authors
+ // already has a strand; one who does not gets a hollow bubble of its own,
+ // labelled as consent, so a landowner is visible without pretending to
+ // own records they never published.
+ NET.signersBy=new Map();
+ for(const e of use){const doc=e.parties&&e.parties.parties;if(!doc)continue;
+  for(const party of doc){if(!party||!party.key||party.key===e.author)continue;
+   let sg=NET.signersBy.get(party.key);
+   if(!sg){sg={key:party.key,docs:[]};NET.signersBy.set(party.key,sg)}
+   sg.docs.push({id:e.id,ns:e.namespace||'',role:party.role||'',ts:e.timestamp_ms||0})}}
+ NET.hollow=[];
+ for(const sg of NET.signersBy.values()){
+  if(latestByAuthor.get(sg.key))continue;      // has a strand: a real bubble
+  let hash=0;for(const ch of sg.key)hash=(hash*31+ch.charCodeAt(0))%100003;
+  const ang=(hash%360)*Math.PI/180, rr=210+(hash%170);
+  NET.hollow.push({key:sg.key,count:sg.docs.length,docs:sg.docs,
+   cx:Math.cos(ang)*rr,cy:Math.sin(ang)*rr,R:13+Math.sqrt(sg.docs.length)*5,h:hash%360})}
  const root=NET.byId.get(GENESIS_ID);if(root){root.x=0;root.y=0}
  NET.alpha=1;return entries.length>use.length}
 function simStep(){
@@ -1872,6 +1889,23 @@ function drawMesh(){const cv=document.getElementById('graph');if(!cv)return;cons
    ctx.lineWidth=.7/NET.zoom;
    ctx.beginPath();ctx.moveTo(c.a.x,c.a.y);ctx.lineTo(c.b.x,c.b.y);ctx.stroke()}
   ctx.setLineDash([]);ctx.globalAlpha=1}
+ if(NET.mode==='bubbles'&&NET.citizenView&&NET.hollow.length){
+  // hollow bubbles: consent only, never authorship. Dashed rim, dashed
+  // link from each document they signed to this key.
+  ctx.setLineDash([4/NET.zoom,4/NET.zoom]);
+  for(const h of NET.hollow){
+   const hx=h.cx*NET.zoom+cv.width/2+NET.pan.x, hy=h.cy*NET.zoom+cv.height/2+NET.pan.y;
+   for(const doc of h.docs){const n=NET.byId.get(doc.id);if(!n)continue;
+    const sx=n.x*NET.zoom+cv.width/2+NET.pan.x, sy=n.y*NET.zoom+cv.height/2+NET.pan.y;
+    ctx.globalAlpha=.22;ctx.strokeStyle='#46d68c';ctx.lineWidth=.6/NET.zoom;
+    ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(hx,hy);ctx.stroke()}
+   ctx.globalAlpha=.55;ctx.strokeStyle='#46d68c';ctx.lineWidth=1/NET.zoom;
+   ctx.beginPath();ctx.arc(hx,hy,h.R*NET.zoom,0,7);ctx.stroke();
+   ctx.setLineDash([]);ctx.globalAlpha=.9;ctx.fillStyle='#9fe8c4';
+   ctx.font=(9/Math.sqrt(NET.zoom))+'px ui-monospace,Menlo,monospace';
+   ctx.fillText(short(h.key)+' · '+h.count+' signed',hx+ (h.R+4)*NET.zoom, hy+3);
+   ctx.setLineDash([4/NET.zoom,4/NET.zoom])}
+  ctx.setLineDash([]);ctx.globalAlpha=1}
   // subtle arrowhead at the cited end: a child (a) points at its parent (b)
   const adx=l.b.x-l.a.x,ady=l.b.y-l.a.y,alen=Math.hypot(adx,ady)||1;
   if(alen*NET.zoom>16){const rb=(l.b.root?10:3+Math.min(l.b.deg,6)*.6)+4;
@@ -2104,6 +2138,32 @@ function meshLoop(){if(NET.camT){const t=NET.camT;const e=Math.min(1,t.t+.045);t
   if(e>=1)NET.camT=null}
  simStep();drawMesh();NET.raf=requestAnimationFrame(meshLoop)}
 function wake(){if(!NET.raf)NET.raf=requestAnimationFrame(meshLoop)}
+function toggleCitizens(){NET.citizenView=!NET.citizenView;
+ const b=document.getElementById('citizenbtn');
+ if(b)b.textContent='citizens: '+(NET.citizenView?'on':'off');wake()}
+// A hollow bubble is a signer, not an author: show the documents they
+// signed, each linking to the full record, and say plainly that consent is
+// not authorship.
+function showCitizen(key){
+ const sg=NET.signersBy.get(key);
+ const box=document.getElementById('modalbody');
+ let rows='';
+ for(const d of (sg&&sg.docs)||[]){
+  rows+='<tr><td><a href="#" data-entry="'+d.id+'">'+short(d.id)+'</a></td>'+
+        '<td>'+esc(d.ns)+'</td><td>'+esc(d.role)+'</td>'+
+        '<td>'+(d.ts?new Date(d.ts).toISOString().slice(0,19).replace('T',' '):'')+'</td></tr>'}
+ document.getElementById('modaltitle').textContent='signer '+short(key)+' · consent, not authorship';
+ box.innerHTML='<p style="color:#93a3b8;margin:.2rem 0 .6rem;font-size:.8rem">This key signed the documents below. It holds no records of its own on this node, so it has no strand: signing is consent to an entry published by another key, not publishing one.</p>'+
+  '<table><thead><tr><th>document</th><th>namespace</th><th>role</th><th>signed</th></tr></thead><tbody>'+
+  (rows||'<tr><td colspan="4">no documents in view</td></tr>')+'</tbody></table>';
+ box.querySelectorAll('a[data-entry]').forEach(a=>{a.onclick=ev=>{ev.preventDefault();show(a.getAttribute('data-entry'))}});
+ document.getElementById('modal').classList.add('open')}
+function hollowAt(ev){if(!NET.citizenView||NET.mode!=='bubbles')return null;
+ const cv=document.getElementById('graph');const r=cv.getBoundingClientRect();
+ const px=(ev.clientX-r.left)*(cv.width/r.width),py=(ev.clientY-r.top)*(cv.height/r.height);
+ for(const h of NET.hollow){const hx=h.cx*NET.zoom+cv.width/2+NET.pan.x,hy=h.cy*NET.zoom+cv.height/2+NET.pan.y;
+  if(Math.hypot(hx-px,hy-py)<=h.R*NET.zoom+4)return h}
+ return null}
 function togglePeers(){NET.showPeers=!NET.showPeers;
  const b=document.getElementById('peersbtn');
  if(b)b.textContent='peers: '+(NET.showPeers?'on':'off');wake()}
@@ -2175,10 +2235,12 @@ function wireGraph(){if(NET.wired){wake();return}NET.wired=true;const cv=documen
     for(const n of d.c.nodes){n.x+=dx;n.y+=dy}}
    else{NET.pan.x=d.pan.x+(ev.clientX-d.pan.mx);NET.pan.y=d.pan.y+(ev.clientY-d.pan.my)}
    wake();return}
-  NET.hover=nodeAt(ev);NET.peerHover=peerAt(ev);
-  cv.style.cursor=(NET.hover||NET.peerHover)?'pointer':'grab';wake()};
+  NET.hover=nodeAt(ev);NET.peerHover=peerAt(ev);NET.hollowHover=hollowAt(ev);
+  cv.style.cursor=(NET.hover||NET.peerHover||NET.hollowHover)?'pointer':'grab';wake()};
  cv.onmouseleave=()=>{NET.hover=null;NET.peerHover=null;wake()};
- cv.onclick=ev=>{if(NET.moved>4)return;const n=nodeAt(ev);
+ cv.onclick=ev=>{if(NET.moved>4)return;const hb=hollowAt(ev);
+  if(hb){showCitizen(hb.key);return}
+  const n=nodeAt(ev);
   if(n){NET.sel=n;calloutFor(n);spawnBurst(n);wake()}else{NET.sel=null;document.getElementById('callout').style.display='none'}};
  cv.onwheel=ev=>{if(!ev.ctrlKey)return;ev.preventDefault();NET.userZoomed=true;const r=cv.getBoundingClientRect();
   const px=(ev.clientX-r.left)*(cv.width/r.width),py=(ev.clientY-r.top)*(cv.height/r.height);
@@ -2749,6 +2811,12 @@ mod tests {
         assert!(
             EXPLORER_HTML.contains("NET.consents") && EXPLORER_HTML.contains("consent: "),
             "the mesh draws party-consent edges and the detail names them"
+        );
+        assert!(
+            EXPLORER_HTML.contains("toggleCitizens")
+                && EXPLORER_HTML.contains("consent, not authorship")
+                && EXPLORER_HTML.contains("NET.hollow"),
+            "the citizens view gives signers a hollow bubble without faking authorship"
         );
     }
 
